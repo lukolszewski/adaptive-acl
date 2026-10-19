@@ -1,4 +1,4 @@
-# CLAUDE.md — permission-modes
+# CLAUDE.md — adaptive-acl
 
 Guidance for Claude Code in this repository.
 
