@@ -1,5 +1,5 @@
 /**
- * CC classify_result tool schema for auto-mode classifier (tool stage).
+ * The `classify_result` tool schema — how the classifier answers when it must answer in a tool call.
  */
 
 import { Type } from "@earendil-works/pi-ai"

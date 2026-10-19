@@ -34,11 +34,23 @@ export function setGlobalConfigPathForTests(p: string): void {
 	setConfigPath(p)
 }
 
+/**
+ * Where one project's state lives: `<cwd>/.pi/projects/<id>`.
+ *
+ * The id comes from `getProjectId()` and nowhere else — not from a git root, not
+ * from `process.cwd()`, not from a hash taken here. Every location the plugin
+ * reads or writes (both rule files, the grants journal, the plan file, the
+ * outside-write snapshots) is derived from this one call, so a project's rules,
+ * journal and snapshots always belong to the same id, and a `.pi/project.json`
+ * marker moves all of them at once. Re-deriving the id anywhere else resolves
+ * entities against a directory the user's rules were never written into.
+ */
 export function getProjectPermissionsDir(cwd: string): string {
 	const id = getProjectId(cwd)
 	return path.join(cwd, ".pi", "projects", id)
 }
 
+/** One call site, two files: `local` picks `permissions.local.json`. */
 export function getProjectPermissionsPath(
 	cwd: string,
 	local = false,

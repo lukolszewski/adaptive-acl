@@ -1,29 +1,25 @@
 {
-  "name": "@georgedong32/permission-modes",
-  "version": "2.7.0",
+  "name": "@lukolszewski/adaptive-acl",
+  "version": "2.8.0",
   "type": "module",
-  "description": "Claude-Code-style permission modes (ask / plan / auto) for the pi coding agent — with per-mode model profiles, outside-cwd write tracking, and per-mode skill filtering.",
+  "description": "Named permission modes for the pi coding agent — user-defined ask/allow/deny modes with per-mode model forwarding, a deterministic bash gate, outside-cwd write tracking and a cryptographic rule ledger.",
   "keywords": [
     "pi-package"
   ],
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/GeorgeDong32/pi-permission-modes.git"
+    "url": "git+https://github.com/lukolszewski/adaptive-acl.git"
   },
   "bugs": {
-    "url": "https://github.com/GeorgeDong32/pi-permission-modes/issues"
+    "url": "https://github.com/lukolszewski/adaptive-acl/issues"
   },
-  "homepage": "https://github.com/GeorgeDong32/pi-permission-modes#readme",
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
-  },
+  "homepage": "https://github.com/lukolszewski/adaptive-acl#readme",
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "node -e \"const pkg=require('./package.json'); if(!pkg.files||pkg.files.length===0){console.error('files field empty — abort');process.exit(1)}; console.log('Publishing '+pkg.name+'@'+pkg.version+' with files:', pkg.files)\"",
-    "pack:dry": "npm pack --dry-run"
+    "pack:dry": "npm pack --dry-run",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "pi": {
     "extensions": [
@@ -32,10 +28,17 @@
   },
   "files": [
     "*.ts",
+    "!*.test.ts",
+    "!vitest.config.ts",
+    "!vitest.setup.ts",
     "classifier-prompts/**",
+    "wasm/**",
     "README.md",
     "LICENSE"
   ],
+  "dependencies": {
+    "web-tree-sitter": "0.27.1"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
@@ -44,6 +47,8 @@
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2",
     "vitest": "^1.6.0"
   }
 }
