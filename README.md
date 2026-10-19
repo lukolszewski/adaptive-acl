@@ -1,6 +1,6 @@
 # @lukolszewski/adaptive-acl
 
-Permission modes for the [pi coding agent](https://github.com/earendil-works/pi). Four modes — **ask · plan · auto · bypass** — cycled with **Shift+Tab**, decide how every tool call gets approved. Auto mode answers most calls in code: a licensed bash grammar plus per-verb risk tables return *allow / ask / never* before any model is asked, and a model is consulted only for the call the tables cannot read (`bash-walker.ts`, `risk-policy.ts`, `bash-tiers.ts`). Approvals, undo snapshots and per-mode models live with the project that earned them.
+Permission modes for the [pi coding agent](https://github.com/earendil-works/pi). Four modes — **ask · plan · auto · bypass** — cycled with **Shift+Tab**, decide how every tool call gets approved. Auto mode answers most calls in code: a licensed bash grammar plus per-verb risk tables return *allow / ask / never* before any model is asked, and a model is consulted only for the call the tables cannot read (`bash-walker.ts`, `risk-policy.ts`, `bash-tiers.ts`). Approvals and undo snapshots are stored per project (`<cwd>/.pi/projects/<id>/`, `permissions-loader.ts:48`); the model a mode switches to comes from one global profile file.
 
 A fork of upstream `pi-permission-modes` 2.7.0 — see [Origin and licence](#origin-and-licence). Installed from GitHub, not from npm.
 
@@ -21,7 +21,7 @@ Everything else is a modifier on that one line, and the forms are pi's own — s
 | SSH, `git@`, or HTTPS spellings | `git:git@github.com:<user>/<repo>`, `ssh://git@github.com:<user>/<repo>`, `https://github.com/<user>/<repo>` |
 | Remove it | `pi remove <source>` |
 
-Installs land in `~/.pi/agent/git/`.
+Installs land in pi's own clone directory, `~/.pi/agent/git/` (`.pi/git/` with `-l`).
 
 The one runtime dependency is `web-tree-sitter`; the grammar itself is not a dependency — it ships as `wasm/tree-sitter-bash.wasm` beside its MIT notice so no native build runs during install (`bash-parser.ts`). Pi installs git packages with `npm install --omit=dev`, which is why the dependency has to be (and is) under `dependencies`. If the grammar cannot be loaded the parser stays uninitialised, every command comes back refused with a named reason, and the gate asks a person instead of guessing (`bash-parser.ts`).
 
@@ -29,28 +29,28 @@ Working on it from a checkout:
 
 ```bash
 pi -e ./index.ts          # load without installing
-/reload                   # hot-reload after an edit
+/reload                   # pi's own reload command, after an edit
 npm test                  # vitest
 ```
 
-Auto-discovery also works: put the checkout at `~/.pi/agent/extensions/adaptive-acl/` (global) or `.pi/extensions/adaptive-acl/` (project) and pi loads `index.ts` from that subdirectory; run `npm install` inside it first, because the gate needs `web-tree-sitter`. Project-local locations load only once the project is trusted.
+pi's auto-discovery works too — its `docs/extensions.md` lists `~/.pi/agent/extensions/*/index.ts` (global) and `.pi/extensions/*/index.ts` (project-local) — so put the checkout at `~/.pi/agent/extensions/adaptive-acl/` or `.pi/extensions/adaptive-acl/` and pi loads `index.ts` from that subdirectory; run `npm install` inside it first, because the gate needs `web-tree-sitter`. Project-local locations load only once the project is trusted.
 
 ## Modes
 
 | Mode | edit / write | read outside cwd | bash |
 |---|---|---|---|
-| **ask** `●` | prompt: Allow / Allow always (this project, global) / Allow all (enable bypass) / Block | prompt, unless a rule or a grant already covers it — a grant is recorded for that exact file, never its folder | read-only commands run free, anything else prompts |
+| **ask** `●` | prompt: Allow / Allow always (this project, global) / Allow all (enable bypass) / Block (`index.ts:3254`) | prompt, unless a rule or a prior grant covers it; a plain Allow remembers that exact file, never its directory, and a secret-classified path only ever accepts a grant naming that exact path (`index.ts:3214`, `index.ts:3234`) | read-only commands run free, anything else prompts |
 | **plan** `⏸` | only the plan file at `.pi/projects/<id>/plan.md` | allowed | read-only commands only |
 | **auto** `▶` | decided by the gate below | decided by the gate | decided by the gate |
 | **bypass** `⚡` | everything, with outside-cwd writes snapshotted for undo | auto | auto |
 
-Cycle (Shift+Tab): ask → plan → auto → bypass → ask. `--permission-mode <name>` picks the starting mode (`default` is accepted as `ask`).
+Cycle (Shift+Tab): ask → plan → auto → bypass → ask — the order is `MODE_CYCLE` (`index.ts:238`), and the same four names are registered as commands by the loop at `index.ts:1751`. `--permission-mode <name>` picks the starting mode (`default` is accepted as `ask`, `index.ts:3000`).
 
 Permission rules — **deny → ask → allow** — are evaluated before the mode gate for every mode except bypass, so a `deny` rule cannot be argued past and an `ask` rule can force a prompt back onto something layer 0 would allow (`index.ts:3040`, `index.ts:3049`, `permissions.ts`).
 
 Entering auto mode removes broad bash allow rules (`Bash`, `Bash(*)`, `git:*`, `python *`, …) from the merged set for as long as the mode lasts, because such a rule short-circuits the gate before anything reasons about the command; a rule that pins a subcommand (`npm run test`, `git status`) stays in force (`dangerous-permissions.ts`).
 
-When there is no interactive UI (`pi -p`, `--mode json`), anything that would prompt is **blocked**, never silently allowed.
+When there is no interactive UI — pi's own `-p`/`--print` and `--mode json` — anything that would prompt is **blocked** with the reason, never silently allowed (`index.ts:602`). The one exception is `plan_ready`: with no UI it reports the plan and lets the run go on executing it (`index.ts:2584`).
 
 ### Headless and subagent sessions
 
@@ -60,17 +60,17 @@ When there is no interactive UI (`pi -p`, `--mode json`), anything that would pr
 
 ## Auto-mode gate
 
-Every auto-mode call goes through three layers. The design and the acceptance data are in the repository: [docs/CLASSIFIER-SPEC.md](docs/CLASSIFIER-SPEC.md) and [docs/LAYER0-WALKER-SPEC.md](docs/LAYER0-WALKER-SPEC.md).
+Every auto-mode call goes through three layers. The design of each is written down in the repository: [docs/CLASSIFIER-SPEC.md](docs/CLASSIFIER-SPEC.md) and [docs/LAYER0-WALKER-SPEC.md](docs/LAYER0-WALKER-SPEC.md), and the walker's acceptance data is the `bash-walker.golden.jsonl` pinned by a test.
 
-1. **Layer 0 — deterministic policy** (`risk-policy.ts`, `bash-tiers.ts`). `evaluateToolCall()` classifies file tools by path (`risk-paths.ts` separates project / outside / secret / device); `evaluateBash()` (`risk-policy.ts:484`) parses `bash` with tree-sitter-bash through `web-tree-sitter`, walked under a written spec: the walker returns an argument list only when every word is provably literal and otherwise returns `unknown` with a named reason (`bash-walker.ts`, `bash-walker-values.ts`). Reads, project writes, builds/tests and local git come back **allow**; recursive deletes, sudo, system packages, pushes, listeners, uploads, cluster/db mutations come back **ask** with an entity; wiping protected paths, device writes, reboot, firewall teardown, credential exfiltration, `DROP DATABASE` come back **never** — not pre-authorisable by a rule or a grant. Per-verb risk tables live in `risk-handlers.ts`, path classification in `risk-paths.ts`, and the whole walker is pinned by `bash-walker.golden.jsonl`.
-2. **Authorisation for `ask`** — permission rules, then prompt-once **session grants** keyed `{category, entity}` (approving `docker rmi api:dev` never covers `payments:prod`, `session-grants.ts`), then the **authorisation ledger**: a whole-session memory of what the user granted or withdrew, folded from one verified extraction per user message, newest-first backfill that is safe while incomplete, explicit revocations that a re-extraction cannot walk back in (`auth-ledger.ts`, `ledger-render.ts`). As a last fallback, a small model extracts what the user allowed or forbade from the recent window (`json_schema`, temp 0) and code verifies it: verbatim quote, whole-token entity match (`db-backup` ≠ `db-backup-test`), forbidden-target veto, revocation (`model-client.ts`, `grant-verify.ts`). A model can narrow a decision, never widen it.
+1. **Layer 0 — deterministic policy** (`risk-policy.ts`, `bash-tiers.ts`). `evaluateToolCall()` classifies file tools by path (`risk-paths.ts` separates project / outside / secret / device); `evaluateBash()` (`risk-policy.ts:484`) parses `bash` with tree-sitter-bash through `web-tree-sitter`, walked under a written spec: the walker returns an argument list only when every word is provably literal and otherwise returns `unknown` with a named reason (`bash-walker.ts`, `bash-walker-values.ts`). Reads, project writes, builds/tests and local git come back **allow**; recursive deletes, sudo, system packages, pushes, listeners, uploads, cluster/db mutations come back **ask** with an entity; wiping protected paths, device writes, reboot, firewall teardown, credential exfiltration, `DROP DATABASE` come back **never**, which the gate returns as `prompt-never` without ever consulting a grant: it needs a person, and the always-options are withheld on that verdict, so nothing you click makes it pre-authorisable (`gate.ts:43`, `gate.ts:240`, `index.ts:1126`). What *can* still reach a `never` call is a rule you wrote yourself — rules are evaluated before the gate and an `allow` short-circuits it (`index.ts:3049`) — which is why the broad bash rules are pulled out of auto mode (next section). Per-verb risk tables live in `risk-handlers.ts`, path classification in `risk-paths.ts`, and the whole walker is pinned by `bash-walker.golden.jsonl`.
+2. **Authorisation for `ask`** — prompt-once **session grants** keyed `{category, entity}` (approving `docker rmi api:dev` never covers `payments:prod`, `session-grants.ts`), then the **authorisation ledger**: a whole-session memory of what the user granted or withdrew, folded from one verified extraction per user message, newest-first backfill that is safe while incomplete, explicit revocations that a re-extraction cannot walk back in (`gate.ts:246`, `gate.ts:261`, `auth-ledger.ts`, `ledger-render.ts`). As a last fallback, a small model extracts what the user allowed or forbade from the recent window — one `json_schema` request at `temperature: 0`, which is omitted for Copilot because that endpoint rejects the parameter (`model-client.ts:205`) — and code verifies it: verbatim quote, whole-token entity match (`db-backup` ≠ `db-backup-test`), forbidden-target veto, revocation (`model-client.ts`, `grant-verify.ts`). A model can narrow a decision, never widen it.
 3. **Effect classification** for what the tables cannot read — inline `python -c`, an unknown binary — asked as one schema-constrained question and mapped back onto the tiers.
 
 If the user says *"don't change anything"* / *"read-only"*, the gate enters a read-only posture: `ask`/`unknown` *mutations* are refused with a reason while reads, project writes and `/tmp` writes proceed. It is a default, not a veto — rules, grants and anything the user explicitly authorised are checked first, so "now write to `dist/`" still works while it is active and "you can make changes now" lifts it. A grant over a *folder* covers the files inside it instead of one approval per file (`auth-ledger.ts`, `grant-verify.ts`).
 
 A malformed command (unterminated quote, heredoc, `$( )`) is reported rather than chopped into garbage segments: the gate refuses it and returns a *rewrite it and retry* message to the agent — no prompt, no model call — with a small budget that escalates to a prompt, or to a parked step when unattended (`risk-policy.ts:639`, `bash-ast.ts`, `index.ts:1032`).
 
-Any classifier failure falls closed to a prompt and is named as *classifier unavailable — \<cause\>*, never as a refusal and never as a verdict (`classifier-messages.ts`, `gate-bridge.ts`). `/classifier-status` prints this session's counters (eligible / called / ok / failed / no-endpoint); `/classifier-status reset` clears them.
+Any classifier failure falls closed to a prompt (`gate.ts:201`) and is named for what happened — `classifier unavailable (<cause>) — it could not be asked, so there is no verdict to act on` — never as a refusal and never as a verdict (`classifier-messages.ts:67`). `/classifier-status` prints this session's counters (eligible / called / ok / failed / no-endpoint); `/classifier-status reset` clears them.
 
 What an *ask* prompt offers: **Allow** once, **Allow for session: \<entity\>** for exactly the entities the gate named (or a scope, when the gate named one), **Allow always (this folder / this project / global)** where a rule can express the approval without widening it, and **Block**. On a `never` verdict the always-options are absent — nothing you click there makes it pre-authorisable (`index.ts:1125`).
 
@@ -104,7 +104,7 @@ What an *ask* prompt offers: **Allow** once, **Allow for session: \<entity\>** f
 | `baseUrl` / `modelId` | unset | Direct OpenAI-compatible endpoint, bypassing the registry; needs `response_format: json_schema` support. `baseUrl` outranks the Copilot block. |
 | `timeoutMs` | `15000` | Per call. |
 | `stage` | `"tool"` | `tool` answers as a forced `classify_result` tool call (`classifier-tool.ts`); `single`, `fast`, `both`, `thinking` are the text stages (`classifier-client.ts`). A `provider/id@stage` suffix overrides it per call. |
-| `failClosed` | `true` | A classifier error denies rather than falling back to local heuristics. |
+| `failClosed` | `true` | On the legacy engine: a classifier error denies instead of falling back to the local heuristics (`index.ts:1226`). The gate engine does not read this key — a failure there always lands as a prompt. |
 | `includeAgentsMd` | `true` | Put `AGENTS.md` / `CLAUDE.md` in the classifier context. |
 | `jsonlTranscript` | `false` | One JSON object per transcript block instead of `User:` / `bash cmd` lines. |
 | `ledger` / `ledgerBackfillLimit` | `true` / `400` | Turn the ledger off; cap how many of the newest user messages are ever extracted. |
@@ -158,7 +158,7 @@ Claude-Code-style `Tool` / `Tool(specifier)` rules. Scopes merge; evaluation is 
 |---|---|
 | Global | `~/.pi/agent/permission-modes.json` → `permissions` block |
 | Project (shareable) | `<cwd>/.pi/projects/<id>/permissions.json` |
-| Project local | `<cwd>/.pi/projects/<id>/permissions.local.json` — created for you, added to `.gitignore` automatically (`permissions-loader.ts`) |
+| Project local | `<cwd>/.pi/projects/<id>/permissions.local.json` — the file an "Allow always (this project)" click writes; created for you, and pi only ever *tips* you to add it to `.gitignore`, it never edits that file (`permissions-loader.ts:199`, `permissions-loader.ts:212`, called at `index.ts:524`) |
 
 ```json
 {
@@ -172,22 +172,22 @@ Claude-Code-style `Tool` / `Tool(specifier)` rules. Scopes merge; evaluation is 
 
 The `ask` list is the way to put a prompt back on something layer 0 considers ordinary project source: an `ask` rule is evaluated before the mode gate. `/permissions` prints the merged set grouped deny / ask / allow, every rule tagged with the scope it came from — `global`, `project`, `local` (`permissions.ts:426`).
 
-**What "Allow always" stores.** Before you click, the prompt shows exactly what would be written, and withholds the offer when it cannot be honoured (runtime variables, shell control flow) rather than storing something wider than your approval. *This project* and *this folder* go to the project's `permissions.json`, *global* to the `permissions` block above. Folder scope (`Edit(./deploy/systemd/**)`) is offered only where a `**` rule would actually match — never on a secret-classified path, where it would be stored dead (`index.ts:680`, `permissions.ts`).
+**What "Allow always" stores.** Before you click, the prompt shows exactly what would be written, and withholds the offer when it cannot be honoured (runtime variables, shell control flow) rather than storing something wider than your approval (`index.ts:650`). *This project* and *this folder* both go to the project-local `permissions.local.json` — the notification says "project local" for that reason; *global* is the only click that writes the `permissions` block above (`index.ts:498`, `permissions-loader.ts:178-190`, `index.ts:531`). Folder scope (`Edit(./deploy/systemd/**)`) is offered only where a `**` rule would actually match — never on a secret-classified path, where it would be stored dead (`index.ts:680`, `permissions.ts`).
 
 ## Grants, ledger, `/grants`
 
-What you *said* is remembered here: rows `{category, value, kind}` extracted from your own messages, verified before they count, exported per project so the next session starts knowing them. Default file: `<cwd>/.pi/projects/<id>/grants.json` — per project, so one project's authority cannot leak into another (`index.ts:1991`, `grants-file.ts`). A click on "Allow always" writes a rule file instead, not a row here — see [`authority.persist`](#other-config-keys).
+What you *said* is remembered here: rows `{category, value, kind}` extracted from your own messages, verified before they count, exported per project so the next session starts knowing them. Default file: `<cwd>/.pi/projects/<id>/grants.json` — per project, so one project's authority cannot leak into another (`index.ts:1991`, `grants-file.ts`). A click on "Allow always" writes a rule file instead, not a row here, unless a config layer explicitly chose otherwise — see [`authority.persist`](#other-config-keys) (`index.ts:461`).
 
 ```
 /grants                                  list, with copyable values
 /grants revoke <value>                   take one back — by value, not by list index, which re-orders
 /grants clear                            drop every session grant
 /grants export [path] / import <path> [--replace] [--yes]
-/grants auto on|off | auto path <p>      auto-import a journal at session start (merge, never replace)
+/grants auto on|off | auto path <p>      two-way sync with a journal: merge at session start, mirror every later change back out
 /grants adopt / adopt confirm <id>       take over grants orphaned by a moved or renamed checkout
 ```
 
-Imported rows are background authority: what you say in this session outranks them, a headless session never takes authority from a file silently, and a revocation is stored as a row rather than a deletion so a re-extraction cannot walk a revoked grant back in (`grants-file.ts`, `grants-adopt.ts`, `auth-ledger.ts`). The same file backs `grantsAutoImport` in the config:
+Imported rows are background authority: what you say in this session outranks them, a headless session never takes authority from a file silently, and a revocation is stored as a row rather than a deletion so a re-extraction cannot walk a revoked grant back in (`grants-file.ts`, `grants-adopt.ts`, `index.ts:2203`). The same file backs `grantsAutoImport` in the config — `/grants auto` is how you set it without editing JSON (`index.ts:2237`), and with it on, every ledger change is *merged* into that path, not overwritten, so a second session's rows survive (`index.ts:845`):
 
 ```json
 { "grantsAutoImport": { "enabled": true, "path": "~/.pi/agent/grants.json" } }
@@ -216,20 +216,21 @@ Imported rows are background authority: what you say in this session outranks th
 |---|---|
 | `model` | `"provider/model"` or `"provider/model:effort"`. Applied with `pi.setModel()` on every mode change. |
 | `effort` | `off` \| `minimal` \| `low` \| `medium` \| `high` \| `xhigh`; wins over a `:suffix`, defaults to `medium`. Applied with `pi.setThinkingLevel()`; a level the model clamps away is skipped with a warning. |
-| `skills` | Skill allowlist for the mode; `["*"]` or omitted means all. Filtering strips the disallowed skill blocks from the prompt, so `/skill:name` still works (`utils.ts` `filterSkillsFromPrompt`). |
-| `tools` | Tool allowlist; `read` is always re-added, and `resolveToolFilter()` is still a stub — full tool filtering is not wired into `tool_call` yet. |
+| `skills` | Skill allowlist for the mode; `["*"]` or omitted means all. Filtering strips the disallowed skills' XML blocks out of the system prompt string (`utils.ts` `filterSkillsFromPrompt`, applied at `index.ts:3379`). |
+| `tools` | Tool allowlist as declared by `resolveToolFilter()`, which re-adds `read` (`profiles.ts:347`) — and which nothing in the extension calls, so `tools` has no effect on the tool list today. |
 
-Resolution: active profile → `default` profile → defaults (`["*"]`). Nothing is required: **with no profile active the extension never touches your model.** If the file is missing it is created on first use, pre-filled from `~/.pi/agent/settings.json` when it can. It is a separate file because pi uses `~/.pi/agent/models.json` for custom provider definitions, and two formats in one path is a conflict.
+Resolution: active profile → `default` profile → defaults (`["*"]`). A mode with no entry keeps the model it is already on, and the thinking level is only touched once a model was actually set (`index.ts:1425`, `index.ts:1444`, `index.ts:1462`). One thing to know before you rely on that: the file is created for you on session start when it is missing, pre-filled from `~/.pi/agent/settings.json`'s `defaultProvider`/`defaultModel` (`profiles.ts:136-166`), and once it exists its `active` (or `default`) profile is adopted on the first mode switch without asking — so that switch sets the pre-filled model, which is not necessarily the one you had picked (`index.ts:1404-1411`). It is a separate file because pi uses `~/.pi/agent/models.json` for custom provider definitions (pi's `README.md`), and two formats in one path is a conflict.
 
 ## Other config keys
 
-Same file, `~/.pi/agent/permission-modes.json`. Read by `config.ts`; unparseable or unreadable is `{}` plus one warning, never a throw (`loadPermissionModesConfig`), and a write that would clobber a hand-edited file aborts instead (`updatePermissionModesConfig`).
+Same file, `~/.pi/agent/permission-modes.json`. Read by `config.ts`; unparseable or unreadable is `{}` plus one warning, never a throw (`loadPermissionModesConfig`). A command that changes one key re-reads the file, mutates, and replaces it through a temp file + rename; if the file cannot be parsed it writes nothing and says so, so a hand-edited file is never silently overwritten by a command handler (`updatePermissionModesConfig`, `config.ts:490`).
 
 | Key | Default | Effect |
 |---|---|---|
 | `classifier` | see above | The gate's model transport. |
 | `permissions` | — | Global allow/deny/ask rules. |
-| `autoMode` | built-in template | Extra bullets injected into the classifier prompt: `allow`, `soft_deny`, `environment` (each `string[]`). `allow` entries can short-circuit to allow — but only for a command layer 0 already recognises as workflow bash; `soft_deny` entries force a prompt (`classifier-prompt.ts`, `index.ts:3101`). |
+| `autoMode` | shipped prompt | Extra bullets merged into the classifier system prompt's three blocks: `allow`, `soft_deny`, `environment` (each `string[]`; template files `classifier-prompts/auto_mode_system_prompt.txt` + `permissions_external.txt`, merged at `classifier-prompt.ts:162`). `allow` entries can short-circuit to allow — but only for a command layer 0 already recognises as workflow bash (`index.ts:3101`, `index.ts:3106`); `soft_deny` entries force a prompt (`index.ts:3111`). |
+| `grantsAutoImport` | off | `{ enabled, path }`: sync the grants journal at `path` with the live ledger — merged in at session start, mirrored back out on every change. Set by `/grants auto` (`config.ts:286`, `index.ts:845`). |
 | `injectionWarning` | `true` | Standing tool-output injection note in auto/bypass. `/injection-note` toggles it live. |
 | `injectionEscalation` | `true` | The stronger, probe-triggered warning when a recent tool output matches an injection pattern. Independent of the standing note, so turning that off does not disarm a real hit (`injection-probe.ts`). |
 | `messages` | — | Predefined messages for `/msg`, e.g. `{"push": "Commit the current work and push the branch."}`. |
@@ -239,7 +240,7 @@ Same file, `~/.pi/agent/permission-modes.json`. Read by `config.ts`; unparseable
 
 | Kind | Name | Behavior |
 |---|---|---|
-| Command | `/ask` `/plan` `/auto` `/bypass` | switch mode |
+| Command | `/ask` `/plan` `/auto` `/bypass` | switch mode — the four names come from the loop at `index.ts:1751` |
 | Command | `/mode [name]` | set the named mode (`default` → `ask`) or pick from a list |
 | Command | `/plan-execute` | execute the current plan now (switches to auto with step tracking) |
 | Command | `/permissions` | list the merged allow/deny/ask rules, each tagged with its scope |
@@ -271,7 +272,7 @@ The agent explores read-only and writes `.pi/projects/<id>/plan.md`, then calls 
 
 ## UI
 
-The footer is the status line: line 1 shows `cwd (git-branch)`, context usage as `42k/200k 21.0%` (`M` for millions), and the model as `name • thinking-level` prefixed with `profile:<name> · ` when a profile is active; line 2 shows the mode, e.g. `⏸ Plan (shift+tab)` (ask muted, plan accent, auto warning, bypass error). Narrow terminals reflow to two truncated lines instead of dropping fields (`index.ts:1510`). While the agent streams, the working line shows live token / tok-s / cost / context figures computed incrementally over the current branch (`branch-stats.ts`). Mode, unattended flag, depth and active profile persist across `/reload`, session resume and branch switches (`index.ts` `appendEntry("modes", …)`).
+The footer is the status line: line 1 shows `cwd (git-branch)`, context usage as `42k/200k 21.0%` (`M` for millions), and the model as `name • thinking-level` prefixed with `profile:<name> · ` when a profile is active; line 2 shows the mode, e.g. `⏸ Plan (shift+tab)` (ask muted, plan accent, auto warning, bypass error). Narrow terminals reflow to two truncated lines instead of dropping fields (`index.ts:1510`). While the agent streams, the working line shows live token / tok-s / cost / context figures computed incrementally over the current branch (`branch-stats.ts`). Mode, unattended flag, plan phase and active profile are written as one `modes` session entry (`index.ts:372`) and read back on `session_start` / `session_tree` (`index.ts:3624`, `index.ts:3868`), so they survive pi's own `/reload`, resume and branch switches.
 
 ## Testing
 
@@ -298,6 +299,7 @@ shell-lexer.ts            the older hand-written lexer — runs escalation-only:
 classifier-client.ts      classifier transports, stages, ref parsing
 model-client.ts           schema-constrained extraction + transcript authorisation
 classifier-prompt.ts      the prompt, with the ruleset it must reason over
+classifier-prompts/       the two prompt files the autoMode keys merge into (classifier-prompt.ts:12)
 gate.ts / gate-bridge.ts  the pipeline and its endpoint resolution
 auth-ledger.ts            whole-session grant/forbid memory, revocations, backfill
 session-grants.ts         prompt-once {category, entity} grants + revocation rows
