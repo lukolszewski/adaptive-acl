@@ -328,7 +328,7 @@ describe("a soft-deny with a human present", () => {
 
 describe("the genuinely unattended ladder is pinned byte-for-byte", () => {
 	// Byte-identical on purpose: this guidance is what an agent with nobody to ask actually reads, and a
-	// change here must be a decision, not a side effect. The ask rungs were rewritten in W19 because they
+	// change here must be a decision, not a side effect. The ask rungs were rewritten because they
 	// sent the agent to `request_user_permission` — a tool this extension never registers, with a 10-minute
 	// wait nothing was authoritative for. See the doc comment on `unattendedEscalation` for what a session
 	// can and cannot do, and `deny-messages.test.ts` for the check that keeps text and registration agreed.
@@ -502,7 +502,7 @@ describe("strings the one-sided-assertion audit found unasserted, now pinned", (
 	// never been asserted anywhere. The same audit run over the denial/escalation vocabulary found
 	// three strings that existed with no test anywhere proving they are ever said. The remaining
 	// findings (26 of the 28 DENIAL_GUIDANCE entries have at least one half never asserted) are
-	// listed in RESULT.md rather than pinned here: pinning every guidance line is a decision about
+	// reported rather than pinned here: pinning every guidance line is a decision about
 	// wording, not a defect fix.
 	it("the never-tier prompt label warns loudly", () => {
 		const label = gatePromptLabel(gateResult({ tier: "never", description: "overwrite the disk", targets: ["/dev/sda"] }))
@@ -815,10 +815,10 @@ describe("a ledger denial names the row that refused, in terms a person can act 
 		expect(lever.startsWith("clear it:")).toBe(true)
 		expect(lever).toContain("/srv/reports/")
 		expect(lever).toContain("/grants clear")
-		// Until D29 this line could only warn that `/grants revoke` would NOT help, because the command walked
+		// This line used to warn that `/grants revoke` would NOT help, because the command walked
 		// grants and left forbids alone. It now lifts forbid rows too (and tombstones them, so re-reading the
 		// sentence cannot restore them), so the row's own value is offered as a command that really works —
-		// which is the swap W50 predicted here: "If index.ts ever revokes forbid rows, this pin is the one to change."
+		// which is the swap this pin anticipated: "If index.ts ever revokes forbid rows, this pin is the one to change."
 		expect(lever).toContain("/grants revoke /srv/reports/")
 		expect(lever).toContain("lifts this forbid too")
 		expect(lever).not.toContain("it cannot lift a forbid")
@@ -1150,13 +1150,13 @@ describe("the tool_call hook carries the attribution to the user", () => {
 })
 
 /**
- * D54 defect 1: advice must match the cause.
+ * Defect 1: advice must match the cause.
  *
  * A command was denied for one parameter expansion and told, two lines lower, to rewrite it "without brace groups
  * or nested quoting". `DENIAL_GUIDANCE` is keyed by category, so `unproven_structure` printed one fixed sentence
  * whatever the analyzer had actually found — while the analyzer had put the real construct (`variable-expansion`,
- * `loop-body`, `brace-group`, `command-substitution`) in the segment description the whole time. The A/B run in
- * docs/DECISIONS-D54-*.md shows the verdicts are unchanged, so what is fixed here is only the advice.
+ * `loop-body`, `brace-group`, `command-substitution`) in the segment description the whole time. Only the advice
+ * changed, so the cases below assert the sentence the denial prints, not the verdict behind it.
  *
  * Every case below is the real pipeline: the real layer-0 analyzer over a real command, the real gate, the real
  * renderer. Nothing here hand-writes a description, because a hand-written one proves the table and not the wiring.
@@ -1228,7 +1228,7 @@ describe("D54 — the guidance names the construct the analyzer reported", () =>
 })
 
 /**
- * D54 defect 2: an analysis bail must not borrow authority framing.
+ * Defect 2: an analysis bail must not borrow authority framing.
  *
  * The sequence that produced the defect: layer 0 bailed on the shape, the effect model was asked BECAUSE of that
  * bail and guessed `write_outside` for a command nobody could parse, and the guessed category then decided the wall

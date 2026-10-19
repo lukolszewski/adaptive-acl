@@ -751,7 +751,7 @@ function ruleForWords(words: string[], redirects: readonly AstRedirect[], genera
  *     for classification and blind here, so `Bash(git status:*)` would carry
  *     `LD_PRELOAD=/tmp/e.so git status` — the same refusal `legSpellings` makes.
  *
- * A file redirect is NOT in this list, and that is the whole of W10. It used to be: coverage compared
+ * A file redirect is NOT in this list, and that is the deliberate exception. It used to be: coverage compared
  * argv, so the only rule that would cover `echo hi > /tmp/out.txt` was `Bash(echo hi)`, which covers
  * `echo hi > anywhere`. A specifier can name the target now (`{@link spellTarget}`), so the write is
  * described instead of dropped — and `ruleForLeg` writes it as an exact rule, because a rule that names

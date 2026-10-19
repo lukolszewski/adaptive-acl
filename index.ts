@@ -121,7 +121,7 @@ import {
 } from "./utils.ts";
 // Tier 1 AND tier 2 bash verdicts now come from layer 0 (`bash-tiers.ts`) rather than utils' text tables. The old
 // ladder anchored SAFE_PATTERNS on the command name, so `cat ~/.ssh/id_rsa` counted as tier-1 "safe" and plan/ask
-// mode auto-approved reading a private key with no prompt — measured in work.log 2026-10-14 (W11); the walker calls
+// mode auto-approved reading a private key with no prompt — measured 2026-10-14; the walker calls
 // that path read_secret and asks. utils.ts still exports the old tables (used by its own tests and by the tier
 // matrix harness) but nothing on the gate path calls them any more.
 import {
@@ -167,7 +167,7 @@ import {
 	unattendedEscalation,
 	UNATTENDED_PARK_AFTER_HUMAN_DENIAL,
 	// `denialWall`, not `wallFor`: when layer 0 bailed on the shape, `r.category` is the effect model's guess about
-	// a command nobody parsed, and a guess must not decide which wall the denial is framed as (D54).
+	// a command nobody parsed, and a guess must not decide which wall the denial is framed as.
 	denialWall,
 	gatePromptLabel,
 	resolveGateEndpointWithFailure,
@@ -252,7 +252,7 @@ const PLAN_DISABLED = new Set<string>();
 type Block = { block: true; reason: string } | undefined;
 
 /**
- * Cross-extension capability object (plan B7): the single typed channel to
+ * Cross-extension capability object: the single typed channel to
  * pi-claude-code-tui — globalThis.__piPermissionModes. Duck-typed on both
  * sides; version gates consumers.
  */
@@ -337,7 +337,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
   function reloadMergedPermissionRules(cwd: string): void {
     basePermissionRules = loadMergedPermissionRules(cwd);
     applyAutoModePermissionStrip();
-    // Memoized verdicts may depend on the old rules — drop them (plan A5).
+    // Memoized verdicts may depend on the old rules — drop them.
     invalidateClassifierVerdictCache();
   }
 
@@ -412,7 +412,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
    * outside-write tracking on EVERY allow path, compliance-inject on block.
    * The three approval flows (interactive select, ask-mode inline select,
    * forwarded-parent responder) used to duplicate this and had diverged —
-   * the ask flow dropped write tracking and notifications (plan B2).
+   * the ask flow dropped write tracking and notifications.
    * Options narrow execution for the forwarding paths:
    * - ruleCwd: parent responder persists rules against the child's cwd
    * - persistRules:false when the other side already persisted (child poll)
@@ -456,7 +456,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       // Journal-backed authority — the zero-rule-file policy. Two conditions, deliberately: the setting must say
       // "grants" AND a layer must have actually said it. `DEFAULT_AUTHORITY_PERSIST` is "grants" so the live
       // workspace needs no file, but an unset config is not a decision to stop remembering clicks — under
-      // grants, a command with no file target has no row that can express it (D9/D10), so making the policy
+      // grants, a command with no file target has no row that can express it, so making the policy
       // apply by default would silently turn "Allow always" into "allow once" for anyone who never opted in.
       if (
         getAuthorityPersist() === "grants" &&
@@ -1611,7 +1611,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
   // Streaming chunks arrive while the branch is frozen (pi appends entries
   // on message_end), so per-chunk work is O(new entries), not O(session
   // length); a moved prefix (navigate/fork/switch) forces a full recompute
-  // (plan A1, property-tested in branch-stats.test.ts).
+  // (property-tested in branch-stats.test.ts).
   const branchStatsState = emptyBranchStatsState();
 
   function computeStats(ctx: ExtensionContext): {
@@ -1649,7 +1649,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
     return `Working… (${workingStatsParts(ctx).join(" · ")})`;
   }
 
-  // ---- Capability channel to pi-claude-code-tui (plan B7) ------------------
+  // ---- Capability channel to pi-claude-code-tui --------------------------
   // One typed, versioned namespace replaces the untyped globals; the legacy
   // __pmWorkingStats key stays published for one compatibility cycle (older
   // cctui builds read it). Consumers detect via `version >= 1`.
@@ -2066,7 +2066,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
             const what = String((p as { label?: unknown }).label ?? (p as { rule?: unknown }).rule ?? "(item)")
             cl.push(`  + adopted: ${what}`)
           }
-          // Rules written by this confirmation are re-read the same way an approval re-reads them. D12 said there was
+          // Rules written by this confirmation are re-read the same way an approval re-reads them. The claim that there was
           // no reload face and that was WRONG — reloadMergedPermissionRules has been used by the approval path all
           // along; what was missing was the per-rule answer to "is it live?", which adopt-live computes by
           // comparing the files against the policy the session was ACTUALLY running on.
@@ -2133,7 +2133,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
         const taken = revokeLedgerGrants(gateLedger, (g) => matches(g.value), {
           quote: revMatch[1]!.trim(),
         }).concat(revokeRows(gateGrants, (g) => matches(g.value), { quote: revMatch[1]!.trim() }));
-        // Forbids were revocable by NOTHING until D29: `revokeLedgerGrants` splices `ledger.grants` only, so
+        // Forbids used to be revocable by NOTHING: `revokeLedgerGrants` splices `ledger.grants` only, so
         // `/grants revoke` reported success while the row that was actually blocking stayed, and the only real
         // escape was exporting the ledger and editing the JSON by hand. Same matcher, same quote, and separate
         // tombstones on purpose — `rowIdentity` has no type field, so one shared list would let "take back the
@@ -2286,7 +2286,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       }
       lines.push("");
       // These rows are ACTIVE forbids — each one blocks. Labelling them "withdrawn/excluded" made a user
-      // read the blocking row and conclude nothing was blocking them (D29).
+      // read the blocking row and conclude nothing was blocking them.
       lines.push("Ledger forbids (ACTIVE — these block):  revoke one with  /grants revoke <value>");
       if (!gateLedger.forbids.length) lines.push("  (none)");
       for (const f of gateLedger.forbids) {
@@ -2437,7 +2437,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
 
   // ---- request_user_permission (agent-initiated ask about a call the gate blocked) -------
   // The unattended denial ladder names this tool: when the gate blocks a call, the agent asks a human rather than
-  // guessing. W19's Option B removed the name from the rungs until it existed; it exists now, so the rung can come
+  // guessing. An earlier revision removed the name from the rungs until it existed; it exists now, so the rung can come
   // back honest.
   //
   // The design constraint that shaped it: the agent supplies the target as free text, so the tool must not treat
@@ -3036,7 +3036,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
 
     // BYPASS: approve everything; still track outside-cwd writes for undo.
     // Kept ahead of the plan-file probe: bypass never reads the plan file
-    // and the probe does per-call FS I/O (plan A2).
+    // and the probe does per-call FS I/O.
     if (currentMode === "bypass") {
       if (tool === "edit" || tool === "write") {
         trackOutsideWriteIfNeeded(ctx, tool, String(input.path ?? ""));
@@ -3359,7 +3359,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
     if (injectionEscalationEnabled && injectionModes) {
       try {
         // Real SessionEntry shape comes unwrapped from the port; the legacy
-        // flat `ctx.messages` fallback predates typed access (plan B1).
+        // flat `ctx.messages` fallback predates typed access.
         const messages = readBranchMessages(ctx.sessionManager);
         const signal = scanBranchForInjectionSignals(
           messages.length > 0 ? messages : (((ctx as any).messages ?? []) as never[]),
@@ -3397,7 +3397,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
     // handler as a trailing message on every LLM call this turn. Any change to
     // the leading system prompt invalidates the server's KV cache for the
     // entire conversation (~180k tokens re-prefilled); a trailing message
-    // costs only its own tokens. See docs/STABLE-PROMPT.md.
+    // costs only its own tokens, which is why the banner rides at the end.
     tailBannerText = [modeBlock.trim(), injectionBlock.trim()]
       .filter(Boolean)
       .join("\n\n");
@@ -3582,7 +3582,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
     // reports not-initialised and the gate falls back to the lexer path.
     // If it never comes up, layer 0 answers "parser-unavailable" for every bash command — a
     // dead analyzer, not a dangerous command. Silence here reads as refusals about the user's
-    // own command, so announce it once, on the channel the user actually looks at (D56).
+    // own command, so announce it once, on the channel the user actually looks at.
     void initBashParser()
       .catch(() => {})
       .then(() => {

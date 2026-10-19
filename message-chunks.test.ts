@@ -1,6 +1,6 @@
 /**
  * message-chunks: the splitter behind chunked grant extraction
- * (docs/CLASSIFIER-CONTEXT-BUDGET-PLAN.md item 2). Pinned properties: pieces fit,
+ * Pinned properties: pieces fit,
  * pieces reassemble exactly, boundaries degrade paragraph → sentence → whitespace →
  * hard cut, and nothing is ever lost.
  */

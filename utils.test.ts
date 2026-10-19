@@ -215,7 +215,7 @@ describe("isAutoFallbackBash", () => {
 	})
 });
 
-// Adjudicated 2026-09-12 — see docs/bash-risk-adjudication-2026-09-12.md.
+// Adjudicated 2026-09-12.
 describe("isAutoApprovableBash (bash-risk adjudication 2026-09-12)", () => {
 	it("keeps hook-free, reversible git ops in tier 2", () => {
 		expect(isAutoApprovableBash("git add .")).toBe(true)
@@ -272,7 +272,7 @@ describe("isAutoApprovableBash (bash-risk adjudication 2026-09-12)", () => {
 	})
 })
 
-// One tokenization pass must not change either verdict (plan A4).
+// One tokenization pass must not change either verdict.
 describe("classifyBashTiers equivalence (plan A4)", () => {
 	const sampleCommands = [
 		"ls -la",
@@ -299,7 +299,7 @@ describe("classifyBashTiers equivalence (plan A4)", () => {
 	})
 })
 
-// Adjudicated 2026-09-12 — see docs/bash-risk-adjudication-2026-09-12.md.
+// Adjudicated 2026-09-12.
 describe("isSafeCommand tier-1 bypass fixes (bash-risk adjudication 2026-09-12)", () => {
 	it("no longer treats env-prefixed commands as read-only", () => {
 		expect(isSafeCommand("env")).toBe(false)
@@ -622,7 +622,7 @@ describe("getProjectId", () => {
 	})
 
 	it("switches from hash fallback to marker id when the marker appears mid-session", () => {
-		// Positive-only caching (plan A2): a marker created after the first
+		// Positive-only caching: a marker created after the first
 		// hash-fallback call must win on the next call.
 		const before = getProjectId(tmpDir);
 		expect(before).toMatch(/^[a-f0-9]{8}$/);

@@ -59,7 +59,7 @@ describe("dangerous-permissions", () => {
 	})
 
 	// Adjudication ② (2026-09-12): package managers with lifecycle-script
-	// execution are dangerous as broad rules — see docs/bash-risk-adjudication-2026-09-12.md.
+	// execution are dangerous as broad rules — adjudicated 2026-09-12.
 	it("flags broad package-manager allow rules as dangerous", () => {
 		expect(isDangerousBashPermission("Bash", "npm:*")).toBe(true)
 		expect(isDangerousBashPermission("Bash", "npm install *")).toBe(true)
