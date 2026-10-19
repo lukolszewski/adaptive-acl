@@ -2128,7 +2128,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
           else console.log(msg);
           return;
         }
-        // Revocation is DATA, not an absence. Before W7 these were `splice` loops, which was enough while
+        // Revocation is DATA, not an absence. Splicing rows out of the in-memory lists was enough while
         // auto-export replaced the journal's ledger half — the last writer's view simply lacked the row. Now the
         // half is UNIONED so a concurrent session's addition survives, and a splice would mean revoking in this
         // session silently stops working everywhere else: the journal keeps the row, every session re-imports it.
@@ -3209,7 +3209,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
           // Prior authorisation first. Permission rules ARE consulted above
           // (applyConfiguredPermissionRules), but NEITHER grant store was consulted on this path, so
           // approving one outside-cwd read prompted again forever - the original complaint. This is
-          // also the only place write-implies-read (auth-ledger.ts:158) can bite: layer 0 answers
+          // also the only place write-implies-read (auth-ledger.ts:225) can bite: layer 0 answers
           // every read_only verdict with tier allow, so the gate never needs the ledger for reads.
           const pctx = { cwd: ctx.cwd, project: ctx.cwd, home: homedir() };
           const pc = classifyPath(pathStr, pctx);

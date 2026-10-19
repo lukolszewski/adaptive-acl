@@ -293,9 +293,9 @@ describe("argv matching, at the rule boundary", () => {
 	})
 
 	it("tightening: an exact-looking destructive rule is now exactly that", () => {
-		// W3 flagged this for the supervisor and pinned it the other way; W8 flips it, deliberately, on the
-		// argv probe quoted below (measured 2026-10-14). Before this change the same
-		// probe read:
+		// This pin used to record the loose reading below, and the flip is deliberate. The probe quoted here is
+		// verbatim what the argv matcher printed before the change (measured 2026-10-14); the rows that were
+		// wrong are not visible from what the file asserts now, so the old output is kept with the pin:
 		//
 		//   allow       Bash(rm -rf /tmp/x)   <= rm -rf /tmp/x
 		//   allow       Bash(rm -rf /tmp/x)   <= rm -rf /tmp/x extra      <-- one more target, free
@@ -308,7 +308,7 @@ describe("argv matching, at the rule boundary", () => {
 		// click on a scratch path authorised deleting any path that is not a wipe-protected root (the never
 		// floor does not help — `rm -rf /tmp/x /home/u/dev/pm` is ordinary delete_recursive). Where layer 0
 		// says the risk IS the targets, `Bash(rm -rf /tmp/x)` now covers that invocation and nothing else.
-		// The last row is the boundary: a command whose risk is not set by its targets keeps W2's contract.
+		// The last row is the boundary: a command whose risk is not set by its targets keeps prefix coverage.
 		expect(behaviorOf("rm -rf /tmp/x extra", { allow: ["Bash(rm -rf /tmp/x)"] })).toBe("passthrough")
 		expect(behaviorOf("rm -rf /tmp/y", { allow: ["Bash(rm -rf /tmp/x)"] })).toBe("passthrough")
 		expect(behaviorOf("rm -rf /tmp/x", { allow: ["Bash(rm -rf /tmp/x)"] })).toBe("allow")
@@ -333,10 +333,10 @@ describe("argv matching, at the rule boundary", () => {
 })
 
 describe("strict operands: for a target-bearing command an exact rule means THIS target", () => {
-	// W8. Where layer 0 says the command's risk is the paths its operands name (`STRICT_OPERAND_CATEGORIES`
-	// in `bash-audit.ts`), an exact specifier must name every word the call passes — options included. The
-	// asymmetry is the point: `deny`/`ask` stay textual and broad below, because a denial has to keep firing
-	// when the command adds words. Every row here was measured, not reasoned about.
+	// The narrowing this section exists for: where layer 0 says the command's risk is the paths its operands
+	// name (`STRICT_OPERAND_CATEGORIES` in `bash-audit.ts`), an exact specifier must name every word the call
+	// passes — options included. The asymmetry is the point: `deny`/`ask` stay textual and broad below, so a
+	// denial keeps firing when the command adds words. Every row here was measured, not reasoned about.
 
 	it("tightening: one extra word — a second target or a flag — is no longer covered", () => {
 		// [the call, the exact rule that was written for a shorter invocation of the same command]
@@ -417,7 +417,7 @@ describe("strict operands: for a target-bearing command an exact rule means THIS
 	})
 
 	it("the never floor is still the floor when the rule is a perfect match", () => {
-		// W3's 12-row table re-run with rules that name the command exactly: strict operands did not make
+		// The NEVER table above re-run with rules that name the command exactly: strict operands did not make
 		// these covered, and the floor still withholds them (two independent reasons now, both fail closed).
 		for (const [command, rule] of [
 			["rm -rf /", "Bash(rm -rf /)"],
@@ -486,7 +486,7 @@ describe("deny and ask stay textual", () => {
 		["chmod -R 777 /tmp/x /tmp/z", "chmod"],
 		["chmod -R 777 /tmp/x --verbose", "chmod"],
 	])("tightening an allow does not narrow a deny: %s is still denied", (command, verb) => {
-		// The asymmetry W8 exists to keep. `deny`/`ask` are scored by the text engine, before any argv
+		// The asymmetry the narrowing exists to keep. `deny`/`ask` are scored by the text engine, before any argv
 		// exists, so a rule that names a verb still covers words the rule never named — and the order
 		// deny → ask → allow means a stricter allow can only move a command from "a rule answered for it"
 		// to "the gate decides", never out of a denial's reach.
@@ -581,10 +581,10 @@ describe("an always-allow offer is only made when it will be honoured", () => {
 	})
 
 	it("offers a redirecting command once the rule can name the file, and honours it", () => {
-		// W3 withheld `echo hi > /tmp/out.txt` because the only rule that would cover it was `Bash(echo hi)`,
-		// which covers `echo hi > anywhere`. A specifier can name the target now, so the offer exists — and the
-		// round trip below is what makes that legal rather than a guess: the producer wrote the rule, this
-		// file's own matcher says it covers exactly the command that was approved.
+		// The offer for `echo hi > /tmp/out.txt` used to be withheld, because the only rule that could cover it
+		// was `Bash(echo hi)`, which covers `echo hi > anywhere`. A specifier can name the target now, so the offer
+		// exists — and the round trip below is what makes that legal rather than a guess: the producer wrote the
+		// rule, this file's own matcher says it covers exactly the command that was approved.
 		const set = offered("echo hi > /tmp/out.txt")
 		expect(set.persistable, set.reason ?? "").toBe(true)
 		expect(set.rules).toEqual(["Bash(echo hi > /tmp/out.txt)"])
@@ -654,7 +654,7 @@ describe("the duplicate stays deleted", () => {
 	})
 
 	it("permissions.ts takes one verdict per command, not one per question", () => {
-		// W8 needs the verdict's CATEGORY to decide whether a rule may extend. Asking for it next to the
+		// Deciding whether a rule may extend needs the verdict's CATEGORY. Asking for it next to the
 		// never-floor check would analyse every bash call twice on the hottest path in the extension, so the
 		// severity floor and the strictness flag have to arrive on the same view — and this file may not grow
 		// its own opinion about either.

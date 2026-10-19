@@ -8,7 +8,7 @@
  * `authority.persist: "grants"` — the zero-hand-authored-file policy this workspace runs under — means the
  * click path must not write `permissions*.json`. It stores **durable grant rows** instead: the same rows the
  * prompt-derived ledger exports, so an approval earned by clicking and one earned by speaking live in one
- * place, are matched by one matcher, and are revoked by one mechanism (tombstones, W7).
+ * place, are matched by one matcher, and are revoked by one mechanism — a revocation row (`session-grants.ts`).
  *
  * The rule that matters more than the feature: **a row may never express more than the invocation that
  * earned it.** Where no row can say exactly what was approved, the caller gets a `reason` and the click is

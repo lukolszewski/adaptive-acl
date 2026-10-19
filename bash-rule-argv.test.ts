@@ -10,7 +10,7 @@ import { permissionRuleValueFromString } from "./permission-rule-parser.ts"
 import type { PermissionBehavior, PermissionRule } from "./permissions.ts"
 
 /**
- * The matcher W3 builds `permissions.ts` onto: one already-parsed argv, one rule, yes or no.
+ * The matcher `permissions.ts` scores every bash allow rule with: one already-parsed argv, one rule, yes or no.
  *
  * argv here is written the way the walker emits it — command word first, one entry per argument,
  * quoting already resolved — so every expectation below is about *arguments*, never about how the
@@ -236,10 +236,10 @@ describe("ruleArgv: the specifier in normal form", () => {
 })
 
 describe("strict operands: an exact specifier has to name every word", () => {
-	// The caller holds layer 0's verdict; the matcher only holds the flag. `covers` above stays W2's
-	// contract, so both directions are pinned here — the narrowing is opt-in per call, not a redefinition
-	// of what a specifier means, and a caller with no verdict (or a command whose risk is not set by its
-	// targets) keeps exactly the behaviour it has always had.
+	// The caller holds layer 0's verdict; the matcher only holds the flag. `covers` above keeps the prefix
+	// contract it always had, so both directions are pinned here — the narrowing is opt-in per call, not a
+	// redefinition of what a specifier means, and a caller with no verdict (or a command whose risk is not
+	// set by its targets) keeps exactly the behaviour it has always had.
 	const strictCovers = (spec: string, argv: string[]): boolean =>
 		bashRuleCoversArgv(ruleFor(`Bash(${spec})`), argv, { strictOperands: true })
 
@@ -247,7 +247,7 @@ describe("strict operands: an exact specifier has to name every word", () => {
 		expect(strictCovers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "--verbose"])).toBe(false)
 		expect(strictCovers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "/tmp/z"])).toBe(false)
 		expect(strictCovers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "extra"])).toBe(false)
-		// the same rule in non-strict mode is the loosening W2 pinned, unchanged
+		// the same rule in non-strict mode is the documented loosening, unchanged: fewer words still cover
 		expect(covers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "--verbose"])).toBe(true)
 	})
 
@@ -456,7 +456,7 @@ describe("a redirect target is part of the invocation a rule names", () => {
 
 	it("keeps the argv-only contract for a leg with no file target", () => {
 		// A descriptor dup (`2>&1`) moves no file, so a leg carrying only one is scored on its words alone
-		// — the decision W9 pinned, unpicked: `Bash(make:*)` still covers `make 2>&1 | tail -50`.
+		// — the contract `redirect-coverage.test.ts` keeps intact: `Bash(make:*)` still covers `make 2>&1 | tail -50`.
 		expect(covers("make:*", ["make"])).toBe(true)
 		expect(withTarget("make:*", ["make"])).toBe(true)
 		// and a rule that names a target does not cover a command that writes none

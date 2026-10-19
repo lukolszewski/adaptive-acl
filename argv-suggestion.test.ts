@@ -24,12 +24,12 @@ import { initBashParser } from "./bash-parser.ts"
  * The property every test here guards is the one the offer exists for: a rule that is written is a rule that
  * fires. Before this producer, the specifier was spelled out of the command STRING — the first line of a
  * multi-line command, a redirect, a `<<`, a `$(…)` — and the matcher that has to honour it compares argv, so
- * W3 had to withhold the offer rather than store a rule that would never match. Now the words come from the
- * same parse the matcher reads, which turns "no Always for you" into "here is a rule that covers this" for
- * quoted separators, escaped stars, fd dups and multi-line scripts, and leaves the honest refusals exactly
- * where they were.
+ * the only honest answer was to withhold the offer rather than store a rule that would never match. Now
+ * the words come from the same parse the matcher reads, which turns "no Always for you" into "here is a
+ * rule that covers this" for quoted separators, escaped stars, fd dups and multi-line scripts, and leaves
+ * the honest refusals exactly where they were.
  *
- * Nothing here tests what is ALLOWED. The verdicts are W3's and `bash-allow-layer0.test.ts` owns them; this
+ * Nothing here tests what is ALLOWED — `bash-allow-layer0.test.ts` owns those verdicts; this
  * file is about what is OFFERED, and the invariant is that a suggestion never claims more than the call.
  */
 
@@ -132,8 +132,8 @@ describe("the offer is the round trip: a rule that is made is a rule that covers
 })
 
 describe("withheld, exactly as W3 left it", () => {
-	// Constraint: nothing W3 pinned as uncovered may become covered. These are the commands where a rule
-	// would either be honoured for something the user never saw or describe nothing at all.
+	// Constraint: nothing already pinned as uncovered here may become covered. These are the commands where a
+	// rule would either be honoured for something the user never saw or describe nothing at all.
 	const WITHHELD: Array<[string, string]> = [
 		["rm -rf /", "never floor: coverage refuses it, so a rule would only hide the reason"],
 		["sudo rm -rf /", "a wrapper does not launder the floor, and neither does a rule"],
@@ -201,16 +201,17 @@ describe("a redirect is offered as an exact rule that names the target", () => {
 })
 
 describe("a destructive leg is offered as the exact argv, never as a shorter prefix", () => {
-	// W8's rule: where the category is set by the targets the command names (delete_recursive,
-	// file_overwrite, vcs_discard, device_write, permission_change, ssh_key_write), coverage requires argv
-	// equality — no extension, options included. A suggestion that dropped words would therefore be an offer
-	// the matcher refuses to honour: the dead offer W3 removed, arriving from the other side. So the promise
-	// this side has to keep is that the rule names EVERY word of the leg, which is what `named.length ===
-	// argv.length` below asserts for each row.
+	// The rule this table guards: where the verdict is set by the targets the command names — the categories
+	// listed in `STRICT_OPERAND_CATEGORIES` (`bash-audit.ts:469-486`) — coverage requires argv equality: no
+	// extension, options included (the `coverage.strictOperands` branch of `bashRuleCoversArgv` in
+	// `bash-rule-argv.ts`). A suggestion that dropped words would therefore be an offer the matcher refuses
+	// to honour — a rule written into the file and never fired, the dead offer the withheld table above exists
+	// to prevent. So the promise this side keeps is that the rule names EVERY word of the leg, which is what
+	// `named.length === argv.length` below asserts for each row.
 	//
 	// `uncovered` is the sibling the written rule must NOT reach: fewer words than the rule names, so it is
-	// not the command that was approved. (A sibling with EXTRA words — `rm -rf /tmp/x --verbose /tmp/z` — is
-	// still prefix-covered until W8's equality lands; that half is W8's assertion to own, not this file's.)
+	// not the command that was approved. (A sibling with EXTRA words is refused by the same equality — that
+	// half is pinned in `strict-operands.test.ts`, not here.)
 	const EXACT: Array<[string, string, string]> = [
 		["rm -rf /tmp/x --verbose", "delete_recursive", "rm -rf /tmp/x"],
 		["rm -rf /tmp/x /tmp/y", "delete_recursive", "rm -rf /tmp/x"],
@@ -230,13 +231,13 @@ describe("a destructive leg is offered as the exact argv, never as a shorter pre
 			const legs = legsOf(command)
 			expect(named, command).toEqual(legs)
 			for (const argv of legs) {
-				// The W8 promise, stated where it can be broken: not one word dropped.
+				// The exactness promise, stated where it can be broken: not one word dropped.
 				expect(named.flat().length, command).toBe(argv.length)
 			}
 			// The offer is still worth making: it covers the command that was approved …
 			expect(behaviourOf(command, set.rules), command).toBe("allow")
-			// … and it does not reach a call that named fewer words (work.log 2026-10-14: the approval of
-			// one scratch path must not be the authority for arbitrary others).
+			// … and it does not reach a call that named fewer words: the approval of one scratch path must
+			// never become the authority for deleting arbitrary others.
 			expect(behaviourOf(uncovered, set.rules), uncovered).toBe("passthrough")
 		})
 	}

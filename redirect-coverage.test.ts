@@ -17,7 +17,7 @@ import {
 
 /**
  * The "Always allow" offer for a command that writes through a redirect, and the coverage that has to
- * honour it (work.log 2026-10-14 §5.2: the largest withheld class, ~16 % of measured bash calls).
+ * honour it: among the calls the offer withheld, this was the largest class — roughly one bash call in six.
  *
  * Coverage used to be able to speak only about argv, so the only rule that would cover
  * `echo hi > /tmp/out.txt` was `Bash(echo hi)` — which also covers `echo hi > ~/.ssh/authorized_keys`. The
@@ -139,7 +139,7 @@ describe("the offer names the file, and the matcher honours exactly that", () =>
 
 	it("leaves a descriptor dup alone, so `2>&1` still costs nothing", () => {
 		// `make 2>&1 | tail -50` opens no file, so it is not target-bearing and the ordinary contract
-		// applies — the decision W9 pinned, kept intact here.
+		// applies — the contract `bash-rule-argv.test.ts` pins for a leg with no file target, kept intact here.
 		expect(behaviorOf("make 2>&1 | tail -50", { allow: ["Bash(make:*)", "Bash(tail:*)"] })).toBe("allow")
 		const set = offerFor("npm test 2>&1 | tail -20")
 		expect(set.persistable, set.reason ?? "").toBe(true)
@@ -321,7 +321,7 @@ describe("the invariant over the curated corpus", () => {
 	// files. What is added here is the redirect-specific half of that: the corpus's one redirecting command
 	// must STILL be withheld (it targets authorized_keys, so the floor decides), and a list of redirecting
 	// commands that this task is about must round-trip — because a property test over a population of zero
-	// is exactly the vacuous pass work.log warns about.
+	// is exactly the vacuous pass this file exists to catch.
 	it("keeps the corpus's one redirect row withheld", () => {
 		const command = "echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA ci@runner' >> ~/.ssh/authorized_keys"
 		const set = offerFor(command)
