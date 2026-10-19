@@ -122,7 +122,7 @@ const MAX_WRAPPER_HOPS = 6
  * without ever triggering the load itself ({@link initBashParser} is idempotent and never throws).
  */
 /**
- * Parse once, answer both questions (D6). `auditBashCommand` and the policy verdict used to run the walker on the
+ * Parse once, answer both questions. `auditBashCommand` and the policy verdict used to run the walker on the
  * same command independently; the second parse could report `parser-unavailable` while the first succeeded, which
  * is the same command getting two different answers on the hottest path in the extension.
  */
@@ -168,7 +168,7 @@ const ANALYZER_FAULT_REASONS = ["verdict-unavailable", "analysis-failed"] as con
  * `command-substitution` — the fix is a rewrite), or the analyzer never examined it (`parser-unavailable`,
  * `verdict-unavailable` — a rewrite cannot help and the same command may pass after a reload). Text keyed on the
  * *category* collapses the two into whichever sentence was written first: `unproven_structure` is one category for
- * both, which is how a dead analyzer is reported to the user as a strict one. D54 §1 is the same defect on the
+ * both, which is how a dead analyzer is reported to the user as a strict one. The same defect exists on the
  * advice side and is fixed there by deriving the advice from the construct; this is the same rule on the
  * mechanism side, and the two are complementary — this function answers "what stopped", the construct answers
  * "what to do about it".
@@ -433,10 +433,10 @@ function verdictIsFloored(verdict: PolicyDecision): boolean {
  *     offset it: a stored approval to read `~/.ssh/id_rsa` must not also cover the second file the call
  *     appends to the argument list, and a click on a reader always writes an exact rule (`cat`, `head`,
  *     `tail` are not subcommand-grammar tools), so equality costs nothing that prefix coverage earned;
- *   - `read_secret_remote` (D16) — the same argument, and here the generalisation is not hypothetical but
+ *   - `read_secret_remote` — the same argument, and here the generalisation is not hypothetical but
  *     the rule the producer writes today: `kubectl`, `aws`, `helm`, `vault`, `gcloud` and `az` are all on
  *     `SUBCOMMAND_GRAMMAR_TOOLS`, so "Allow always" on `kubectl get secret prod-db` writes
- *     `Bash(kubectl get:*)` and silently authorises every future `kubectl get`, which is the exact hole D16
+ *     `Bash(kubectl get:*)` and silently authorises every future `kubectl get`, which is the exact hole this
  *     closes — `get` is a benign verb and the noun is the risk. Unlike the `cluster_*` family named below,
  *     strictness here costs no offer: the harm is *which entry* was read, the entry is one of the words, and
  *     the exact rule the producer falls back to is honoured by the matcher, so the user keeps the button and

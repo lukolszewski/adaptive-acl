@@ -381,11 +381,11 @@ async function resolveCopilotEndpoint(
 			apiKey: auth.apiKey,
 			// The mint is not the model call and sits on a tool-call path: cap it, whatever the model timeout is.
 			timeoutMs: Math.min(config.timeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS, DEFAULT_SESSION_TIMEOUT_MS),
-			// D57: `model_hints` filters GitHub's offered pool by MODEL ID (measurements §2b) — a dialect name is
+			// `model_hints` filters GitHub's offered pool by MODEL ID (measured 2026-10-17) — a dialect name is
 			// answered with an empty pool and `selected_model: ""` at HTTP 200, so naming dialects here would look like
 			// a safeguard and do nothing. A pick this client cannot encode therefore buys exactly one more mint, asking
 			// for the offered ids it CAN put on the wire. The dialect comes from pi's catalog on every call because the
-			// catalog churns within hours (D55); a model pi has not listed yet counts as encodable, which is the same
+			// catalog churns within hours; a model pi has not listed yet counts as encodable, which is the same
 			// guess the resolver makes a few lines below.
 			encodableModel: (id) => {
 				const offered = findCopilotModel(registry, id)
@@ -620,7 +620,7 @@ function ledgerPhrase(ctx: DenialContext): string {
 	// Every ledger refusal is the same two-part sentence: WHOSE words, then WHICH of them, then the row
 	// they were filed under. The frame is a constant and comes first — it is never assembled out of the
 	// quote, so no quote can move it or read as anything but data the user once said. A denial that reads
-	// like an instruction has its own history here (D21).
+	// like an instruction is exactly what that shape guards against.
 	const frame = "ledger — the user's own earlier words forbid this: "
 	const quote = displayQuote(ctx.ledgerQuote)
 	const said = quote ? `"${quote}"` : `(forbidding quote ${NOT_REPORTED})`
@@ -646,7 +646,7 @@ function rowClause(ctx: DenialContext): string {
  * Three edits, all of them about keeping the quote inside its quotation marks: whitespace is flattened,
  * because a multi-line sentence would otherwise print extra lines INSIDE the denial and read as more of
  * the gate's own instructions (the quote is the least trustworthy text in this message — it is copied
- * out of a transcript, and the whole point of D21 is that it is shown, so it must not be able to forge
+ * out of a transcript, and it is shown to the user, so it must not be able to forge
  * a line); a `"` inside it becomes `'` so the delimiters still bound it; and it is cut to
  * `QUOTE_MAX_CHARS` with a visible marker. Only a quote is ever cut — a truncated command line is worse
  * than no command line, which is why the lever line is never shortened here or anywhere else.
@@ -666,7 +666,7 @@ function displayQuote(raw?: string): string | undefined {
  * leaves forbids alone (`revokeLedgerGrants`, `dropRevokedGrantRows` both say so), so printing it as the
  * remedy would send the reader to a command that answers "No session grant matches". An offer that
  * cannot be honoured is worse than no offer — which is why this line names `/grants revoke` only now that
- * the command behind it exists: since D29 it lifts forbid rows as well as grants, so the row's own value is
+ * the command behind it exists: it lifts forbid rows as well as grants, so the row's own value is
  * offered as a command the code will actually carry out.
  */
 export function ledgerLever(ctx?: DenialContext): string | undefined {
@@ -817,7 +817,7 @@ const FALLBACK_GUIDANCE = {
  *
  * `unproven_structure` used to carry ONE sentence — "brace grouping, complex quoting" — however the walker had
  * refused, so a command whose only structure was `${PI_SESSION_ID:-unset}` was told to delete a brace group it did
- * not have, and to give up on a step a literal rewrite cleared in one second (D54). The analyzer already names the
+ * not have, and to give up on a step a literal rewrite cleared in one second. The analyzer already names the
  * construct (a §12 id) in the segment description; this table is that id in the reader's terms.
  *
  * Two rules an entry has to keep: it names ONLY its own construct (a fix line mentioning brace groups for a
@@ -1051,7 +1051,7 @@ export function wallFor(category: string): DenialWall {
 /**
  * Which wall a whole call hit, from the verdict rather than from one category.
  *
- * `wallFor(r.category)` alone is wrong in exactly the case D54 was about: layer 0 bailed on the command's shape,
+ * `wallFor(r.category)` alone is wrong in exactly the case this guards: layer 0 bailed on the command's shape,
  * the effect model then GUESSED a category for a command nobody could parse (`write_outside`), and that guess —
  * the last thing asked, not the thing that decided — moved the call to the authority wall, whose advice is "the
  * target itself is not allowed, park it". A command that was never understood has no established target, so no
@@ -1193,7 +1193,7 @@ export function buildPreciseDenial(opts: {
 		const key = s.category.split("+")[0] ?? s.category
 		// An unproven structure says WHY it was unproven, and the analyzer's own segment description says which.
 		// Keying guidance on the category alone printed "brace grouping, complex quoting" for a parameter
-		// expansion (D54), which sent the agent to rewrite a command that had no brace in it.
+		// expansion, which sent the agent to rewrite a command that had no brace in it.
 		const construct = key === "unproven_structure" ? reportedConstruct(s.description ?? s.command) : undefined
 		const g = construct ? structureGuidance(construct) : DENIAL_GUIDANCE[key] ?? FALLBACK_GUIDANCE
 		const target = s.targets[0] ?? "the named path"
@@ -1242,7 +1242,7 @@ export function gateDenialMessage(
 	const headWithWall = `${head} (${wall} wall)`
 	// When the wall is analysis but the call's category came from the model, that category is a guess about a
 	// command nobody parsed. Say so, before the retry hint: left unsaid, the reader reads `write_outside` as a
-	// verdict about the target and goes looking for a rule to add (D54).
+	// verdict about the target and goes looking for a rule to add.
 	const guessedCategory = wall === "analysis" && wallFor(r.category) === "authority" ? r.category : undefined
 	// The whole-call category and targets come straight off the gate result — they have always been
 	// there, they were just never printed, which is why every denial read as one undifferentiated

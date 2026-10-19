@@ -156,7 +156,7 @@ describe("withheld, exactly as W3 left it", () => {
 		// `bash-allow-layer0.test.ts` pins this phrase for these commands; it stays true because the
 		// refusals that remain are all the same shape: nothing writable would be honoured. (`echo hi >
 		// /tmp/out.txt` used to be one of them: a redirect could not be described, so no rule was offered.
-		// W10 gave the specifier a way to name a target, so it is an offer now — see the block below.)
+		// Once a specifier could name a target, it became an offer — see the block below.)
 		for (const command of ["rm -rf /", "cat <<'EOF'\n{\"a\": 1}\nEOF"]) {
 			expect(offerFor(command).reason, command).toContain("no rule would cover this command again")
 		}
@@ -164,7 +164,7 @@ describe("withheld, exactly as W3 left it", () => {
 })
 
 describe("a redirect is offered as an exact rule that names the target", () => {
-	// W10. These three rows sat in the withheld table above, with the argument that "the write IS the
+	// These three rows sat in the withheld table above, with the argument that "the write IS the
 	// approval, and argv alone would cover writing anywhere". That argument still holds — which is why the
 	// offer is not `Bash(echo hi)` but a rule naming the file, the operator and the descriptor, and why the
 	// target-less spelling of the same rule stops covering the command. Both directions are pinned here;

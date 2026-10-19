@@ -92,7 +92,7 @@ export function isCredentialFilename(basename: string): boolean {
 	return listedCredentialFilename(basename) || declaresCredentialName(basename)
 }
 
-/* ------------------------------------------------------------------ secret-bearing *names* (D18)
+/* ------------------------------------------------------------------ secret-bearing *names*
  *
  * The table above is a list of specific names. It cannot answer the general question — "a file whose
  * NAME ALONE declares it holds credentials" — because that declaration is a property of the last
@@ -116,7 +116,7 @@ export function isCredentialFilename(basename: string): boolean {
  *   - one word means something else where the OS keeps it — see `UNIX_USER_DB_PATHS`.
  *
  * Being secret-bearing costs one prompt, not a floor: the category is the existing `read_secret`, so
- * a human approval or a prompt-derived grant covers the file (`docs/TODO.md`, decision D18).
+ * a human approval or a prompt-derived grant covers the file — `risk-paths.test.ts` pins that.
  */
 
 /** Words that mean "the bytes in this file are credentials" when they end a file name. */
@@ -154,7 +154,7 @@ const WRAPPER_EXTS: ReadonlySet<string> = new Set([
  * name for years — and the file is world-readable by design, so reading it is ordinary debugging
  * (and `index.test.ts` pins that a read of `/etc/passwd` auto-approves). Everywhere else the same
  * word is a leak: a `passwd` committed into a repo, or dumped in `/tmp`, is exactly the file this
- * rule exists for. A location exemption for one word, not a general location rule: D18 says a
+ * rule exists for. A location exemption for one word, not a general location rule: a
  * credential-declaring name is secret-bearing wherever it sits, and that still holds for every other
  * word here.
  */
@@ -315,7 +315,7 @@ export function classifyPath(rawIn: string, ctx: PathContext): PathClass {
 	// Secret-bearing?
 	const exampleFile = SECRET_EXAMPLE_RE.test(basename)
 	if (listedCredentialFilename(basename) && !exampleFile) base.isSecret = true
-	// D18: a name that declares credentials is secret-bearing wherever it sits, including here in the
+	// A name that declares credentials is secret-bearing wherever it sits, including here in the
 	// project. Added *beside* the reviewed table, never in place of it, and only where the token is a
 	// file reference rather than a bare word the command is searching for.
 	const shapeWord = credentialNameWord(basename)

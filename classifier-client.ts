@@ -129,7 +129,7 @@ export function resolveClassifierStage(
 }
 
 // (path, mtimeMs) cache: the classifier probes AGENTS.md on every tier-3
-// call and the file rarely changes — re-read only when mtime moves (plan A3).
+// call and the file rarely changes — re-read only when mtime moves.
 const agentsMdCache = new Map<string, { mtimeMs: number; text: string }>()
 
 export function readAgentsMdForClassifier(cwd: string): string | null {
@@ -1066,7 +1066,7 @@ async function classifyWithStagePipeline(opts: {
 	return runXmlStage(512, "\nRe-evaluate carefully before your final <block>.")
 }
 
-// Short-TTL verdict memo for identical retries (plan A5): an unchanged
+// Short-TTL verdict memo for identical retries: an unchanged
 // denied/approved call re-classifies for free. Guardrails: wholesale
 // invalidation when permission rules reload (verdicts depend on autoMode
 // rules), a 60s TTL so a new turn's transcript is never served stale, and

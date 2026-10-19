@@ -1,5 +1,5 @@
 /**
- * Incremental usage totals over a session branch (plan A1).
+ * Incremental usage totals over a session branch.
  *
  * pi appends entries only at message boundaries — the branch is frozen while
  * message_update chunks stream — so per-chunk work must be O(new entries),

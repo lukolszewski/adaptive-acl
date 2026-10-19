@@ -13,7 +13,7 @@ const CTX = { cwd: "/home/dev/proj", project: "/home/dev/proj", home: "/home/dev
 
 const tier = (cmd: string, opts = OPTS) => evaluateBash(cmd, opts).tier
 
-/** How much the gate is allowed to skip a human for this decision (see eval/parse-diff.ts). */
+/** How much the gate is allowed to skip a human for this decision: allow < unknown < ask < never. */
 const STRICTNESS = (d: PolicyDecision): number => {
 	const rank: Record<string, number> = { allow: 0, unknown: 1, ask: 2, never: 3 }
 	if (d.unparseable) return rank.ask
@@ -585,7 +585,7 @@ describe("stored secrets in remote systems (D16)", () => {
 		}
 	})
 	it("is coverable by one approval of the entry it names, and by nothing wider", () => {
-		// D16: not the never floor. A grant for THIS entry silences the repeat; the next secret in the same
+		// Not the never floor: a grant for THIS entry silences the repeat; the next secret in the same
 		// store still asks.
 		const store = createGrantStore()
 		const first = evaluateBash("kubectl get secret prod-db", OPTS)
@@ -595,7 +595,7 @@ describe("stored secrets in remote systems (D16)", () => {
 	})
 	it("writes the entry into an Allow-always, not the verb", () => {
 		// `kubectl` is a subcommand-grammar tool, so the producer would otherwise write `Bash(kubectl get:*)`
-		// — every future `kubectl get`, which is the hole D16 closes. Strict operands narrows it to the exact
+		// — every future `kubectl get`, which is the hole this closes. Strict operands narrows it to the exact
 		// invocation (which the matcher honours, so the offer stands); ordinary work keeps its prefix.
 		expect(suggestBashAllowRuleSet("kubectl get secret prod-db", "/home/dev/proj").rules).toEqual(["Bash(kubectl get secret prod-db)"])
 		expect(suggestBashAllowRuleSet("kubectl get pods", "/home/dev/proj").rules).toEqual(["Bash(kubectl get:*)"])

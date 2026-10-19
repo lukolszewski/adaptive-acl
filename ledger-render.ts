@@ -1,6 +1,6 @@
 /**
  * The authorisation ledger as the summary of the turns that no longer fit the call
- * (docs/CLASSIFIER-CONTEXT-BUDGET-PLAN.md item 3).
+ * in the classifier's context window.
  *
  * A 4 096-token window holds the newest handful of user messages, so in a long session the sentence
  * in which the user actually granted something scrolls out of the grant-transcript call. It is not

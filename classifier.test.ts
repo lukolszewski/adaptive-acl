@@ -1,13 +1,13 @@
 /**
- * W39 deliverable 2 — "the classifier is on" must mean two things: the config actually reaches the
- * gate, and a transport that cannot answer never leaves the call unjudged (D13's silent-uselessness
+ * "The classifier is on" must mean two things: the config actually reaches the
+ * gate, and a transport that cannot answer never leaves the call unjudged (the silent-uselessness
  * bug: a config that enables a model nobody can reach, presenting itself as a working auto mode).
  *
  * Naming note: the task named `classifier.ts`, which does not exist in this tree. The shipped
  * classifier is `classifier-client.ts` (legacy stages over pi-ai), `model-client.ts` + `gate.ts`
  * (the `gate` engine, the default), and `config.ts` for enablement. Those files are not mine to
- * edit, so this file pins their contract from the outside and the changes I would make are written
- * into RESULT.md instead.
+ * edit, so this file pins their contract from the outside and says nothing about what those files
+ * should change — the assertions here hold either way.
  *
  * Hermetic: the config is re-pointed at a temp dir, and "unreachable transport" means a closed port
  * on 127.0.0.1 — no shared endpoint, no network, no live user config.
@@ -248,7 +248,7 @@ describe("enablement: an unusable transport never drops the judgement", () => {
 		// Authorization only when a key exists, which is how a no-auth LiteLLM endpoint works at all), so
 		// a no-auth server that works under engine=gate fails every call under engine=legacy. Pinned here
 		// because the symptom a user sees is a prompt, with nothing saying "auth plumbing", which is the
-		// silent-uselessness shape D13 is about.
+		// silent-uselessness shape this pin exists for.
 		await expect(call("litellm-lab/clf-gate", registryFor(chatModel(DEAD_BASE_URL), { ok: true }))).rejects
 			.toThrow(/No API key for provider/)
 		// With a key, the same registry reaches the socket and the dead port answers.
@@ -285,7 +285,7 @@ describe("enablement: an unusable transport never drops the judgement", () => {
 })
 
 describe("a stage that could not be read reaches the attribution (D23)", () => {
-	// W40 named the decider; this is the half where the named decider is told the truth. A truncated
+	// The decider has a name now; this is the half where the named decider is told the truth. A truncated
 	// reasoning answer used to arrive as three interchangeable `new Error("unparseable …")` strings, so the
 	// only way a caller could tell "the model refused" from "the model never got to answer" was to parse
 	// prose out of a message. The legacy client now throws one named shape carrying the bucket, and this

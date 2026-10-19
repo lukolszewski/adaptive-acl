@@ -21,7 +21,7 @@ import { copilotTokensSpent, resetCopilotUsage, SESSION_TOKEN_HEADER } from "./c
 /**
  * Every test here stubs `fetch`. No test in this file may reach the network: the Copilot account this was
  * built against is a free plan with a small monthly allowance, and the live path is the probe
- * (`bun /home/u/dev/pm/.probe/copilot-rt.ts`), not the suite.
+ * run by hand outside this file, not the suite.
  *
  * The stubbed bodies are the shapes MEASURED on that account on 2026-10-17 — in particular a `/responses`
  * completion whose `output_text` is `null` and whose verdict sits in `output[1].content[0].text`.

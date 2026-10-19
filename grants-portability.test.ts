@@ -216,7 +216,7 @@ describe("importLedger precedence", () => {
 	})
 
 	it("restores `seen`, so backfill does not re-extract a conversation the file already read", () => {
-		// ASSERTION FLIPPED by decision D4.2 (docs/DECISIONS-2026-10-14.md) — it used to read
+		// ASSERTION FLIPPED deliberately — it used to read
 		// "does not restore `seen` (backfill re-extraction is self-healing)" and asserted
 		// `target.seen.size === 0`. Keeping it red would hide the flip it was watching, which
 		// is the same call W7 made on this file's ledger-half assertion. Restoring the ids is

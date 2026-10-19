@@ -3,7 +3,7 @@
  * where that memory has to end.
  *
  * Two things are pinned here, both found while working out which parse engine lost a write target
- * (eval/W47-FINDINGS.md):
+ * — they are the two numbered cases below:
  *
  *   1. `unset` ends §5.3's memory. A remembered literal is substituted into later references because
  *      bash would expand them to that value; after `unset` bash expands them to nothing, so keeping

@@ -9,7 +9,7 @@ import {
 	type BranchEntry,
 } from "./session-branch.ts"
 
-// Real SessionEntry shapes from pi 0.80+ typings (plan B1 / C2): messages are
+// Real SessionEntry shapes from pi 0.80+ typings: messages are
 // wrapped as {type:"message", message:{role:"user"|"assistant"|"toolResult"}}.
 function msg(
 	role: "user" | "assistant" | "toolResult",

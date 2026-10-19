@@ -1,8 +1,8 @@
 /**
  * The plugin's own GitHub Copilot **Auto** session.
  *
- * Why this module exists at all (all of it measured 2026-10-16/17 on a free plan, see
- * RESULT.md of W87): when GitHub picks the model, the pick is not addressable with the plain account
+ * Why this module exists at all, measured 2026-10-16/17 on a free plan: when GitHub picks the model,
+ * the pick is not addressable with the plain account
  * token — `POST {baseUrl}/models/session` hands back a `selected_model` plus a `session_token`, and the
  * pick answers 200 only with that token in `Copilot-Session-Token`. The same header restricts you to the
  * Auto picks, so it must never travel with a model the user named. One POST buys a token good for ~60
@@ -13,9 +13,9 @@
  * bodies (model-client.ts) and the decision of which case we are in (gate-bridge.ts).
  *
  * One request-shaping decision IS ours, though: when GitHub hands back a pick whose dialect the caller cannot
- * encode, we ask once more for the ids GitHub itself offered that the caller can (D57, `encodableModel` below).
- * That is measured behaviour of `model_hints`, not a guess — see §2b of
- * `docs/COPILOT-COMPAT-MEASUREMENTS.md`, taken with `bun tools/copilot-probe.ts --live --hints`.
+ * encode, we ask once more for the ids GitHub itself offered that the caller can (`encodableModel` below).
+ * That is measured behaviour of `model_hints`, not a guess — the numbers are quoted in
+ * `requestAutoSession` below, from the live run of 2026-10-17.
  *
  * Failure contract: **never throws**. Every failure — 404, a rejected token, a body that is not JSON, an
  * aborted request — comes back as `{ok:false, error}`, and the caller resolves no endpoint, so the gate
@@ -95,7 +95,7 @@ export type AutoSessionOptions = {
 	 * which is the only place holding the catalog.
 	 *
 	 * Omit it and the mint is the measured control body, one POST, exactly as long as this has worked. Supply it
-	 * and a pick we cannot speak triggers ONE more mint asking for the offered ids we CAN speak (D57).
+	 * and a pick we cannot speak triggers ONE more mint asking for the offered ids we CAN speak.
 	 */
 	encodableModel?: (id: string) => boolean
 }
@@ -175,13 +175,13 @@ function describeFailure(status: number, body: string): string {
 	return `copilot auto session: HTTP ${status}${detail ? `: ${detail}` : ""}`
 }
 
-/** The only `model_hints` value ever measured against GitHub (row 4 of
- *  `docs/COPILOT-COMPAT-MEASUREMENTS.md`). Everything else the field might accept is a measurement away from
+/** The only `model_hints` value ever measured against GitHub (live mint, 2026-10-17).
+ *  Everything else the field might accept is a measurement away from
  *  being known, which is why the mint body is built here rather than typed inline at the call site: the probe
  *  and the product must send the same bytes, and a hint we have not observed is not a hint we send. */
 export const AUTO_SESSION_MODEL_HINTS: readonly string[] = Object.freeze(["auto"])
 
-/** The mint body, one field deep. Kept as a function of the hints so `tools/copilot-probe.ts` can print — and
+/** The mint body, one field deep. Kept as a function of the hints so a live probe can print — and
  *  live-measure — the exact bytes the gate will send, and so an extra hint can only enter through an argument
  *  someone wrote down, never through a string literal in the fetch. */
 export function autoSessionMintBody(modelHints: readonly string[] = AUTO_SESSION_MODEL_HINTS): {
@@ -265,7 +265,7 @@ async function mintOnce(call: MintCall): Promise<CopilotSessionResult> {
  * Mint an Auto session, and — when the caller said which models it can speak — ask a second time for one it
  * can address.
  *
- * The second ask is the whole of D57, and it rests on two facts measured 2026-10-17 (`--live --hints`):
+ * The second ask is the whole point, and it rests on two facts measured live on 2026-10-17:
  * `model_hints` is a **model-id filter over the pool GitHub just offered** — `{hints:["gpt-5-mini"]}` turned a
  * pool of two into `[gpt-5-mini]` and picked it — while a hint GitHub cannot match (a dialect name, an id from
  * outside the Auto pool, a made-up word) yields a **200 whose pool is empty and whose `selected_model` is `""`**.
@@ -275,7 +275,7 @@ async function mintOnce(call: MintCall): Promise<CopilotSessionResult> {
  *
  * What this can never do is damage the path that already works: the retry runs only when the pick is one the
  * caller cannot address, it happens at most once, and a retry that did not produce an encodable pick is thrown
- * away in favour of the first answer — so the message W88 made for an unspeakable pick is still the message the
+ * away in favour of the first answer — so the message built for an unspeakable pick is still the message the
  * reader gets, never "the session named no model".
  */
 async function requestAutoSession(opts: AutoSessionOptions): Promise<CopilotSessionResult> {
@@ -306,7 +306,7 @@ async function requestAutoSession(opts: AutoSessionOptions): Promise<CopilotSess
 
 	const offered = first.session.availableModels
 	// The narrowing list is GitHub's own answer, filtered. An id this file invented would be a name in source
-	// (D55) and, worse, one GitHub may not be offering today.
+	// and, worse, one GitHub may not be offering today.
 	const usable = offered.filter((id) => encodable(id))
 	if (usable.includes(first.session.selectedModel ?? "")) return first
 	// Nothing encodable was offered. `model_hints: []` has never been sent, so it is not sent now: the empty

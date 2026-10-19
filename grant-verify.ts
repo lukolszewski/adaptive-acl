@@ -264,7 +264,7 @@ export function verifyGrant(opts: {
 	// on which effect mergeDecisions happened to list first: a later effect needing its method verb
 	// demanded nothing, and a bare-verb effect listed first carried an unlocatable companion over the
 	// line. Measured over 3845 distinct commands from real session history
-	// (eval/verifygrant-arity-audit.ts): 317 compound actions reach this function, 19 skip a required
+	// in that sample: 317 compound actions reach this function, 19 skip a required
 	// method verb (12 of them `privilege`), 44 take a bare-verb accept the later segment has not
 	// earned. Monotone by construction: this can only refuse more, never less.
 	const segments = category.split("+").filter((s) => norm(s))

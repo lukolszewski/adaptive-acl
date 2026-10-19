@@ -39,7 +39,7 @@ import {
  * runs. The original cleanup deleted the whole `.pi/projects` directory afterwards. That is not "the test's
  * artifacts": it is every project's rules, journals and outside-write snapshots in this checkout. Running
  * `npx vitest run` therefore destroyed real authority — on 2026-10-14 it removed the only surviving
- * `Bash(git push*)` / `Bash(npm publish*)` / `Bash(rm -rf /*)` deny file this workspace had (work.log.md).
+ * `Bash(git push*)` / `Bash(npm publish*)` / `Bash(rm -rf /*)` deny file this checkout had.
  * Losing a deny rule with no message is the worst failure mode in this codebase, and a green suite hid it.
  *
  * So the cleanup may remove only what was not there when the module was imported. The baseline is taken
@@ -467,7 +467,7 @@ describe("permission-modes extension: tool_call gate", () => {
 		})
 
 		it("asks before reading a secret-bearing path (tier 1 is layer 0's verdict now)", async () => {
-			// Regression pin for the bug W11 found by moving the ladder onto layer 0: the old text ladder anchored
+			// Regression pin for the bug that surfaced when the ladder moved onto layer 0: the old text ladder anchored
 			// SAFE_PATTERNS on the command name, so `cat ~/.ssh/id_rsa` was tier-1 "safe" and ask mode let a private
 			// key be read with no prompt at all. `cat` is still a read-only verb — what changed is that the PATH is
 			// what makes this ask.
@@ -1071,7 +1071,7 @@ describe("grants adopt confirm: the widening path needs an explicit stable id", 
 		await pi.simulateCommand("grants", `adopt confirm ${id}`, ctx)
 		const done = seen[seen.length - 1]
 		expect(done).toMatch(/adopted: allow Bash\(npm publish\)/i)
-		// D12's pin, now flipped by W24's reload face: the adopted rule must be live in THIS session, reported as
+		// The pin, flipped by the reload step: the adopted rule must be live in THIS session, reported as
 		// such, and the gate must let the covered call through. This pair is the point — the message and this
 		// assertion move together, so the wording can never quietly outrun the behaviour again.
 		expect(done).toMatch(/live now/i)
@@ -1086,7 +1086,7 @@ describe("grants adopt confirm: the widening path needs an explicit stable id", 
 
 describe("request_user_permission: the ask bridge (D11)", () => {
 	it("CHARACTERISATION: what a plain Allow (not always) does to the follow-up call", async () => {
-		// The single-call rung was the one path D11 left untested, which is why the CHANGELOG says nothing about it.
+		// The single-call rung was the one path left untested, which is why the CHANGELOG says nothing about it.
 		// This pins what actually happens rather than what it ought to do. Two honest outcomes: either the gate lets
 		// the retry through because a session approval covers it, or it denies again - and if it denies, the tool's
 		// "proceed with that exact call" sentence is a lie and must be rewritten.
@@ -1729,7 +1729,7 @@ describe("bypass mode: outside-cwd write tracking", () => {
 	 * The tracked outside-writes THIS SUITE caused, and nothing else. `realProjectRoot` is `process.cwd()`, so
 	 * `suiteOutsideWrites()` also returns rows the live plugin recorded while anyone works in this
 	 * checkout — an absolute count there measures the machine, not the test (measured 2026-10-16: 7 failures with two
-	 * unrelated rows present; W56 hit it with 16 rows left by the plugin snapshotting its own `/tmp` writes).
+	 * unrelated rows present; it was hit with 16 rows left by the plugin snapshotting its own `/tmp` writes).
 	 * `outsideTmpDir` is a fresh `mkdtemp` path per test, so the filter is exact rather than a heuristic.
 	 */
 	function suiteOutsideWrites(): ReturnType<typeof listTrackedOutsideWrites> {
@@ -2680,7 +2680,7 @@ describe("stable system prompt across turns", () => {
 	})
 })
 
-// ---- Injection probe in before_agent_start (plan B1) --------------------
+// ---- Injection probe in before_agent_start -------------------------
 // Real SessionEntry shape: {type:"message", message:{role:"user"|"assistant"|"toolResult"}}.
 describe("injection probe in before_agent_start (plan B1)", () => {
 	let pi: FakePi
@@ -2874,7 +2874,7 @@ describe("injection probe in before_agent_start (plan B1)", () => {
 	})
 })
 
-// ---- Approval flow parity: outside-write tracking (plan B2) -------------
+// ---- Approval flow parity: outside-write tracking ------------------------
 // Same write-outside-cwd input through the ask-mode inline flow and the
 // auto tier-3 flow must produce identical side effects (tracking, rule
 // persistence, notifications). The ask flow previously dropped tracking.
@@ -2989,7 +2989,7 @@ describe("approval flow parity: outside-write tracking (plan B2)", () => {
 	})
 })
 
-// ---- pm↔cctui capability channel (plan B7) ------------------------------
+// ---- pm↔cctui capability channel ----------------------------------------
 describe("permission-modes capability channel (plan B7)", () => {
 	let pi: FakePi
 	let configTmp: string
@@ -3538,13 +3538,13 @@ describe("project-state cleanup cannot eat the checkout", () => {
 describe("the /classifier-status readout", () => {
 	/**
 	 * These lines are the only place a user can ask "is my classifier unusable, or was it never configured?" — two
-	 * opposite states with two different levers — and the Copilot allowance was invisible until W88 (the cap lives in
+	 * opposite states with two different levers — and the Copilot allowance was invisible (the cap lives in
 	 * `model-client.ts`, the counter in `copilot-session.ts`, so hitting it printed nothing). Nothing asserted either
 	 * line when it landed.
 	 *
 	 * Written self-contained on purpose. My first version asserted against whatever config the tests above happened to
 	 * leave loaded: it passed in a full-file run and failed under `-t`, because the config path is module state and the
-	 * earlier suites had pointed it elsewhere. A test whose answer depends on who ran first is D55 in a new costume, so
+	 * earlier suites had pointed it elsewhere. A test whose answer depends on who ran first is that defect in a new costume, so
 	 * this one sets its own config, its own project root, and cleans both up.
 	 */
 	async function statusWith(config: Record<string, unknown>): Promise<string> {

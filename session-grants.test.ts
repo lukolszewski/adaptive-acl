@@ -1,5 +1,5 @@
 /**
- * Restoring a session blob. Decision D5 (docs/DECISIONS-2026-10-14.md): a restore COPIES
+ * Restoring a session blob. The rule this file pins: a restore COPIES
  * a row, it does not re-decide one.
  *
  * The behaviour under test used to be safe by accident. Restore rebuilt each row with
