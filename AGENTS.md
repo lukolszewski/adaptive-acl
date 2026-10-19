@@ -354,9 +354,10 @@ feature is noise to the person who has to maintain it next.
 - **No personal or machine-specific paths.** No home directories, host names, account names or local
   checkout paths — in code, comments, tests or commit messages. Tests use `mkdtemp` and injected
   `home`/`project` (`risk-paths.ts:1-4`).
-- **No internal decision records, evaluation logs, or comparisons against other people's code.** Several
-  header comments in this tree cite records that are not here (`docs/DECISIONS-*.md`, `docs/TODO.md`,
-  `eval/…`, `tools/copilot-probe.ts`). Treat those as dead pointers: the written specifications that ship are
+- **No internal decision records, evaluation logs, or comparisons against other people's code.** If a comment
+  cites a record that is not in this tree — a decision log, a TODO list, an evaluation harness, a scratch
+  probe — treat it as a dead pointer and fix the comment while you are in the file. The written
+  specifications that ship are
   [docs/CLASSIFIER-SPEC.md](docs/CLASSIFIER-SPEC.md) and
   [docs/LAYER0-WALKER-SPEC.md](docs/LAYER0-WALKER-SPEC.md), plus the mode prompts in `docs/prompts/`. If a
   decision needs to survive, put the reason in the code comment and cite the code, not the record.
