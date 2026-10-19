@@ -97,7 +97,7 @@
  *   exceeds 300 ms however many attempts it makes.
  *
  * Why the progress callback is *not* used as a work budget, even though it would be deterministic:
- * measured with the time guard frozen off (`spike/pi/w53-steps.ts`), a callback is not a quantum of
+ * measured with the time guard frozen off (the inputs quoted next), a callback is not a quantum of
  * work. `a;` × 5000 takes 502 callbacks and 16 ms; `;a` × 5000 takes 302 callbacks and 700 ms. Same
  * order of callbacks, 40x the time, because the error recoverer does its work between callbacks. Real
  * input uses 0–16 callbacks (p50 0, p99 4) and the densest legal command uses 502, so any callback

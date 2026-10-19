@@ -16,7 +16,7 @@ import {
 import { bashRuleView, categoryHasStrictOperands } from "./bash-audit.ts"
 import { evaluateBash } from "./risk-policy.ts"
 /**
- * W8, end to end: a stored permission must not mean more than the click that wrote it.
+ * Strict operands, end to end: a stored permission must not mean more than the click that wrote it.
  *
  * `bash-rule-argv.test.ts` pins the matcher and `bash-audit.test.ts` pins the view; this file pins the
  * thing both of them can get wrong without any single unit failing — the *table*. Which verdicts make a
@@ -176,11 +176,11 @@ describe("the table is written against categories that exist", () => {
 
 describe("the breadth that is left, and who owns it", () => {
 	it("the breadth W8 left behind is closed: an approval writes the exact invocation", () => {
-		// W8 pinned this as the residual hole it could not close: the engine generalised subcommand-grammar verbs,
-		// so a click on `git reset --hard` wrote `Bash(git reset:*)`, which still covered `git reset --hard HEAD~1`
-		// — wider than the click. Its comment here said the fix is the suggestion engine deriving an exact
-		// specifier from layer-0 argv, "which is W9's job". W9 did that, so the pin records the CLOSED state:
-		// the offer is exact, strict operands honour it, and a different invocation of the same verb prompts.
+		// This was the residual hole: the engine generalised subcommand-grammar verbs, so a click on
+		// `git reset --hard` wrote `Bash(git reset:*)`, which still covered `git reset --hard HEAD~1` — wider
+		// than the click. The fix is a suggestion engine that derives an exact specifier from layer-0 argv
+		// (`suggestBashAllowRuleSet` in `bash-permission-match.ts`), and it is in place, so this pin records the
+		// CLOSED state: the offer is exact, strict operands honour it, and a different invocation prompts.
 		const set = suggestAllowRuleSetForToolCall("bash", { command: "git reset --hard" }, cwd)
 		expect(set.rules).toEqual(["Bash(git reset --hard)"])
 		expect(behaviorOf("git reset --hard", set.rules)).toBe("allow")
@@ -245,10 +245,10 @@ describe("a redirect target is named by the same exact rule (W10 extends W8, it 
 	})
 
 	it("a target-bearing redirect keeps strict operands on top of the target", () => {
-		// Reading a secret and writing it out: `read_secret` is strict (W8's addition) and the command also
-		// redirects, so the rule has to name every word AND the file. An extra argument or a different file
-		// stops being covered — W8's probe hole (`rm -rf /tmp/x` covering `rm -rf /tmp/x /tmp/z`), one level
-		// down, now closed for the redirect half too.
+		// Reading a secret and writing it out: `read_secret` is in `STRICT_OPERAND_CATEGORIES` and the command
+		// also redirects, so the rule has to name every word AND the file. An extra argument or a different
+		// file stops being covered — the probe hole (`rm -rf /tmp/x` covering `rm -rf /tmp/x /tmp/z`), one
+		// level down, closed for the redirect half too.
 		const view = bashRuleView("cat ~/.ssh/id_rsa > /tmp/out", cwd)
 		expect(view.proven).toBe(true)
 		if (!view.proven) return

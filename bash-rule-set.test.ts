@@ -112,8 +112,8 @@ describe("the rules that get written are rules the argv matcher can read", () =>
 	// What an "always allow" is for: the next invocation stops prompting. On the text path that round
 	// trip was broken for compounds — one rule was written for the head clause, while coverage needed
 	// every clause — so the command asked again forever. The set above writes one rule per leg, and
-	// W3 asks bashRuleCoversArgv per leg, so this pins the two halves against each other: for every
-	// leg of these commands, some rule in the written set covers that leg's argv.
+	// coverage asks `bashRuleCoversArgv` per leg (`permissions.ts`), so this pins the two halves against
+	// each other: for every leg of these commands, some rule in the written set covers that leg's argv.
 	const LEGS: Record<string, string[][]> = {
 		"git status && echo done": [["git", "status"], ["echo", "done"]],
 		"git status && rm -rf /tmp/x": [["git", "status"], ["rm", "-rf", "/tmp/x"]],

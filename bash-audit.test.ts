@@ -171,10 +171,10 @@ describe("hitsNeverFloor", () => {
 })
 
 describe("bashRuleView: the one answer the allow path reads", () => {
-	// W3 read the legs and the floor from two places; W8 needs the verdict's CATEGORY as well, and a second
-	// `evaluateBash` per call would double the analysis on the hottest path in the extension. So all three
-	// answers come back together, and each is pinned here on its own — `bash-allow-layer0.test.ts` pins what
-	// `permissions.ts` does with them.
+	// The legs, the severity floor and the strictness flag answer three questions, and paying for a second
+	// `evaluateBash` per call to get the third would double the analysis on the hottest path in the extension.
+	// So all three answers come back together, and each is pinned here on its own — `bash-allow-layer0.test.ts`
+	// pins what `permissions.ts` does with them.
 
 	it("carries the legs, the floor and the strictness flag in one object", () => {
 		const view = bashRuleView("rm -rf /tmp/x", cwd)
