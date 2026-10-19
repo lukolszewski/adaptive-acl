@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * bash-walker-scan.ts — the text scans of §2 steps 2–5 (docs/LAYER0-WALKER-SPEC.md §10), the checks
  * that run on the input as written because they exist for the place where a reviewer, a shell and a
  * parser disagree about where a word begins or ends.

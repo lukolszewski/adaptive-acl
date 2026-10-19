@@ -8,6 +8,9 @@
  *  - `applyAuthorityLayers()` / `getAuthority*()` — the cached view of all three
  *    layers, so a hot path (footer render, approval callback) reads a field instead
  *    of re-reading and re-merging files. The getters allocate nothing.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import {

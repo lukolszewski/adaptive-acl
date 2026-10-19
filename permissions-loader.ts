@@ -1,5 +1,8 @@
 /**
  * Load / persist permission rules from global + project scopes.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import {

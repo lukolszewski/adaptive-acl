@@ -1,3 +1,9 @@
+/**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ */
+
 import type { Node } from "web-tree-sitter"
 import { beforeAll, describe, expect, it } from "vitest"
 import type { AstCommand } from "./bash-ast.ts"

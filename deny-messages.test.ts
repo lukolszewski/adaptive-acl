@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Denial-message precision. The gate's job is not only to decide but to tell the
  * agent WHY, so it can rewrite instead of bouncing to the user. Measured
  * justification: the cases below, each one a sentence an agent acts on.

@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * The plugin's own GitHub Copilot **Auto** session.
  *
  * Why this module exists at all, measured 2026-10-16/17 on a free plan: when GitHub picks the model,

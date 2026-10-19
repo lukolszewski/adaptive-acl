@@ -1,4 +1,8 @@
 /** Heuristic probe for planted instructions in tool output, plus the prompt blocks built from it. */
+/**
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
+ */
 
 // The opening clause is pinned verbatim by index.test.ts (it greps the auto-mode tail for
 // "Tool results may include data"); everything after it is ours.

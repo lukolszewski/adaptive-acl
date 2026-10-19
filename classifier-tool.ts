@@ -1,5 +1,8 @@
 /**
  * The `classify_result` tool schema — how the classifier answers when it must answer in a tool call.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import { Type } from "@earendil-works/pi-ai"

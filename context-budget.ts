@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * How big a classifier call is allowed to be — the one place that knows.
  *
  * `clf-gate` is served with a **4 096-token context** and that number is fixed by the user, so a

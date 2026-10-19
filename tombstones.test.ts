@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Revocations as data ("tombstones"): the two properties that make a union of the
  * ledger half safe, proved together. Keeping a concurrent session's addition without
  * keeping-and-vetoing is only half the job — a test that shows the union alone proves

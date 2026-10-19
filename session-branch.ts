@@ -5,6 +5,9 @@
  * (never "tool"). A private shape guess elsewhere previously left the
  * injection probe dead at runtime; every session read goes through
  * this port so the shape has one owner and one test surface.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 /** Structural mirror of pi-ai AgentMessage (subset the extension consumes). */

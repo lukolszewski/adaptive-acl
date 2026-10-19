@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Making a confirmed orphan rule live in the session that confirmed it.
  *
  * `/grants adopt confirm <id>` writes an orphan's allow rule into this project's rules file. Writing it is

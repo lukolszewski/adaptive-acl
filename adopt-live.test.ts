@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * An adopted rule becomes live in the session that adopted it.
  *
  * This pairing used to be a gap, and this is the test that replaces the pinned one in `index.test.ts`

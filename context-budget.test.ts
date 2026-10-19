@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * The context-budget contract: the constants are the measured ones, the estimate is a ceiling, and
  * the fill never breaks an item or leaves a hole.
  */

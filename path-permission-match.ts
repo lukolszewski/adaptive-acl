@@ -1,6 +1,9 @@
 /**
  * Read / Edit / Write path permission matching: globs over project-relative, `~/` and absolute
  * paths, plus the allow-always suggestions offered after a path is approved.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import path from "node:path"

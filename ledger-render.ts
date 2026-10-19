@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * The authorisation ledger as the summary of the turns that no longer fit the call
  * in the classifier's context window.
  *

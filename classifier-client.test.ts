@@ -1,3 +1,8 @@
+/**
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
+ */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"

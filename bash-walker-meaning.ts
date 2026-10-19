@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * bash-walker-meaning.ts — docs/LAYER0-WALKER-SPEC.md §11, run as §2 step 9 over the finished
  * command list.
  *

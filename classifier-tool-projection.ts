@@ -1,6 +1,9 @@
 /**
  * Per-tool classifier input projection: the part of a tool call the safety model actually needs
  * to see (and '' for tools whose input carries no security signal).
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import { redactForClassifier } from "./classifier-redact.ts"
