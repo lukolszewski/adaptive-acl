@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Grants portability: ONE file holding the whole
  * authorisation state — ledger grants, forbids, read-only posture, session
  * grants, and the revocations that take rows back — so it can move between

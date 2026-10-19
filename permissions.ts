@@ -19,6 +19,9 @@
  * itself and the text matcher then stripped wrappers, redirections and `NAME=value` prefixes before
  * comparing strings. That is the duplicate this layout removes — see `bash-allow-layer0.test.ts`, which
  * fails if a scanner comes back.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import {

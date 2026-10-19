@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * The ledger as text — the part of the grant call that stands in for the turns too old to be sent
  * raw. What these pins protect is the CONTRACT the model reads: one line per row, oldest first, the
  * user's own words attached, and nothing invented. The budget half protects the other direction: a

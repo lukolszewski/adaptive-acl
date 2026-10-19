@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Baseline for schema-first extraction — Phase 0, then updated when the read rows landed.
  *
  * The intent of this file is that the behavioural diff is reviewable as a TEST diff: the

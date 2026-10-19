@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * The confirmation path for the widening half of `/grants adopt`.
  *
  * What this suite is really guarding is one asymmetry: every bug here can grant instead of deny, so

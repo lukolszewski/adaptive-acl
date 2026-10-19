@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * The auto-mode gate pipeline (docs/CLASSIFIER-SPEC.md §1–§4):
  *
  *   layer 0  evaluateToolCall (deterministic policy)

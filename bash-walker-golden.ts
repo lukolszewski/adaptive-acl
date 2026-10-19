@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * bash-walker-golden.ts — loader and comparer for `bash-walker.golden.jsonl` (§15).
  *
  * Not a `*.test.ts` file on purpose: vitest only collects tests, and the tests for parts 2 and 3

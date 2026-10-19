@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Re-reading the rules files into a live policy.
  *
  * Everything here is one of two questions, because those are the two ways a reload face can be wrong.

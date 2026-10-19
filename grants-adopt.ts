@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * `/grants adopt` — the action half of the orphan scan.
  *
  * `<cwd>/.pi/projects/` can hold state for ids the current session does not use. After a directory

@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Pinned behaviour of `stripChatmlControlRegions`.
  *
  * Some OpenAI-compatible endpoints emit reasoning as ChatML control regions **inside the text body**

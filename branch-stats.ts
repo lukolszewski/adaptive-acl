@@ -8,6 +8,9 @@
  * entry id (append-only paths share prefixes). Any mismatch — navigate,
  * fork, switchSession, a shorter branch — forces a full recompute, so the
  * incremental result is always equal to the brute-force sum.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import type { BranchEntry } from "./session-branch.ts"

@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Deterministic auto-mode risk policy (docs/CLASSIFIER-SPEC.md §2).
  *
  * evaluateToolCall(tool, input, ctx) → PolicyDecision

@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Bridge between pi (index.ts) and the v3 gate pipeline (gate.ts).
  * Mostly pure helpers: endpoint resolution, user-message extraction, prompt labels. The one piece of state is
  * {@link classifierUnavailability} — the cause recorded by the most recent endpoint resolution — because the

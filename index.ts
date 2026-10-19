@@ -8,6 +8,9 @@
  *   - plan    Read-only; only plan.md may be written.
  *   - auto    Tiered auto-approve + optional built-in classifier + risk blacklist.
  *   - bypass  Full auto-approve (old auto semantics); sparse security reminders.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import { Type } from "@earendil-works/pi-ai";

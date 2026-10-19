@@ -8,6 +8,9 @@
  * Two spellings come out of `toCompactBlock`: a human-readable line (`User: …`, `Bash {…}`) and,
  * with `jsonlTranscript`, one JSON object per block. Both are capped by the caller's entry/char
  * budget, oldest entries dropped first.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import { redactForClassifier } from "./classifier-redact.ts"

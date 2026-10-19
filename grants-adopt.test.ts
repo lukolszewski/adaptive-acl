@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * `/grants adopt` — the behaviour the supervisor's command is built on.
  *
  * The one thing worth reading closely here is the split: a deny that a moved directory left behind is

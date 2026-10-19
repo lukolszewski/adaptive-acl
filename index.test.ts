@@ -6,6 +6,9 @@
  * the captured `tool_call` handler directly with crafted events and contexts.
  *
  * This lets us assert the gate decision tree without booting real pi.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest"

@@ -20,6 +20,9 @@
  * "denials remaining", and neither updater writes to its argument — `index.ts` reassigns the
  * result either way, and `recordClassifierSuccess` hands back the very object it was given when
  * there is no streak to break.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 /** The two caps, stated first so the rules read before the thing they measure. */

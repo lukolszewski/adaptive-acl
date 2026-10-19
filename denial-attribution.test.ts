@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Every denial must say who refused.
  *
  * The failure this pins is not a wrong verdict — it is a refusal that cannot be debugged: two

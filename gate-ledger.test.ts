@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Gate ↔ ledger integration: runGate's ledger step (pure code path, mocked or
  * absent endpoint) and gate-bridge syncLedger (mocked fetch).
  */

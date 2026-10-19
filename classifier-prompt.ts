@@ -1,4 +1,8 @@
 /** Assembles the auto-mode classifier system prompt from the bundled prompt templates. */
+/**
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
+ */
 
 import { readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
