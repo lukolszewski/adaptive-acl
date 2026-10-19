@@ -6,11 +6,21 @@ import {
 	type BranchStatsState,
 } from "./branch-stats.ts"
 
+/**
+ * What the fakes below build, in one shape: a pi session entry as `branch-stats.ts` reads it.
+ *
+ * Deliberately a superset object rather than the real `BranchEntry` union: the fold only ever reads
+ * `type`, `id` and `message.usage`, and a union with pi's catch-all `{ type: string }` member cannot be
+ * narrowed to reach `message`. Fields the branch carries but the fold ignores (`content`, `toolName`,
+ * `customType`, `data`) are declared so the fakes can produce them — an id-less entry included.
+ */
 type Entry = {
 	type: string
 	id?: string
 	message?: {
 		role: string
+		content?: unknown
+		toolName?: string
 		usage?: {
 			input?: number
 			output?: number
@@ -19,6 +29,8 @@ type Entry = {
 			cost?: { total?: number }
 		}
 	}
+	customType?: string
+	data?: unknown
 }
 
 /** Reference implementation: brute-force sum in branch order. */

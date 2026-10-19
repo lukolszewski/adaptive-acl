@@ -1,6 +1,13 @@
-node_modules/
+node_modules
 package-lock.json
-.pi/plan/
-.pi/reports/
-.pi/self-taught/
+
+# Project-local agent artefacts: plans, reports, outside-write snapshots and grant files
+# are written next to the code while an agent works. None of them belong in the repository.
+.pi/
 .auto-test-marker
+
+# Worker scratch in task worktrees
+TASK.md
+RESULT.md
+.runs/
+*.log

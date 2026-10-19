@@ -60,6 +60,7 @@ describe("permissions evaluate", () => {
 				{ command: "npm test" },
 				cwd,
 			),
-		).toBe("Bash(npm:*)")
+			// Was `Bash(npm:*)` (tool-wide). Now scoped to the subcommand family.
+			).toBe("Bash(npm test:*)")
 	})
 })
