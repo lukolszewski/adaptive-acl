@@ -621,17 +621,17 @@ function escapeBashRuleContent(content: string): string {
 /**
  * The categories whose verdict is set by the targets the command names — deleting *this* path, overwriting
  * *this* file, discarding *this* worktree. Where the risk lives in the target, rule coverage requires argv
- * equality: no extension, options included (work.log 2026-10-14, the decision W8 implements). A suggestion
- * for such a leg therefore has to name every word it ran, or it offers a rule the matcher will refuse to
- * honour — which is the same dead offer W3 removed.
+ * equality: no extension, options included — `STRICT_OPERAND_CATEGORIES` in `bash-audit.ts`, applied by the
+ * `coverage.strictOperands` branch of `bashRuleCoversArgv` in `bash-rule-argv.ts`. A suggestion for such a
+ * leg therefore has to name every word it ran, or it writes a rule the matcher will never fire.
  *
- * **Asks the matcher, because a second list here went wrong.** W9 carried its own `TARGET_BEARING_CATEGORIES`
- * with `file_overwrite`, `permission_change` and `ssh_key_write` — names taken from a task brief, not from this
- * repository's tier tables, which emit `write_sensitive`/`write_outside`, `perm_change` and `persistent_access`.
- * The failure was fail-safe but silent: `chmod`/`sudo`/secret-read verdicts were treated as non-target-bearing,
- * so the producer generalised a specifier the strict matcher then refused, and the user simply lost the
- * "Always" offer for exactly the destructive verbs worth offering. One source of truth, so the producer cannot
- * disagree with the matcher that has to honour its output.
+ * **Asks the matcher, because a second list kept beside this one went wrong.** A `TARGET_BEARING_CATEGORIES`
+ * list naming `file_overwrite`, `permission_change` and `ssh_key_write` — strings that occur
+ * nowhere in this repository's tier tables, which emit `write_sensitive`/`write_outside`, `perm_change` and
+ * `persistent_access`. The failure was fail-safe but silent: `chmod`/`sudo`/secret-read verdicts were treated
+ * as non-target-bearing, so the producer generalised a specifier the strict matcher then refused, and the
+ * user simply lost the "Always" offer for exactly the destructive verbs worth offering. One source of truth,
+ * so the producer cannot disagree with the matcher that has to honour its output.
  */
 function isTargetBearing(category: string): boolean {
 	return categoryHasStrictOperands(category)

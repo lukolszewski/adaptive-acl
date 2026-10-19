@@ -3423,7 +3423,7 @@ describe("round 2: injection picker, project-local grants, predefined messages",
 
 	it("exports to the journal on its own once grantsAutoImport is on", async () => {
 		const journal = join(configTmp, "journal.json")
-		// Another session's row, written after our import. The point of W7: this must SURVIVE our write (union)
+		// Another session's row, written after our import. The point of the union: this must SURVIVE our write
 		// while a revocation still removes what it names — both halves are asserted below.
 		writeFileSync(
 			journal,
@@ -3463,7 +3463,7 @@ describe("round 2: injection picker, project-local grants, predefined messages",
 			JSON.parse(readFileSync(journal, "utf-8")).ledger.grants as Array<{ value: string }>
 		).map((g) => g.value)
 		expect(values).toContain("/data/auto-export")
-		// W7 made revocation a ROW, which is what lets auto-export union the ledger half instead of replacing it:
+		// Revocation is a ROW, which is what lets auto-export union the ledger half instead of replacing it:
 		// a concurrent session's addition is no longer collateral damage of our write.
 		expect(values).toContain("/from/other/session")
 

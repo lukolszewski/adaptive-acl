@@ -14,10 +14,10 @@
  * given — `argv`, quoting resolved, one entry per argument — and asks a question that needs no
  * re-parsing at all: *do the words the rule names sit, unchanged, at the front of these words?*
  *
- * That one change is what makes a chain of permitted legs permitted (W3 rewires `permissions.ts` onto
- * it): a compound never reaches here as one string, so `&&` can no longer defeat an allow rule, and
- * `Bash(bash x.sh)` stops failing to match `bash x.sh arg` because of a glob detail a user was told to
- * work around.
+ * That one change is what makes a chain of permitted legs permitted — `permissions.ts` scores every bash
+ * allow rule through this matcher — so a compound never reaches here as one string, `&&` can no longer
+ * defeat an allow rule, and `Bash(bash x.sh)` stops failing to match `bash x.sh arg` over a glob detail
+ * a user was told to work around.
  *
  * ## What a specifier means here
  *
@@ -412,8 +412,8 @@ export type ArgvCoverage = {
  *
  * `coverage.strictOperands` narrows an exact specifier to argv equality (see the section above); every
  * other specifier form — the tool-wide rule, a `:*` prefix, a glob — means what it says in both modes.
- * Omitting the argument keeps W2's contract exactly, which is what every caller that has no verdict (or
- * a command whose risk is not set by its targets) wants.
+ * Omitting the argument keeps the prefix contract exactly (`namedWordsCover`), which is what a caller with
+ * no verdict — or a command whose risk is not set by its targets — wants.
  *
  * `coverage.targets` is the narrower of the two and is not opt-in: when the command writes or reads a
  * file through a redirect, only an exact specifier that names that file — same operator, same

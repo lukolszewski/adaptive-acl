@@ -312,7 +312,7 @@ export function resolveInjectionEscalation(
 	return config.injectionEscalation ?? true
 }
 
-// ------------------------------------------------- layered authority (W6 surface)
+// ------------------------------------------------- layered authority (the `authority` block)
 
 function isAuthorityPersist(value: unknown): value is AuthorityPersist {
 	return (
@@ -625,7 +625,7 @@ export function resolveAutoModeConfig(
  *
  * Deliberately NOT under `.pi/projects/<id>/` where the rule files live: that
  * directory is named by a derived id, so a moved checkout orphans whatever was
- * written into it (the failure W5 exists for). A hand-authored config belongs at a
+ * written into it, which is the failure this layout avoids. A hand-authored config belongs at a
  * path the user can see and a `git worktree move` carries with the tree.
  *
  * **Rules are not read from this file.** Permission rules keep exactly two sources, one

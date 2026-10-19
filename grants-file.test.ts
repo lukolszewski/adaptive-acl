@@ -181,8 +181,8 @@ describe("mergeIntoGrantsFile — the rest of the file", () => {
 		mergeIntoGrantsFile(p, undefined, [row("/b")])
 		expect(ledgerRows(load(p))).toEqual(["/from-ledger"])
 
-		// W7 tombstones changed this half of the expectation: a real snapshot is now UNIONED
-		// with the half on disk, because replacing it silently deleted a concurrent session's
+		// This half of the expectation reads as it does because revocation is a ROW: a real snapshot is now
+		// UNIONED with the half on disk, because replacing it silently deleted a concurrent session's
 		// addition. What makes union safe is `revoked` — a row another session took back is
 		// vetoed by its revocation on the way out. See tombstones.test.ts.
 		mergeIntoGrantsFile(p, ledgerOf(["/new"]), [])

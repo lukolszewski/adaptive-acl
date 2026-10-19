@@ -225,7 +225,7 @@ describe("importLedger precedence", () => {
 		// ASSERTION FLIPPED deliberately — it used to read
 		// "does not restore `seen` (backfill re-extraction is self-healing)" and asserted
 		// `target.seen.size === 0`. Keeping it red would hide the flip it was watching, which
-		// is the same call W7 made on this file's ledger-half assertion. Restoring the ids is
+		// is the same call made on the ledger-half assertion in `grants-file.test.ts`. Restoring the ids is
 		// a correctness matter now that a revocation is a row: re-extracting an imported
 		// conversation is both a model call per message and the road a revoked grant could
 		// come back along. Both directions are pinned in auth-ledger.test.ts.
