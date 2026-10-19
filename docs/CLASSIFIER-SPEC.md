@@ -10,18 +10,20 @@ harm, ethics, or code quality, and it must never be asked to be one — that is 
 small model can do, and it is not what auto mode is for.
 
 Design principle: **decide in code whatever can be decided in code; ask a model only the
-narrowest remaining question; make every model answer machine-checkable.** The prior
-evaluation (`~/dev/pitmp/classifier-isue.md`) showed that the single-shot "read this rubric
-and judge" design fails on parseability, reproducibility and entity binding at every model
-size, while extraction-style questions already work on a 4B model.
+narrowest remaining question; make every model answer machine-checkable.** It follows from what the
+alternative was measured to do. Asking one small model to read a rubric and return a verdict fails on
+all three counts — the answer is not reliably parseable, is not reproducible across restarts, and
+does not bind to the entities named in the conversation, at every model size tried. The same sizes
+answer *extraction* questions reliably on a 4B model: "quote the sentence in which the user named
+this target" has a checkable answer, and the check can be done in code afterwards.
 
 ## 1. Outcomes
 
 | outcome | what happens |
 |---|---|
 | **ALLOW** | tool call runs, nothing shown to the user beyond the normal tool output |
-| **ASK** | needs authorisation; sources in order: permission rules → session grants (prompt-once memory) → transcript grant (model-extracted, code-verified) → prompt the user (UI) or deny with reason (no UI / `onBlock: "deny"`) |
-| **NEVER** | never auto-approved; transcript intent and session grants cannot pre-authorise it. With a UI a loud confirmation prompt is shown (`onNever: "prompt"`, default); otherwise the agent gets a denial that states the reason. Only bypass mode or an explicit permission `allow` rule (which the dangerous-rule stripper does not remove) can skip the prompt |
+| **ASK** | needs authorisation, and is authorised if any of these holds, evaluated in this order: configured permission rules (which run before any mode gate), session grants (prompt-once memory), the authorisation ledger, then — only if nothing authorised it — the read-only posture, then the transcript grant (model-extracted, code-verified). Whatever is left goes to the person: a prompt where there is a UI, a denial carrying the category, the entities and a one-line reason where there is not. A session with no UI behaves as unattended, so a prompt that cannot be drawn is a denial and never a pass |
+| **NEVER** | never auto-approved, and not pre-authorisable: the gate stops here, before session grants and the ledger are consulted, so nothing the user said earlier can settle it. With a UI the prompt is narrowed to *Allow* and *Block* — no session-entity, no scope, no "Allow always", and a plain Allow records no grant (§3 item 5) — so it interrupts once per call instead of remembering; without a UI it is a denial that states the reason. Only bypass mode or an explicit permission `allow` rule (which the dangerous-rule stripper does not remove) gets past it |
 
 Every ASK/NEVER decision carries a **category** and a list of **entities** (paths, images,
 branches, hosts, packages, ports…) so the user sees *what* is being authorised and the grant
@@ -29,22 +31,45 @@ can be stored at the right granularity.
 
 ## 2. Deterministic policy (layer 0)
 
-Runs first for every tool call. Bash commands are split into segments (`&&`, `||`, `;`, `|`,
-newlines), each segment is tokenised (quotes honoured), leading wrappers are peeled
-(`sudo`, `env VAR=x`, `timeout N`, `nice`, `nohup`, `command`, `exec`, `time`, `xargs` where
-recognised), `cd` segments update the effective working directory for later segments, and
-redirection targets are treated as writes — including a file named by an **output flag** rather than by
-a redirect (§2.7). The overall decision for a compound command is
-the **most restrictive** segment. Unrecognised commands, nested command substitution
+Runs first for every tool call, in code, with no model in the loop.
+
+Bash is not split on text. The whole input is parsed with `tree-sitter-bash` and walked under
+[docs/LAYER0-WALKER-SPEC.md](LAYER0-WALKER-SPEC.md), which either proves a literal argument list for
+every simple command in the input or refuses the input as a whole with one reason id and the
+`malformed` flag that says whether to ask for a simpler command (§2.4). Each simple command the parse
+proves is then classified by the handler for its command family (`risk-handlers.ts`); a `cd` updates
+the effective working directory for the commands after it; redirection targets are treated as writes
+— including a file named by an **output flag** rather than by a redirect (§2.7); and the verdict for a
+compound input is the **most restrictive** command in it. There is exactly one parser: the older
+hand-written lexer (`shell-lexer.ts`) still runs, but only where the parse refused, and only to
+escalate — its `ask` and `never` verdicts survive, its `allow` verdicts come back as `unknown`
+(`risk-policy.ts`). It can never lower a tier and never authorise a command.
+
+Wrappers are not transparent, and the two layers peel different lists. For its meaning checks the parse
+steps over `env`, `nice`, `stdbuf`, `timeout`, `nohup` and `time` — and only for those checks, so the
+reported command words stay what was written (LAYER0 §11.2); a wrapper in a form the parse does not
+recognise is refused, not judged as itself. The handler then peels its own list to reach the verb it
+classifies (`WRAPPERS` in `risk-handlers.ts`: `timeout`, `time`, `nice`, `ionice`, `nohup`, `stdbuf`,
+`strace`, `ltrace`, `command`, `builtin`, `exec`, `setsid`, `unbuffer`, `script`, `chronic`, `flock`,
+`taskset`, `numactl`). Neither list ever hides `sudo`/`doas`/`pkexec` or `xargs`: the first family is its
+own category (`privilege`, §2.2) whose inner command is classified beside it, with NEVER surviving the
+wrap, and `xargs` has its argument command classified in its own right.
+
+Unrecognised commands, nested command substitution
 (`$(...)`, backticks) feeding a mutating verb, inline interpreter code (`python -c`,
 `node -e`, heredocs) and `eval` are **UNKNOWN** and go to the model (layer 1).
 
 ### 2.1 ALLOW (auto)
 
+The families below are what the handlers classify as `allow`; the exact word lists live with the code
+and are the authority — `READONLY_BINS` and the per-family handlers in `risk-handlers.ts`, the write
+and path rules in `risk-paths.ts`. A command no handler claims is not "allowed by omission": it comes
+back `unknown` and goes to §2.4.
+
 - Reading anywhere: `cat head tail less more wc stat file du df ls tree find grep rg fd
-  diff sort uniq cut tr jq yq awk`-as-filter (see 2.4), `sed -n` without `w`, `which type
-  env printenv uname whoami id date uptime ps top free nvidia-smi lsblk mount df`.
-  Exception: reading **secret-bearing paths** (2.5) is ASK.
+  diff sort uniq cut tr jq yq awk`-as-filter (§2.4), a `sed` with no `-i` and no `w` command in its
+  script, `which type env printenv uname whoami id date uptime ps top free nvidia-smi lsblk mount df`.
+  Exception: reading **secret-bearing paths** (§2.5) is ASK.
 - pi tools `read/grep/find/ls` anywhere except secret-bearing paths.
 - Writes (`edit`/`write`, `tee`, `>`/`>>`, `cp/mv/mkdir/touch/ln`) with **all targets inside
   the project directory**, except the project's `.git/` internals and secret-bearing files.
@@ -99,13 +124,31 @@ the **most restrictive** segment. Unrecognised commands, nested command substitu
 | `perm_change` | `chmod`/`chown` outside project, `chmod 777`, `o+w`, `chmod -R` outside project | paths |
 | `interpreter_unknown` | inline code the model could not classify as read-only/project-scoped | — |
 
-### 2.3 NEVER (loud prompt or deny; not pre-authorisable)
+### 2.3 NEVER (Allow once at a prompt, or deny; not pre-authorisable)
 
-- `rm -r`/`rm -rf`/`find -delete`/`shred` targeting: `/`, `/*`, `~`, `~/*`, `$HOME`, `/home`,
-  `/root`, `/etc`, `/usr`, `/var`, `/boot`, `/bin`, `/sbin`, `/lib*`, `/opt`, `/srv`, `/dev`,
-  `/proc`, `/sys`, `..` (any parent of the project), the project root itself (`rm -rf .`,
-  `rm -rf ./`, `rm -rf $PWD`), any glob that resolves to one of these, or `~/.ssh`,
-  `~/.gnupg`, `~/.config`, `~/.local`, `~/Documents|Desktop|Pictures|…` wholesale.
+The path half of this is one table in `risk-paths.ts`, not a paraphrase: `SYSTEM_ROOTS` for whole
+systems, `HOME_NEVER_SUBDIRS` for the first level of a home directory, and one rule — a path is
+never-wipe if it *is* one of those, if it is the user's home, or if the project lives under it
+(`isUnder(project, abs)`), which is what makes every ancestor of the project and the project root
+itself unwipeable.
+
+- `rm -r`/`rm -rf`/`find -delete`/`shred` targeting a system root: `/`, `/bin`, `/sbin`, `/lib*`,
+  `/usr`, `/etc`, `/var`, `/boot`, `/opt`, `/srv`, `/dev`, `/proc`, `/sys`, `/root`, `/home`, `/mnt`,
+  `/media`, `/run`, `/snap`, `/nix`, the macOS trees (`/System`, `/Library`, `/Applications`,
+  `/Users`, `/private`), and the deep ones that are always worth more than their parent
+  (`/usr/local`, `/usr/{bin,sbin,lib,share}`, `/var/lib`, `/var/log`, `/etc/ssh`, `/etc/systemd`,
+  `/var/lib/docker`). The temp roots (`/tmp`, `/var/tmp`, `/dev/shm`) are on the list as
+  *directories*: their contents are ordinary `delete_outside` targets, the directory itself is not.
+- …or the home directory itself, or a first-level entry of it that holds a person's work or their
+  credentials: `.ssh`, `.gnupg`, `.config`, `.local`, `.cache`, `Library`, `Documents`, `Desktop`,
+  `Pictures`, `Videos`, `Music`, `Downloads`, `Dropbox`, `OneDrive`, `.aws`, `.kube`, `.docker`,
+  `.password-store`, `.mozilla`, `.thunderbird`, `dev`, `src`, `projects`, `work`, `repos`, `code`.
+  Only as a whole entry — `rm -rf ~/Documents/one-project` is a `delete_outside`, `rm -rf ~/Documents`
+  is NEVER — because the second one deletes the things that were not this project.
+- …or the project root itself (`rm -rf .`, `rm -rf ./`, `rm -rf $PWD`) or any parent of it.
+  A glob is judged by the directory it names, not by the shell's expansion: a trailing glob component
+  is dropped and the remainder classifies (`rm -rf ./build/*` is about `./build`), a glob at the root
+  of a path (`*`, `./*`) is the current directory, and `$HOME` / `${HOME}` are expanded first.
 - `dd`, `mkfs*`, `fdisk`, `parted`, `wipefs`, `sfdisk`, `blkdiscard`, writes to `/dev/sd*|nvme*|
   mmcblk*|loop*`, `> /dev/…` (except `/dev/null`).
 - `reboot`, `shutdown`, `halt`, `poweroff`, `init 0|6`, `systemctl reboot|poweroff|halt|
@@ -118,7 +161,7 @@ the **most restrictive** segment. Unrecognised commands, nested command substitu
 - `crontab -r`, deleting `/etc/passwd|shadow|sudoers|fstab`, editing `/etc/sudoers` with
   `NOPASSWD:ALL`, appending keys to `~/.ssh/authorized_keys`, `visudo`.
 - Credential/personal-data exfiltration: any `network_send`/`vcs_remote` whose payload or
-  source path is a secret-bearing path (2.5) (`curl -d @~/.ssh/id_rsa …`, `scp ~/.aws/
+  source path is a secret-bearing path (§2.5) (`curl -d @~/.ssh/id_rsa …`, `scp ~/.aws/
   credentials host:`, `git add .env && git push`, `aws s3 cp ~/.ssh s3://…`), or uploads of
   `~`, `~/Documents` etc. wholesale.
 - Cluster/cloud wide-blast: `kubectl delete namespace|node|--all|-A`, `kubectl drain`
@@ -144,27 +187,68 @@ targets named `deploy|publish|release|clean-all`, scripts outside the project, `
 `run`/`exec`. The model receives the raw command (and the inline code if any) and answers a
 closed-vocabulary **effect classification**; the effect maps back onto 2.1–2.3.
 
-UNKNOWN is distinct from **UNPARSEABLE**. A command whose structure the parser cannot
-establish cleanly — it reaches end-of-input still inside a quote, heredoc, or `$( )`
-substitution, or contains control characters — is malformed; its segment list would be
-fabricated from the unparsed
-remainder (the failure that produced phantom "commands" from an awk `printf` body in
-one real session). The line does not move when layer 0 becomes an AST parse: a command that
-*parses* but contains nodes the security walker will not vouch for is **UNKNOWN**
-(`unproven_structure`) and still goes to the effect model — only genuinely malformed input
-takes the fix-and-retry path. Such a command is **not** sent to the effect model and **not**
-turned into a user prompt. It is refused, and the agent is asked to rewrite/simplify
-and retry (§5). This is fail-closed (an unparseable command can no longer degrade into
-an allow via phantom segments) and is a security improvement, not just UX.
+UNKNOWN is distinct from **UNPARSEABLE**, and the two take different roads.
+
+A command whose structure the parse cannot establish — the input ends inside a quote, a heredoc or a
+`$( )` substitution, or it carries a control character — is `malformed`, and any segment list for it
+would have to be fabricated from the unparsed remainder. That is not a cosmetic cost: a fabricated
+segment list is how an awk `printf` body once came back as two confident "commands" and was judged as
+if they were. So a malformed command is **not** sent to the effect model and **not** put to the user as
+a permission question — there is no command there to authorise. It is refused with no model call, and
+the agent is told to rewrite it: split the pipeline, avoid deeply nested quoting, put a complex
+awk/sed/python program in a file or a heredoc instead of inline. The retries are bounded; after 3
+malformed commands in a row an unattended run is told to park the step and list it later, and an
+attended session hands the stuck agent to the human, who can see what is happening.
+
+A command that *does* parse but uses structure the walker will not vouch for — a loop, a brace group, a
+command substitution, a variable with no known value — is the other case: valid bash, refused for what
+it uses, `malformed: false`. That is **UNKNOWN** (`unproven_structure`) and it *does* go to the effect
+model, because nothing is broken and a model can reason about the intent. The line between the two is
+drawn by the parse's own flag and never by the wording of a reason, and the older text engine running
+beside it can only make such a command more expensive to approve, never cheaper (§2).
+
+A third refusal is neither case. With no grammar loaded in the process, every bash command is refused
+`parser-unavailable`: that is the plugin's own fault rather than the command's, so the denial says the
+analyzer is down instead of advising a rewrite, and it stops everything rather than passing anything.
+The reason id stays in the text the agent reads, because the advice attached to a denial is chosen from
+it — paraphrase it away and the caller has to guess whether to blame the command or the runtime.
 
 ### 2.5 Secret-bearing paths
 
-`~/.ssh/**` (except `known_hosts`, `config`), `~/.aws/**`, `~/.gnupg/**`, `~/.kube/config`,
-`~/.docker/config.json`, `~/.npmrc`, `~/.pypirc`, `~/.netrc`, `~/.git-credentials`,
-`~/.config/gh/hosts.yml`, `~/.pi/agent/auth.json`, `~/.claude/**` credentials,
-`**/.env`, `**/.env.*` (not `.env.example|.env.sample|.env.template`), `**/id_rsa*`,
-`**/id_ed25519*`, `**/*.pem`, `**/*.key`, `**/credentials*`, `**/secrets*.{json,yaml,yml}`,
-`**/token*`, `/etc/shadow`, `/etc/sudoers*`, keychains.
+Being secret-bearing costs one prompt and sets no floor: the category is `read_secret`, so an approval
+or a grant covers the file like any other ASK. What counts is decided in `risk-paths.ts` by three
+mechanisms, and a name list alone cannot cover the last one.
+
+1. **A directory under the home directory**: `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`,
+   `.config/gh`, `.config/gcloud`, `.azure`, `.password-store`, `.config/pi`, `.vault-token`,
+   `.claude`, and `.pi/agent` — this plugin's own state directory, treated as one whole because
+   whatever the agent is handed lands beside its settings. Its own `permission-modes.json` is exempt:
+   it holds modes, rules and the classifier endpoint, and provider keys live in the agent's own
+   settings files, not there.
+   Two exemptions inside `~/.ssh`: `known_hosts` and `config` are sensitive *config* (§2.6), not
+   secrets — reading them is routine and blocking it teaches the user that the wall is noise.
+2. **A reviewed file name, one line each** (`SECRET_NAME_RULES`): OpenSSH private keys
+   (`id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`, `.pub` included), key material by extension
+   (`.pem .key .p12 .pfx .jks .keystore`, and `.secret`), `credentials*`, `.env` and `.env.*`, the
+   client auth files (`.npmrc .pypirc .netrc .git-credentials .pgpass .my.cnf .htpasswd`),
+   `auth.json`, `secrets?.{json,yaml,yml,toml,env}`, `token(s)*`, `shadow` and `sudoers*`,
+   `kubeconfig`, `service-account*.json`. A name ending `.example`, `.sample`, `.template`, `.dist`
+   or `.schema` is a template and is not secret by name. `/etc/shadow`, `/etc/gshadow` and anything
+   under `/etc/sudoers` are secret wherever they are found.
+3. **A name whose last word declares what it holds** — `pass`, `passwd`, `passphrase`, `password`,
+   `credential(s)`, `secret(s)`, `token(s)`, `apikey`, `htpasswd`. This is word recognition, not
+   pattern matching, and its whole design is not being noisy: the word must be a whole word of the
+   name (`passctl`, `mypasswd`, `tokenizer`, `compass` are ordinary files); a file whose extension
+   says code or prose is never secret by name, so `src/password.ts` and `docs/secrets.md` stay
+   readable, while data extensions (json/yaml/toml/env/txt/csv) stay in play because a data file
+   named `secrets` is exactly what this is for; `key` counts only behind a qualifier that is itself
+   known to name a credential (`sort_key` and `monkey` do not); the token has to *address* a file, so
+   the bare word in `grep -r password src/` is a search term, not a target; and one word means
+   something else where the OS keeps it — `/etc/passwd` is the user database, not a credential store.
+
+Secrets are not config-shaped, so §2.6's staged-copy rule does not reach them: a `.env`, a key or a
+credential file is secret-bearing inside the project too, because the harm is in the bytes and not in
+an activation step, and a staged copy of a private key is still a private key.
 
 ### 2.6 Live config vs staged copies
 
@@ -235,15 +319,41 @@ one. A runtime-determined operand (`sort -o "$(pwd)/x"`) is reported as written,
 placeholder; such a command is already `opaque`, and an opaque command's arguments are never read as
 literals (`unproven_value`).
 
-## 3. Authorisation for ASK (layer 1b)
+Three details of the read, because each one is a way for the table to be wrong about a real command:
+a wrapper is stepped over first, so `timeout 5 sort -o /etc/x` still reports the write; a bare `--`
+ends the option scan, so a word after it is a filename and not a flag operand; and the `git` rule fires
+only when one of `diff`, `show`, `log` appears among the words the invocation names, anywhere before the
+flags, because `--output` belongs to the diff options (`git -c core.pager=cat diff --output=f` is still
+`git diff`). LAYER0 §7.7 is the walker-side half of this section.
 
-An ASK decision is authorised when **any** of the following holds, checked in order:
+## 3. Authorisation for ASK
+
+An ASK decision is authorised when **any** of the following holds.
+
+The items keep the subsection numbers the rest of this document and the code comments use, which are
+**not** the order they run in. The code evaluates them **1 → 2 → 3 → 2b → 4** (grants, ledger, then the
+posture, then the model), because the posture has to be outrankable by a permission given later — see
+item 2b's "default, not a veto". Item 4 is what the number **§3.3** means: it holds the entity matcher
+that items 2 and 3 also call, and `grant-verify.ts` and §4.2 both cite it by that number, so renumbering
+this section without carrying the alias would orphan those references.
+
+One thing happens before any of this: a **named forbid** in the ledger also binds an ALLOW-tier verdict.
+"do not delete X" downgrades an allow into an ASK so the pipeline below decides it, with the forbidden
+path promoted to a target so the prompt can offer the session options on it. An explicit revocation is
+never outranked by a table that finds nothing wrong.
+
+`gate.ts` names these steps after the pipeline rather than after this document: **layer 1a** is item 2,
+**layer 1b** is item 4, **layer 1c** is the effect classification of §4.1 (which runs on UNKNOWN, before
+this section is reached at all). The ledger of item 3 and the posture of item 2b have no layer letter.
 
 1. **Permission rule** — an existing configured `allow` rule matches (dangerous broad rules
    are still stripped on auto entry).
-2. **Session grant** — the user answered an earlier prompt with *Allow* / *Allow for this
-   session* (or *Allow always*) and the stored grant `{category, entity or entity-scope}`
-   covers the pending entities. Grants are exact entities or directory/namespace prefixes
+2. **Session grant** — the user answered an earlier prompt with *Allow*, `Allow for session: <the
+   pending targets>`, `Allow for session (scope …)`, or an *Allow always* answer — which stores the
+   same row marked durable, so it is remembered past this session too: in the project's grants journal
+   by default, or in a rule file when `authority.persist` is `"rules"` (item 5) — and the stored grant
+   `{category, entity or entity-scope}` covers the pending entities.
+   Grants are exact entities or directory/namespace prefixes
    chosen by the user in the prompt; they are never widened automatically. A grant that
    names a **path** authorises any *path-mutating* category on that exact path
    (target-first matching): "apply that fix to /x/y.py" authorises writing `/x/y.py` even
@@ -271,30 +381,32 @@ An ASK decision is authorised when **any** of the following holds, checked in or
     wildcard forbid that matched hallucinated targets and mis-reported "user forbade
     «entity»".
 3. **Authorisation ledger** — pure code lookup against the per-session ledger of grants
-   and forbids folded from per-message extraction (task 4.3); this is the whole-session
+   and forbids folded from per-message extraction (§4.3); this is the whole-session
    memory, so authorisation is not a function of scroll position. All pending target
    entities must be covered by grant entries of a **compatible kind group** (creating,
    copying, moving, writing and chmod at a user-designated location are one group;
    deletes additionally require a delete verb in the grant's quote; package installs,
-   sudo, remote exec and listeners require their method verb — same regexes as §3.3),
-   each grant's `seq` must be above any matching forbid's, and near-name rejection from
-   §3.3 applies unchanged. A matching **forbid** short-circuits to the prompt — the
+   sudo, remote exec and listeners require their method verb — the same verb tables item 4
+   uses, `BARE_VERB_CATEGORIES` / `METHOD_VERB_REQUIRED` in `grant-verify.ts`),
+   each grant's `seq` must be above any matching forbid's, and the whole-token (near-name)
+   rejection stated in item 4 applies unchanged. A matching **forbid** short-circuits to the prompt — the
    recent-window fallback must not overrule an explicit revocation. Growth control:
    entries are deduped per `(category, value, kind)` keeping the highest seq; caps
    (200 grants / 100 forbids) evict least-recently-matched grants first; eviction's
-   failure mode is one extra prompt, never a false allow. Matching **normalises the home
-   directory**: the gate renders outside-project paths as `~/dev/x/…` while users grant
-   `/home/u/dev/x/…`, so `~` and the absolute form are canonicalised on both sides
-   (unrelated sibling directories still do not match — this widens equality, not reach). The same
-   canonicalisation covers the **project-relative** rendering, which is how every in-project target
-   arrives: `displayPath` emits `./corpus/x.ts`, so a grant worded `/home/u/dev/pm/` reaches it only if the
-   matcher resolves `./…` against the project root first (`canonicalPath`, fed by `policyProject` — the
-   exact root layer 0 used, never a re-derived one). With only the `~` half done, the ledger silently misses
-   every in-project target while still covering `~/…` ones, and the denial reads as "no approval exists"
-   rather than "the two spellings were never compared" — the live failure of 2026-10-14, where a correctly
-   extracted `delete_recursive` scope covered nothing inside the project. Anything the matcher cannot place
-   (a bare word like `ripgrep`, a `..`-relative path, `./x` with no known project) is left unresolved: that
-   costs one extra prompt and can never widen authority.
+   failure mode is one extra prompt, never a false allow. Matching **normalises the path
+   spelling**, because the gate and the user do not write paths the same way: the gate renders an
+   outside-project target as `~/…` and an in-project one as `./…` (`displayPath`), while a user grants
+   the absolute form they typed. Both halves are canonicalised before comparison
+   (`canonicalPath`, fed by `policyProject` — the exact root layer 0 used, never a re-derived one), so
+   `~` and its absolute form are one path and `./src/a.ts` and `<project>/src/a.ts` are one path.
+   Unrelated siblings still do not match: this widens *equality*, never reach. The project-relative half
+   is not decoration — it is how every in-project target arrives — and doing only the `~` half produces
+   a ledger that silently misses every in-project grant while still covering `~/…` ones, so the denial
+   reads as "no approval exists" when the truth is "the two spellings were never compared". A correctly
+   extracted scope that covers nothing inside the project is that bug, and it looks like a user who
+   never granted anything.
+   Anything the matcher cannot place (a bare word like `ripgrep`, a `..`-relative path, `./x` with no
+   known project) is left unresolved: that costs one extra prompt and can never widen authority.
    Grants are revocable by value (`/grants revoke <value>`), never by list index: the
    listing merges two stores and re-orders as grants are promoted, so an index-based
    revoke is one stale listing away from deleting the wrong entry.
@@ -316,11 +428,21 @@ An ASK decision is authorised when **any** of the following holds, checked in or
      the quote contains the category's verb — otherwise it is rejected.
    Any verification failure → not authorised (prompt). The model can therefore only
    *narrow* what the code would allow, never widen it.
-5. Otherwise: prompt (UI) with options *Allow once · Allow for session (this entity) ·
-   Allow for session (scope) · Allow always (rule) · Block*; without a UI: deny with the
-   category, entities and a one-line reason so the agent can ask the user in text.
-   Every allow answer (including plain *Allow*) records a session grant for the pending
-   entities, so an identical action does not re-prompt.
+5. Otherwise: prompt. With a UI the options are the ones the person sees — *Allow*,
+   `Allow for session: <the pending targets>`, `Allow for session (scope <scope>)`, and for a
+   file tool also *Allow always (this folder)*, plus *Allow always (this project)* and *Allow
+   always (global)*, and *Block*. On a NEVER verdict every "for session" and "always" option is
+   withheld (only *Allow* and *Block* are offered, §1). Without a UI: deny with the category,
+   entities and a one-line reason so the agent can ask the user in text.
+   Every allow answer (including plain *Allow*, and excepting a NEVER verdict, which remembers
+   nothing) records a session grant for the pending entities, so an identical action does not
+   re-prompt. An *Allow always* answer additionally records a **durable** row, and `authority.persist`
+   decides where it lives: `"grants"` (the default) writes it to the project's grants journal, which is
+   what lets a project run with no hand-authored permission file at all; `"rules"` writes a permission
+   rule instead. Either way the row may never say more than the invocation that earned it — where no
+   row can express exactly what was approved, the click is honoured once and the user is told why,
+   because a durable row is read back for the life of the project with no trace of the click that
+   produced it, and a wider row is indistinguishable from permission.
 
 Prompt-once memory is keyed by `{category, entity}`; a `delete_recursive` grant for
 `./build` does not cover `./dist`, and a `write_outside` grant for `~/dev/other/` covers
@@ -331,11 +453,36 @@ files under it only if the user chose the scope option.
 All tasks use `temperature 0` — **except a GitHub Copilot endpoint, where `temperature` is measured to be
 refused** (`400 Unsupported parameter`) and is therefore never sent — `response_format: json_schema` on the
 chat dialect / `text.format: json_schema` on the responses dialect (llama.cpp / vLLM / OpenAI and, measured,
-Copilot's Auto path all accept it), thinking disabled where the server honours a knob, a hard output-token
-cap, and a system prompt under 600 tokens. Any transport or schema failure → the deterministic fallback
+Copilot's Auto path all accept it), thinking disabled where the server honours a knob, and a hard output-token
+cap. Any transport or schema failure → the deterministic fallback
 (`ASK`, prompt; a failed ledger extraction leaves the message queued for retry). **A truncated answer is a
 transport failure, never a short verdict** — on a reasoning model the cap can be entirely spent on thinking
 and return empty text (§4.0).
+
+Each task carries its own short system prompt — `GRANT_SYSTEM_PROMPT`, `EFFECT_SYSTEM_PROMPT`,
+`MESSAGE_GRANT_SYSTEM_PROMPT` in `model-client.ts` — and nothing in this design puts a number on how long
+one may be. Size is handled by arithmetic, not by a rule of thumb: the call subtracts the fixed part's
+measured cost from the endpoint's context window and lets the variable part fill what is left, whole items
+only (§4.2, `callBudget` in `context-budget.ts`, `grantCallFixedChars` measuring the grant prompt by
+rendering it). A prompt that is too big for the configured window is therefore not a violated budget but a
+window too small, and it is reported as one.
+
+One system prompt is not in that family and must not be confused with it: the auto-mode ruleset prompt —
+some 9 kB of policy prose (roughly 2 200–2 800 tokens depending on the estimator), assembled by
+`classifier-prompt.ts` out of `classifier-prompts/auto_mode_system_prompt.txt` and
+`classifier-prompts/permissions_external.txt`. Three bullet blocks — allow, deny, environment — can each
+be replaced wholesale by the user's configured rules, and a block left unset keeps the bullets shipped in
+the template. The verdict block is **not** in either template: `classifier-prompt.ts` composes it and
+splices it in, so the shape of the answer is code the tests can read rather than text a template can
+silently contradict. Splicing is index arithmetic over the `{{rules:…}}` / `{{include:…}}` markers, no
+regular expression touches the templates, and a marker that cannot be resolved is dropped rather than
+sent, so a template that loses its include never leaks `{{include:verdict}}` to a model.
+That prompt belongs to the **legacy** single-shot engine
+(`classifier.engine: "legacy"`, `classifier-client.ts`), the one this document's §0 rejects; it is reachable
+only when that key is set. Nothing on the gate path sends it, and the arithmetic shows why it cannot fit:
+at that size the system prompt alone is more than half of the default 4 096-token window
+(`classifier.contextTokens`, §4.0), before any transcript or answer reserve — and the transcript is the
+evidence these tasks exist to read.
 
 ### 4.0 Transport and classifier configuration
 
@@ -353,7 +500,8 @@ not read from there). Three cases are supported; which one is live is decided by
 | case | config | behaviour |
 |---|---|---|
 | **A — own OpenAI-compatible endpoint** | `classifier.baseUrl` (+ optional `modelId`) | Unchanged behaviour, and it outranks everything else: plain OpenAI-compatible POST to `{baseUrl}/chat/completions` with `response_format: json_schema` and `temperature: 0`, bypassing pi's registry **and the whole `copilot` block**, whatever `model` says. Needs a server that honours `json_schema` (llama.cpp, vLLM, litellm). |
-| **B — Copilot Auto** (`github-picks`) | `"model": "github-copilot/auto"`, no `baseUrl` | The sentinel names a policy, not a model: the plugin mints **its own Auto session** (`POST {baseUrl}/models/session` with `X-GitHub-Api-Version: 2026-08-01`, cached and refreshed before `expires_at`, single-flight, 15 s failure cooldown — `copilot-session.ts`). The pick is only addressable with `Copilot-Session-Token`, so that header travels on every call; the wire dialect is the **pick's** catalog `api` (`openai-completions` → `/chat/completions`, `openai-responses` → `/responses`; an `anthropic-messages` pick has no encoder → resolves to no endpoint → the posture below). Because the pick is the plugin's own, host-model churn mid-session cannot silently change the classifier's model. || **C — explicit Copilot model** | `"model": "github-copilot/<id>"`, no `baseUrl` | The user's pick, dialect taken from the catalog `api` for that id. The session header is **never attached** — measured, it narrows the request to the Auto picks (`400 Requested model not available for session`). Correct by construction; untested on a free plan (see `docs/COPILOT-COMPAT-MEASUREMENTS.md` §6). `github-copilot/<id>@stage` / `:effort` suffixes are stripped before resolution, like every other ref. |
+| **B — Copilot Auto** | `"model": "github-copilot/auto"`, no `baseUrl` | The sentinel names a policy, not a model: the plugin mints **its own Auto session** (`POST {baseUrl}/models/session` with `X-GitHub-Api-Version: 2026-08-01`, cached and refreshed before `expires_at`, single-flight, 15 s failure cooldown — `copilot-session.ts`). The pick is only addressable with `Copilot-Session-Token`, so that header travels on every call; the wire dialect is the **pick's** catalog `api` (`openai-completions` → `/chat/completions`, `openai-responses` → `/responses`; an `anthropic-messages` pick has no encoder → resolves to no endpoint → the posture below). Because the pick is the plugin's own, host-model churn mid-session cannot silently change the classifier's model. |
+| **C — explicit Copilot model** | `"model": "github-copilot/<id>"`, no `baseUrl` | The user's pick, dialect taken from the catalog `api` for that id. The session header is **never attached** — measured, it narrows the request to the Auto picks (`400 Requested model not available for session`). Correct by construction; nothing in this repository exercises it against a live free-plan account. `github-copilot/<id>@stage` / `:effort` suffixes are stripped before resolution, like every other ref. |
 
 `classifier.copilot` — knobs that exist only because Copilot behaves differently (resolved by
 `resolveCopilotConfig`; an unusable hand-edited value is ignored in favour of the default, never
@@ -366,25 +514,25 @@ propagated; read **only** on a `github-copilot/…` endpoint, so case A is untou
 | `budgetTokens` | 0 (= no cap) | Tokens this process may spend on Copilot before it stops asking — a free-plan allowance is shared with the user's own chat. A spent budget is a transport failure, never a refusal, and the denial text names it. |
 | `sessionEnabled` | true | `false` turns the Auto session off: `github-copilot/auto` then resolves to **no endpoint at all** and the gate asks a person — how you leave every Copilot request for the user's own chat. |
 
-**What the mint asks Auto for (D57, 2026-10-17).** Copilot serves three request dialects and this client encodes
+**What the mint asks Auto for.** Copilot serves three request dialects and this client encodes
 two, so **GitHub's Auto pick may be one we cannot put on the wire** — that possibility is a fact about Auto, not a
 bug, and no request shape makes it impossible. `auto_mode.model_hints` was measured to close the gap as far as the
-wire allows (`docs/COPILOT-COMPAT-MEASUREMENTS.md` §2b): the field filters the offered pool **by model id**
+wire allows: the field filters the offered pool **by model id**
 (`["gpt-5-mini"]` → pool `[gpt-5-mini]`, pick `gpt-5-mini`), it does **not** accept dialect names — a dialect name
 is answered like any unmatched hint, `200` with `available_models: []` and `selected_model: ""`. So the mint asks
 the measured control question first (`model_hints: ["auto"]`), and only when the resolver reports a pick whose
 catalog `api` it cannot encode does it ask **once** more with `model_hints` set to the ids GitHub itself offered in
 `available_models` whose dialect we do encode. Two rules hold that property: an id is never named in source (the
-catalog churns within hours — D55), and an empty hint list is never sent, because the one thing measured about a
+catalog churns within hours), and an empty hint list is never sent, because the one thing measured about a
 hint that matches nothing is that it costs you the pool.
 
-Whatever the retry achieves, an unspeakable pick stays exactly what W88 made it: **an unavailable classifier naming
+Whatever the retry achieves, an unspeakable pick stays exactly what the retry did not change: **an unavailable classifier naming
 its cause** (`gate-bridge.ts`'s `auto-pick-unnamed` / `auto-pick-unspeakable`, rendered by
 `classifierUnavailableReason` / `buildClassifierUnavailableMessage` in `classifier-messages.ts` — call those, do not
 restate their text here or in a denial), which asks in a terminal and declines unattended. Never a silent fallback,
 never a refusal, never "no endpoint configured" when an endpoint exists.
 
-**Failure posture (owner's ruling, 2026-10-16).** Layer 0 decides whatever it can decide in code. Where it
+**Failure posture.** Layer 0 decides whatever it can decide in code. Where it
 cannot and the classifier is unreachable: **interactive sessions ask the user; unattended runs decline with
 the reason naming that the classifier was not available** — the existing catch in `index.ts` falls back to
 the tier-3 prompt, which is a prompt in a terminal and a decline in a headless run. Every Copilot-specific
@@ -403,16 +551,53 @@ category → NEVER; `low` confidence → ASK (`interpreter_unknown`).
 
 ### 4.2 Transcript authorisation (for ASK)
 
-Input: the last ≤ 12 user messages (≤ 6 000 chars, most recent last, oldest truncated
-first), the pending action rendered in plain words by layer 0 ("recursively delete
-directory ./build (rm -rf ./build)"), its category and entities.
+Input: the pending action rendered in plain words by layer 0 ("recursively delete
+directory ./build (rm -rf ./build)"), its category and entities, and as much of the recent
+conversation as this model's window holds. There is no fixed message count and no character cap —
+the sizes that used to sit here were measured in a unit the server does not use, and the request
+they produced was rejected outright:
+
+- at most the newest **60** user messages are candidates (`MAX_USER_MSGS`, `gate.ts`);
+- the room they get is the endpoint's `classifier.contextTokens` minus the call's fixed part, measured
+  by rendering the real prompt, minus the answer reserve (§4.0);
+- that room is filled **whole, newest-first, stopping at the first message that does not fit**
+  (`fitNewestFirst`, `context-budget.ts`). So what the model sees is a contiguous suffix of the
+  conversation: never half a sentence — clipping "…and never touch prod" mid-line invents evidence
+  that reads like the approval it was cutting off — and never a gap an older message jumped over;
+- if the newest message alone does not fit, the call is **not made** and the action prompts. Asking
+  for a verdict from no evidence is not a no, it is a question that was not asked.
+
+A 4 096-token window holds a handful of messages, so authorisation would otherwise be a function of
+scroll position — the grant was said twenty turns ago and is gone. It is not gone: that sentence
+already sits in the ledger as a row (§3 item 3), and the rows are sent in the same call as the summary
+of the turns that no longer fit. Rows are fitted against 40 % of a budget measured without them
+(`LEDGER_SHARE`), then the fixed part is re-measured with them, so any share the rows could not spend
+returns to the raw messages and no block size is hard-coded. A row is one line, oldest first, in a
+layout the model is asked to read and the verifier does not parse:
+
+```
+#<seq> <kind>[ imported] <category> <entity|scope>=<value> — "<the user's own words>"
+```
+
+`kind` is `grant`, `forbid` or `posture`, padded to a fixed column so the categories line up; a row
+imported from the project's journal says `imported`, sorts first and carries `seq 0`, because it is
+background authority that anything said on this branch outranks (§3); every run of whitespace is
+collapsed, so a pasted multi-line message cannot break the layout; values go out **absolute**, because
+`~` means nothing to a model that has never seen this machine; and the quote is clipped at 120
+characters **in the rendered line only** — the row keeps the full verbatim quote, which is what the
+verifier must still find. Rows are dropped whole, oldest first, for the same reason messages are.
+
 Output: `{"authorized": "yes"|"no", "allowed_targets": string[], "forbidden_targets": string[], "quote": string}`.
-The code verification in §3.3 is mandatory; a `yes` alone never allows anything.
+The code verification of §3 item 4 is mandatory; a `yes` alone never allows anything.
 
 ### 4.3 Per-message grant extraction (for the ledger)
 
-Input: ONE user message (≤ 4 000 chars), nothing else — so there is no pending action to
-echo from, and requiring extracted names to appear verbatim in the message is sound.
+Input: ONE user message, nothing else — so there is no pending action to
+echo from, and requiring extracted names to appear verbatim in the message is sound. A message longer
+than the chunk size (4 000 characters, `EXTRACTION_CHUNK_CHARS`) is cut into **whole pieces** by
+`chunkMessage` (`message-chunks.ts`), which concatenate back to the original exactly, and each piece
+gets its own call: a pasted wall of text is read entirely rather than at its first 4 000 characters,
+which is where a slice used to drop it.
 Output: `{"grants": [{action, targets[], quote}], "revocations": [{targets[], all, quote}]}`
 (schema-capped: ≤ 8 items each, ≤ 16 targets). Code verifies each item (verbatim quote in
 the message, targets whole-token present, pronouns dropped), maps `action` to a gate
@@ -429,17 +614,50 @@ temp-0 extraction rebuilds the same ledger from scratch.
 
 ## 5. Observability and safety rails
 
-- Every decision is logged (`PERMISSION_MODES_CLASSIFIER_DEBUG=1`) with layer, category,
-  entities, model latency and, for model answers, the raw JSON and the verification result.
-- Denials tell the agent the category and entities so it can ask the user precisely.
-- A per-session budget: after 3 consecutive model failures the gate falls back to prompting
-  for all ASK/UNKNOWN decisions (fail-closed, never fail-open).
-- Verdict memo: identical `(command, cwd, user-message hash)` within 60 s returns the
-  cached decision.
-- Reproducibility: with `temperature 0` and schema-constrained 1–30 token outputs, the
-  measured cross-restart flip rate must be reported by the eval, not assumed.
+- Every decision can be logged: `PERMISSION_MODES_CLASSIFIER_DEBUG=1` turns on the gate, ledger and
+  classifier lines (layer, category, entities, model latency, and for a model answer the raw JSON and
+  the verification result); `PERMISSION_MODES_DEBUG=1` covers the parser's own lines.
+- Denials tell the agent the category and entities so it can ask the user precisely, and an
+  unavailable classifier is named as one (`/classifier-status` distinguishes disabled, no endpoint
+  resolved, and endpoint present but failing — three states that look identical to the user).
+- **Transport failure on the legacy path**: a classifier call is attempted up to 3 times
+  (`MAX_CLASSIFIER_FAILURES`); if every attempt fails the call is **denied** with a message naming the
+  transport error, unless `classifier.failClosed` has been set to `false`, in which case the
+  deterministic local answer decides. No failure path ends in an approval.
+- **Denial budget** (`denial-tracking.ts`, also the legacy path): 3 refusals in a row with no allowance
+  between them, or 20 refusals across the run, and the model stops being asked and the call prompts the
+  person instead. It counts refusals, not failures, and the two counters are deliberately different:
+  an approval resets the streak (evidence the agent is off that one door) and never the total
+  (refusals scattered over a run still add up, and no healthy run reaches twenty).
+  The gate path needs neither counter for a transport failure — an unanswerable call prompts, or
+  declines when there is no UI, on the spot (§4.0's failure posture).
+- **Verdict memo (legacy path, `classifier-client.ts`)**: an identical call — same model ref, stage,
+  mode, cwd, tool name and serialised input, same configured auto-mode rules and same rules-file
+  generation — is answered from cache for 60 s, bounded at 64 entries. Reloading the permission rules
+  drops the whole cache, because a verdict computed under the old rules must not outlive them.
+- **Reproducibility is a claim to be measured, not a property to be asserted.** `temperature 0` and a
+  schema-constrained answer of a few tokens make the same input answer the same way in practice, but
+  "across two server restarts" is exactly where a small model has been seen to flip, so any figure for
+  a flip rate has to ship with the measurement that produced it. This repository pins behaviour with
+  the corpora below and claims no number of its own.
 
-## 6. Acceptance criteria (measured by `eval/`)
+## 6. Acceptance criteria
+
+These are the targets the design was held to, recorded because they say what the design is trying to
+buy and in what proportions. What this repository can show you is narrower, and the difference matters
+to anyone who wants to check a line:
+
+- **Pass/fail, in the tree.** Layer 0's accepts and refuses are pinned line by line by
+  `bash-walker.golden.jsonl` (LAYER0 §15); the allow-rule suggestion engine is pinned over the curated
+  corpora `testcases/cases-v2.jsonl` and `testcases/cases-ledger.jsonl` by the invariant "an offer that
+  is made is an offer that covers the command that earned it"; and the categories, path rules, grant
+  matching and transports above are pinned by the suites `npx vitest run` executes. A regression in a
+  NEVER case fails one of these, which is the only honest way the first line below is enforced.
+- **Not in the tree.** Anything that needs a labelled corpus, a live endpoint or a clock: the
+  percentages, the latency, and the restart-to-restart flip rate. A prompt corpus shipped with the
+  package would be a fixture nobody could audit and a benchmark someone else's bill, so none ships, and
+  no number in this table is measurable from inside this checkout. Treat them as the contract, not as a
+  result this package reports.
 
 | metric | target |
 |---|---|
