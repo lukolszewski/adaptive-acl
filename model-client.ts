@@ -6,7 +6,7 @@
  * back to prompting (fail-closed).
  *
  * Deliberately NOT using pi-ai completeSimple: it has no response_format support, and the prior evaluation
- * showed free-text verdicts are the root cause of parse failures (classifier-isue.md D1–D3). That is also why
+ * showed free-text verdicts are the root cause of parse failures. That is also why
  * Copilot support here is two request builders rather than one call through the registry: `complete()` cannot
  * send the schema, and the schema is the whole point.
  *

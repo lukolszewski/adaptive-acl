@@ -436,7 +436,7 @@ describe("a journal write reports what it carried", () => {
 		})
 
 		// `confirmAdoption()` mirrors the whole store, so the session-only row is durable now. That is
-		// W22's behaviour, not this module's choice — but a caller that printed only "saved" would be
+		// the mirror's behaviour, not this module's choice — but a caller that printed only "saved" would be
 		// hiding it, so the result says it out loud.
 		expect(out.picked).toHaveLength(1)
 		expect(out.report.journal).toMatchObject({ ok: true, added: 2 })

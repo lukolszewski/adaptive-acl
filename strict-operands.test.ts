@@ -216,7 +216,7 @@ describe("one verdict per command", () => {
 })
 
 describe("a redirect target is named by the same exact rule (W10 extends W8, it does not relax it)", () => {
-	// W8's rule: for a target-bearing verdict an exact specifier must name EVERY word. W10 adds the other
+	// The rule: for a target-bearing verdict an exact specifier must name EVERY word. The other
 	// half of "the target": the file the command redirects to, which is not a word and so was invisible.
 	// Both directions are pinned, and the last row pins that the target requirement does NOT depend on the
 	// strictness flag — `echo hi > ./notes.txt` is `write_project` (allow tier, not strict) and a rule that
@@ -269,7 +269,7 @@ describe("a redirect target is named by the same exact rule (W10 extends W8, it 
 	})
 
 	it("adds no category of its own: the strictness table is still the only one", () => {
-		// W10 must not grow a second category list (the mistake W9 had to be fixed for in `c91a247`). A
+		// This must not grow a second category list — the mistake that had to be fixed once already. A
 		// redirect is not a category: the matcher receives one boolean and one list of targets, and never
 		// looks at a category name — asserted as "no category name appears as data, and no set of names is
 		// built here", which is what a second table would have to be made of.

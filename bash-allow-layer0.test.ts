@@ -18,7 +18,7 @@ import {
  *   - `tightening:` shows a command that used to be waved through by a rule and now goes to the gate —
  *     these are the incidents being closed (a substitution, an opaque value, the never floor);
  *   - `loosening:` shows a command a rule now covers that it did not. Each one is a decision recorded in
- *     work.log.md (wrappers, argv-with-no-assignments, quoting normalised, a rule naming fewer words than
+ *     this suite (wrappers, argv-with-no-assignments, quoting normalised, a rule naming fewer words than
  *     the call), not an accident, and each is guarded by the never floor.
  *
  * `deny` / `ask` are asserted separately at the bottom: they are still textual, and a change that quietly
@@ -288,7 +288,7 @@ describe("argv matching, at the rule boundary", () => {
 
 	it("tightening: an exact-looking destructive rule is now exactly that", () => {
 		// W3 flagged this for the supervisor and pinned it the other way; W8 flips it, deliberately, on the
-		// measurement in work.log.md (2026-10-14) and .probe/probe-argv.ts. Before this change the same
+		// argv probe quoted below (measured 2026-10-14). Before this change the same
 		// probe read:
 		//
 		//   allow       Bash(rm -rf /tmp/x)   <= rm -rf /tmp/x

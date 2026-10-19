@@ -31,11 +31,11 @@
  * Two tables here are deliberately *narrower* than the text tables in `utils.ts`, which still carry the older
  * policy (`^\s*(make|cmake)\b`, `^\s*docker\s+(build|compose|…)`) and are unchanged by these two decisions:
  *
- *   - **compose is split by verb** (D1): tier 2 covers the read-only compose verbs and nothing else. `up`,
+ *   - **compose is split by verb**: tier 2 covers the read-only compose verbs and nothing else. `up`,
  *     `down`, `build`, `restart`, `stop`, `kill`, `create`, `watch`, `cp` start containers that mount host paths
  *     and publish ports, which is not the risk class `git status` is in; `exec`/`run` are their own class
  *     (arbitrary code inside a container that mounts the repo) and inherit nothing from a wider entry.
- *   - **a task-runner target is a name the table has seen** (D2): `make`, `cmake`, `ninja`, `bazel`, `just`,
+ *   - **a task-runner target is a name the table has seen**: `make`, `cmake`, `ninja`, `bazel`, `just`,
  *     `task` use the shape `npm run <script>` always had — recognised build/test/lint verbs are tier 2,
  *     install/uninstall/deploy/publish/release verbs are not, and an unrecognised target is not either,
  *     because a Makefile is arbitrary code and tier 2 cannot promise anything about a target it has not seen.
@@ -343,7 +343,7 @@ const RUN_SCRIPT_NAMES: readonly string[] = [
 ]
 
 /**
- * Target words the task-runner tables admit (D2).
+ * Target words the task-runner tables admit.
  *
  * Build/test/lint-shaped names: {@link RUN_SCRIPT_NAMES} minus the names of long-running processes (`dev`,
  * `start`, `serve`, `watch`, `preview`, `ci`) plus the make-flavoured spellings of the same idea (`all`,
@@ -414,7 +414,7 @@ const NINJA: TaskTool = {
 /**
  * CMake, whose verbs are flags. `--build` builds, `-S/-B` generate the build system for the project in the
  * working tree, and `--install` — the one people reach for by reflex — is refused: it copies into a prefix
- * outside the project, which is the harm D2 names. A build target named by `--target` is checked like any
+ * outside the project, which is the harm this narrowness exists to stop. A build target named by `--target` is checked like any
  * other target, so `--target test` is a build and `--target bundle-thing` is a name nobody has vouched for.
  * A form the table has not seen (`--preset`, `--open`, `-E`, a bare in-source `cmake .`) asks.
  */
@@ -427,7 +427,7 @@ const CMAKE: TaskTool = {
 }
 
 /**
- * Bazel: the first named word is the command, the rest are labels. `run` is refused like `exec` (D1) — it
+ * Bazel: the first named word is the command, the rest are labels. `run` is refused like `exec` — it
  * executes a built binary in the workspace — and labels are operands, so `bazel build //...` reads as a build
  * rather than as a command naming an absolute path.
  */
@@ -458,7 +458,7 @@ const TASK: TaskTool = {
 }
 
 /**
- * The compose verbs tier 2 covers (D1): they read state and print it.
+ * The compose verbs tier 2 covers: they read state and print it.
  *
  * Everything else composes a running system out of images and host paths — `up`, `down`, `build`, `create`,
  * `start`, `stop`, `restart`, `kill`, `watch`, `cp`, and above all `exec`/`run`, which run arbitrary commands
@@ -479,7 +479,7 @@ const WORKFLOW_RULES: Readonly<Record<string, VerbRule>> = {
 	pnpm: { verbs: ["test"], run: RUN_SCRIPT_NAMES },
 	yarn: { verbs: ["test"], run: RUN_SCRIPT_NAMES },
 	bun: { verbs: ["test"], run: RUN_SCRIPT_NAMES },
-	// Task runners (D2): a recognised build/test/lint target, or nothing. `make install` and `make bootstrap`
+	// Task runners: a recognised build/test/lint target, or nothing. `make install` and `make bootstrap`
 	// are not tier 2 for different reasons — one is on the deny list, one was never on any list.
 	make: { tool: MAKE },
 	cmake: { tool: CMAKE },
@@ -493,7 +493,7 @@ const WORKFLOW_RULES: Readonly<Record<string, VerbRule>> = {
 	// worktree-loss form (checkout/restore); `reset --hard` is refused by name.
 	git: { verbs: ["add", "stash", "branch", "switch", "tag", "init", "clone", "reset"], blockWith: { reset: ["--hard"] } },
 	npx: { verbs: ["prettier", "eslint", "tsc", "esbuild", "vite", "next", "nuxt", "astro"] },
-	// Compose is admitted by its subcommand, not by the word `compose` (D1): `docker compose up` and
+	// Compose is admitted by its subcommand, not by the word `compose`: `docker compose up` and
 	// `docker compose exec web bash` inherit nothing from `docker compose ps`.
 	docker: { verbs: ["build", "compose", "logs", "ps", "images"], after: { compose: COMPOSE_READ } },
 }

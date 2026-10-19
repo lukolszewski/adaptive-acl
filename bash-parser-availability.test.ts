@@ -16,7 +16,7 @@ import { describe, expect, it, vi } from "vitest"
  * path after a packaging change, a different runtime, a missing file) therefore reads as "my command was too
  * clever" and is really "no bash command is ever allowed again".
  *
- * So these tests do not check tier decisions — `bun eval/parse-diff.ts` and the golden corpus hold those. They pin
+ * So these tests do not check tier decisions — the golden corpus (`bash-walker.golden.jsonl`) holds those. They pin
  * three things: availability is observable (`bashParserStatus`), the packaged layout actually resolves the grammar
  * from the artifact rather than from this checkout, and the analyzer-down reason never borrows the wording of a
  * construct refusal.
@@ -340,11 +340,11 @@ describe("refusal wording: who is at fault", () => {
 
 describe("the advice a denial carries follows the cause (D54 §1 x D56)", () => {
 	/**
-	 * W90 owns the analyzer-down sentence in `risk-policy.ts`; W88 owns which advice a denial prints and picks it by
+	 * One module owns the analyzer-down sentence in `risk-policy.ts`, another owns which advice a denial prints and picks it by
 	 * reading the §12 id out of the segment description. Each half passes alone, so the seam is what breaks: paraphrase
-	 * the id out of the sentence and W88's scan finds nothing, falls back to "brace grouping, complex quoting", and an
-	 * analyzer outage is explained to the user as a problem with their braces — D54 §1 rebuilt from two correct parts.
-	 * Found by probe (.probe/w88-w90-seam.ts) while merging the two branches; pinned here so it stays found.
+	 * the id out of the sentence and that scan finds nothing, falls back to "brace grouping, complex quoting", and an
+	 * analyzer outage is explained to the user as a problem with their braces — advice that ignores its own cause, rebuilt from two correct parts.
+	 * Found by a throwaway probe while merging the two branches; pinned here so it stays found.
 	 */
 	it("prints analyzer advice, never construct advice, when no grammar is loaded", async () => {
 		const parser = await freshParser()

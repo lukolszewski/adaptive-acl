@@ -105,8 +105,8 @@ describe("hand runtime-determined values back to the analyzer", () => {
 
 	it("CLOSED: a leg the walker cannot prove is covered by nothing, single segment included", () => {
 		// This was pinned the other way as a KNOWN PRE-EXISTING EXPOSURE, with a note that closing it
-		// should be "a decision made deliberately, not as collateral". It is that decision now: wave-2
-		// decision 3 (work.log.md, 2026-10-14) — rule coverage never applies to a leg the walker could not
+		// should be "a decision made deliberately, not as collateral". It is that decision now, taken on
+		// 2026-10-14: rule coverage never applies to a leg the walker could not
 		// prove, and an unproven leg goes to the prompt regardless of what rules exist. A rule for `diff`
 		// or `git log` says nothing about what `$(whoami)` runs; the prompt is the only channel that can.
 		expect(

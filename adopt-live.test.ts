@@ -1,7 +1,7 @@
 /**
  * An adopted rule becomes live in the session that adopted it.
  *
- * This is the pairing D12 left open, and the test that replaces the pinned one in `index.test.ts`
+ * This pairing used to be a gap, and this is the test that replaces the pinned one in `index.test.ts`
  * ("… effective next session" + "the gate still blocks the adopted call"). The two move together: whoever
  * wires `makeAdoptedRulesLive()` into `/grants adopt confirm` must change that message and that assertion in
  * the same commit, because the assertion is the only thing keeping the message honest.
@@ -81,7 +81,7 @@ describe("an adopted rule is live in the session that adopted it", () => {
 
 		const adopted = adoptOrphans({ cwd })
 		// The snapshot the session is running on: the orphan's allow is nowhere in it, and the write to the
-		// rules file alone does not change that. This is the state D12 described.
+		// rules file alone does not change that: the rule is on disk but not live in this session.
 		const before = loadMergedPermissionRules(cwd)
 		expect(policyCarries(before, "Bash(npm publish)")).toBeUndefined()
 

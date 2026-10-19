@@ -357,7 +357,7 @@ describe("serialize / restore", () => {
 })
 
 // ---------------------------------------------------------------- revocation vs derivation
-// Decision D4 (docs/DECISIONS-2026-10-14.md): a revocation the user made HERE has to
+// A revocation the user made HERE has to
 // survive everything this session can do afterwards — a drain re-reading the same
 // message, a per-message extraction call, an import of a session that never saw the
 // slash command, and a restart. The two tests below are the two halves of that: the
@@ -522,7 +522,7 @@ describe("taking a forbid back (W49b: /grants revoke on a deny row)", () => {
 	})
 
 	it("stays gone when the very same message is drained again", () => {
-		// The acceptance property, and the whole reason this function exists: before W49b the row
+		// The acceptance property, and the whole reason this function exists: before this fix the row
 		// was spliced out of ledger.forbids by nothing at all, and even a hand-deleted one came back
 		// on the next drain because the tombstone gate looked only at grant keys.
 		const l = createLedger()
@@ -535,7 +535,7 @@ describe("taking a forbid back (W49b: /grants revoke on a deny row)", () => {
 		drainSearch(l)
 		expect(l.forbids).toEqual([])
 		// Every re-derivation was stopped at the door. How MANY rows one sentence derives is the
-		// derivation tests' business (see the W49b table below); this one only claims none of them got in.
+		// derivation tests' business (see the derivation table below); this one only claims none of them got in.
 		expect(extractionStats.forbidRevocationsBlocked - blockedBefore).toBeGreaterThanOrEqual(1)
 	})
 
@@ -656,7 +656,7 @@ describe("taking a forbid back (W49b: /grants revoke on a deny row)", () => {
 		// revocation recorded against ONE mutation category still dominates every other one. L-02
 		// produced a TRUE false allow when a named revocation stored only its own narrow category
 		// while the grant it took back was a folder scope, and 2514c8d wrote the rule that a
-		// revocation must be at least as wide as the grant it revokes. D29 keeps the fold for this
+		// revocation must be at least as wide as the grant it revokes. The fold stays for this
 		// reason even though the same fold is what made one permission-files sentence over-block;
 		// the fix for an over-general rule is not to delete it. Narrow the fold and this test goes
 		// red before the false allow comes back.
@@ -733,7 +733,7 @@ describe("derivation: the keyword must not fire on the noun, and a named thing i
 			rev: { action: "use permission files", targets: [], all: true },
 			// The bug: the noun `permission` bought the privilege category, the no-target fallback
 			// bought value "*", and the fs-mutation family fold turned that into a ban on every write
-			// and recursive delete in the workspace (the reproduction in docs/DECISIONS-D29).
+			// and recursive delete in the workspace; the matchers below are the reproduction.
 			mustNot: (r: { category: string; value: string }[]) =>
 				r.some((e) => e.category === "perm_change" && e.value === "*") || r.some((e) => e.category === "*" && e.value === "*"),
 			// It derives RULE-FILE-SCOPED rows, not a posture row: the sentence names files, and a
@@ -818,7 +818,7 @@ describe("derivation: the keyword must not fire on the noun, and a named thing i
 	it("keeps a read ban from outranking a write inside the prefix it names", () => {
 		// The user-visible defect, pinned at the MATCHER rather than at the row shape: a folder grant
 		// for the project, plus the derived read-only forbid whose prefix contains that project.
-		// Before W49b the first pair of assertions came back `forbidden`, quoting the search sentence
+		// Before the fix the first pair of assertions came back `forbidden`, quoting the search sentence
 		// as the reason a file inside the repo could not be written.
 		const sentence = "you will not fucking search in /home/u/dev"
 		const l = createLedger()

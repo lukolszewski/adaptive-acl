@@ -27,8 +27,8 @@ import {
 } from "./copilot-session.ts"
 
 /**
- * No network here, by rule: the live path is `bun /home/u/dev/pm/.probe/copilot-rt.ts` (and, after W89,
- * `tools/copilot-probe.ts --live`), and this account has a small monthly allowance. Everything below runs
+ * No network here, by rule: the live measurement was taken by hand, outside this suite, because this account
+ * has a small monthly allowance. Everything below runs
  * against a stubbed `fetch` whose responses are the bodies measured live on 2026-10-17.
  */
 
@@ -337,8 +337,8 @@ describe("headers and the allowance", () => {
 })
 
 /**
- * The D57 narrowing. What makes it code rather than hope is the measurement behind it
- * (`bun tools/copilot-probe.ts --live --hints`, §2b of `docs/COPILOT-COMPAT-MEASUREMENTS.md`):
+ * The narrowing this block pins. What makes it code rather than hope is the measurement behind it
+ * (taken live against the mint endpoint on 2026-10-17, hints included):
  * `model_hints` filters the pool GitHub just offered by MODEL ID — `["gpt-5-mini"]` turned a pool of two into
  * `[gpt-5-mini]` and picked it — while an id GitHub cannot match (a dialect name included) returns a 200 whose
  * pool is empty and whose `selected_model` is `""`. So the narrowing is built from GitHub's own
@@ -525,7 +525,7 @@ describe("autoSessionMintBody — the shape of the mint", () => {
 // ---------------------------------------------------------------- the endpoint that consumes the session
 //
 // `resolveGateEndpoint` lives in gate-bridge.ts, which has no test file of its own and is not editable by any
-// other task than W87; the Copilot cases of that decision are the other half of this module's contract, so they
+// other task; the Copilot cases of that gate are the other half of this module's contract, so they
 // are pinned here rather than waiting for a file that does not exist. Fake registries only — no network.
 
 const COPILOT_BASE = "https://api.individual.githubcopilot.com"
@@ -738,11 +738,11 @@ describe("resolveGateEndpoint — the Copilot cases", () => {
 
 describe("the D57 narrowing is wired to the resolver (gate-bridge → copilot-session)", () => {
 	/**
-	 * W91 built the retry in `copilot-session.ts` and could not edit `gate-bridge.ts`, so it handed over the one call
-	 * site that passes `encodableModel` — and noted, correctly, that a test for that glue belongs to whoever lands the
-	 * hunk. Without it the whole feature is dormant and green: `encodableModel` is optional, so forgetting to pass it
-	 * byte-for-byte restores the old mint and nothing anywhere goes red. That is the exact failure mode this tree has
-	 * been collecting decision records about (D45: a safety mechanism that is silently not wired).
+	 * The retry lives in `copilot-session.ts` and the one call site that passes `encodableModel` lives in
+	 * `gate-bridge.ts`, which is exactly where a mistake between two correct halves hides. Without a test for that
+	 * glue the whole feature is dormant and green: `encodableModel` is optional, so forgetting to pass it
+	 * byte-for-byte restores the old mint and nothing anywhere goes red. That is the failure mode this tree keeps
+	 * running into: a safety mechanism that is silently not wired.
 	 */
 	it("mints once with the control body, then asks for the offered ids it can encode", async () => {
 		const bodies: Array<{ auto_mode: { model_hints: string[] } }> = []

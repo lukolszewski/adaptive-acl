@@ -106,7 +106,7 @@ export function durableRowsForApproval(opts: {
  * precedence rules (a forbid outranks a grant; `namedForbidCovers` only knows ledger forbids) and its own
  * restore path, and an unrestoreable deny is the worst failure mode this project has — the one that already
  * happened once when a test suite deleted a project's deny rules. Revocation uses plumbing that is proven
- * (W7 tombstones survive import, W14 pins it), and if it ever fails the system re-prompts rather than
+ * (tombstones survive import — `tombstones.test.ts` pins it), and if it ever fails the system re-prompts rather than
  * silently allowing: failing safe in the direction that costs the user a keystroke, not a secret.
  */
 export function rowCoversTargets(

@@ -669,7 +669,7 @@ describe("thinking off per stage (D23)", () => {
 		// The old pin here asserted `unknown`, on the theory that an undeclared model has no thinking to switch
 		// off and that a qwen-shaped field might 400. The endpoint was asked instead: undeclared + no field is
 		// 5.1 s of reasoning that hits the token cap with no text at all; undeclared + field is a verdict in
-		// 758 ms, no 400 (docs/DECISIONS-D28-thinking-knob-measured.md). A risk reasoned about is not a risk measured.
+		// 758 ms with a verdict, and no 400. A risk reasoned about is not a risk measured.
 		expect(classifierThinkingOff(model)).toEqual({ via: "chat-template" })
 		expect(classifierStageModel(model, "single")).not.toBe(model)
 		expect(classifierStageModel(model, "single")).toMatchObject({ reasoning: true })

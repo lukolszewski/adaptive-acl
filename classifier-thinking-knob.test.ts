@@ -1,6 +1,6 @@
 /**
  * The thinking knob must be sent even when pi does not declare the model as a reasoning model
- * (docs/DECISIONS-D28-thinking-knob-measured.md).
+ * — a behaviour asked of the endpoint, not inferred from the model record.
  *
  * This pin exists because a plausible-sounding risk — "sending a Qwen-shaped field to a server that never
  * advertised one will 400" — went untested for a day and cost five worker runs. The endpoint answers in

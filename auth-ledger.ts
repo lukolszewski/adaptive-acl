@@ -560,7 +560,7 @@ const ACTION_MAP: Array<[RegExp, string]> = [
 	// The bare NOUN used to live here (`permission`), and that one word is why "I do not want to use
 	// ANY permission files" became `{category:"perm_change", value:"*"}`: the noun bought the
 	// privilege category, the no-target fallback bought `value:"*"`, and the fs-mutation family fold
-	// (D29, load-bearing for revocations) then blocked every write and recursive delete in the
+	// (`FORBID_FAMILIES`, load-bearing for revocations) then blocked every write and recursive delete in the
 	// workspace and quoted the user's own sentence back at them. A noun names a thing; only a verb
 	// says what the user wants done to it. A sentence that names the noun instead gets the rule-file
 	// target class below, which is what it actually talked about.
@@ -931,7 +931,7 @@ const RE_ENABLE_CHANGES =
  *
  * This exists because a class of files is not a category of action. The word inside the class name
  * (`permission`) used to hit the privilege row of `ACTION_MAP`, which turned "I do not want to use
- * ANY permission files" into a `perm_change` category-wide forbid, and D29's family fold then
+ * ANY permission files" into a `perm_change` category-wide forbid, and the `FORBID_FAMILIES` fold then
  * spread that over every write and recursive delete in the workspace. Read as what it is — a set of
  * paths the user refused to have used — the sentence scopes a forbid to those paths and leaves the
  * rest of the tree alone.
@@ -1155,7 +1155,7 @@ export function eventsFromExtraction(
 		const classTargets = named.length === 0 ? ruleFileTargets(quote, mapped) : []
 		// The old blanket test, kept exactly — `all: true` OR nothing named — with ONE exception: a
 		// class the sentence itself named supplies targets, and then the sentence is not targetless.
-		// Written this way so every other combination lands where it landed before W49b, including
+		// Written this way so every other combination lands where it landed before this change, including
 		// `all: false` with only generic kind-words (`do not delete any images`), which is blanket.
 		const isBlanket = classTargets.length === 0 && (r.all === true || named.length === 0)
 		if (isBlanket) {
@@ -1426,7 +1426,7 @@ export type ImportSummary = {
 }
 
 /**
- * Import a grants file's ledger into `target` (plan.md Phase B2).
+ * Import a grants file's ledger into `target`.
  *
  * Rows arrive at seq 0 with no messageId: they become background authority that
  * local statements outrank, and they survive both a rewind and the restore

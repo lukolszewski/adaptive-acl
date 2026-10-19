@@ -338,7 +338,7 @@ function segmentsSatisfy(
 /**
  * Both tier verdicts from ONE splitShellSegments pass — the auto-mode tier
  * ladder calls isSafeCommand and isAutoApprovableBash back to back on the
- * same command, and each re-tokenized it (plan A4). Pure; equivalent to
+ * same command, and each re-tokenized it. Pure; equivalent to
  * calling the two functions separately.
  */
 export function classifyBashTiers(command: string): {
@@ -363,7 +363,7 @@ export function classifyBashTiers(command: string): {
 // Common dev workflow commands with controlled side-effects that don't need
 // classifier review in auto mode.
 //
-// Adjudication 2026-09-12 (docs/bash-risk-adjudication-2026-09-12.md):
+// Adjudication 2026-09-12:
 // - run-scripts are restricted to the AUTO_FALLBACK_SCRIPT_NAMES whitelist;
 // - git hook vectors (commit/merge/rebase/cherry-pick/revert) and worktree-
 //   loss forms (restore/checkout) are tier-3, not tier-2;

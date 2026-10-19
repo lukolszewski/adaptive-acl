@@ -1,5 +1,5 @@
 /**
- * `stripChatmlControlRegions` (docs/DECISIONS-D27-chatml-delimiters-in-text.md).
+ * Pinned behaviour of `stripChatmlControlRegions`.
  *
  * Some OpenAI-compatible endpoints emit reasoning as ChatML control regions **inside the text body**
  * rather than in a separate field, so a stage's reply can be thinking-junk followed by the verdict —

@@ -101,7 +101,7 @@
  * count is reported in `ParseCost` as a diagnostic and is not a limit.
  *
  * ---------------------------------------------------------------------------
- * The measurement the 300 ms comes from (`eval/parse-latency.ts`, node 24, 32 CPUs)
+ * The measurement the 300 ms comes from (node 24, 32 CPUs, one run of the shipped code)
  * ---------------------------------------------------------------------------
  * 11 642 distinct command strings — every golden case, every curated case-file command and every
  * distinct bash command in the live session store — parsed 4 times each (46 568 parses per row). One row
@@ -126,7 +126,7 @@
  * re-parses twice (`bash-walker-heredoc.ts` maskedCopy), so <= 3 calls x 300 ms = 0.9 s — reachable only
  * by a 10 000-character pathological command on a machine >= 300x slower than measured, where real input
  * still costs 0.03 ms. A port that runs this behind a hook deadline must keep that inequality inside
- * `hook.deadlineMs` (D17: child timeout < hook.deadlineMs < host timeoutSec).
+ * `hook.deadlineMs`: child timeout < hook.deadlineMs < host timeoutSec.
  */
 
 import { existsSync, readFileSync } from "node:fs"
@@ -140,7 +140,7 @@ export const MAX_COMMAND_CHARS = 10_000
 /**
  * Wall-clock budget for one {@link parseBash} call, across every attempt it makes.
  *
- * 300 ms, from `eval/parse-latency.ts` over 11 642 real commands (the golden corpus, the curated case
+ * 300 ms, measured over 11 642 real commands (the golden corpus, the curated case
  * files and every distinct bash command in the live session store): p50 0.03 ms, p99 0.14 ms, p99.9
  * 0.27 ms, **max 1.20 ms** on an idle machine, and **max 121 ms** with 384 CPU spinners running (12x
  * oversubscription on 32 cores). Not one parse in 46 568 went over 150 ms at any contention level
@@ -154,7 +154,7 @@ export const PARSE_TIMEOUT_MS = 300
  * case per call is unchanged at 300 ms.
  *
  * Why retry at all when the envelope is 320x the measured cost of real input: the observed failure was
- * a pause, not slow work — W47 measured a 322-character golden case at 7.6 ms cold, under 1 ms warm and
+ * a pause, not slow work — a 322-character golden case measured 7.6 ms cold, under 1 ms warm and
  * 99 ms under 48-way contention. One transient scheduling or GC pause inside a parse is enough to
  * decide a verdict under a wall-clock budget, and a pause does not repeat itself. A retry costs one
  * more window on a machine that is genuinely too slow (where it fails closed again), and buys the

@@ -147,7 +147,7 @@ describe("bash-parser: limits", () => {
     // This one used to accept `aborted` — "whether a maximal command survives the time budget under a
     // loaded test runner is not part of the claim". It is part of the claim now, and it can be, because
     // the budget is measured rather than guessed: a 10 000-character command of this shape parses in
-    // 0.4 ms (eval/parse-latency.ts, and 0.93 ms was the slowest real command of the whole corpus),
+    // 0.4 ms; 0.93 ms was the slowest real command measured over the golden corpus,
     // against an envelope of PARSE_TIMEOUT_MS. A machine that aborts it is a machine where the abort is
     // the correct answer, and a test that tolerated `aborted` here was the flake in disguise.
     const result = atCap(mod, text);
@@ -174,7 +174,7 @@ describe("bash-parser: limits", () => {
   // then stops makes "the machine hiccuped" a scenario a test can name. None of them depends on how fast
   // the machine is, which is the whole point.
   //
-  // What the three shapes are here to pin, after W53:
+  // What the three shapes below are here to pin:
   //   - a pause inside a parse must not decide the verdict (the flake: a 322-character golden case
   //     measured 7.6 ms cold, <1 ms warm, 99 ms under 48-way contention, and 99 ms was over the old
   //     50 ms budget);
@@ -329,7 +329,7 @@ describe("bash-parser: limits", () => {
     const command = "a;".repeat(500);
 
     // The flake, reproduced without racing anything: one 99 ms pause inside an otherwise idle parse of
-    // a 1 000-character command. 99 ms is the slowest parse W47 measured for a 322-character golden case
+    // a 1 000-character command. 99 ms is the slowest parse measured for a 322-character golden case
     // under 48-way contention (7.6 ms cold, <1 ms warm), and under a 50 ms single-window budget that
     // pause was an `aborted` verdict — a command whose answer depended on what else the machine was
     // doing. Here it is inside the attempt window, so nothing happens at all.

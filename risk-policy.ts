@@ -72,7 +72,7 @@ export type PolicyOptions = {
 	/** Recursion guard. */
 	depth?: number
 	/**
-	 * A parse the caller already holds, so the hot path does not walk the same command twice (D6). Must be the
+	 * A parse the caller already holds, so the hot path does not walk the same command twice. Must be the
 	 * parse of `command` — the only caller is `bash-audit.ts`, which parses once and threads the result here.
 	 * Without this, `auditBashCommand` and `evaluateBash` each ran the walker on the same string, which is not
 	 * only wasted work: the two runs could disagree if one hit `parser-unavailable` while the other did not,
@@ -221,9 +221,9 @@ function keepEntity(e: Entity): boolean {
 	return !/__CMDSUB_OUTPUT__|__TRACKED_VAR__/.test(e.value)
 }
 
-// ------------------------------------------------------------------ stored secrets in remote systems (D16)
+// ------------------------------------------------------------------ stored secrets in remote systems
 
-/** D16: reading a stored secret out of a system that is not this filesystem. `ask`, never auto. */
+/** Reading a stored secret out of a system that is not this filesystem. `ask`, never auto. */
 export const READ_SECRET_REMOTE = "read_secret_remote"
 
 /**
@@ -233,7 +233,7 @@ export const READ_SECRET_REMOTE = "read_secret_remote"
  * `--with-decryption` all move the same bytes, and leaving them out does not make the call less sensitive —
  * `kubectl get secret prod-db` and `kubectl get secret prod-db -o jsonpath=…` read the same object, and the
  * value is in the response either way. An implementation that keyed on the flag would wave through the
- * default output of every client on this list, which is exactly how the gap was made (D16).
+ * default output of every client on this list, which is exactly how the gap was made.
  *
  * One row carries a flag at all — `--with-decryption` on SSM — and there it is an *extra* trigger next to the
  * name, never the only one: SSM answers `get-parameter` with ciphertext without it, while a plain-string
@@ -464,7 +464,7 @@ function readsLikeSecret(name: string | undefined): boolean {
 }
 
 /**
- * D16 applied to the leg that made the call.
+ * The remote-secret rule applied to the leg that made the call.
  *
  * Rows the verb tables already rate `ask` or `never` are kept — `kubectl delete secret x` stays where the
  * mutation tables put it — and rows they rate `allow` or `unknown` are **replaced**, not added to. That is
@@ -572,9 +572,9 @@ function unprovenDecision(text: string, reason: string, malformed: boolean, opts
 		return { ...d, unparseable: true, reason }
 	}
 	// A dead analyzer is not a command defect. With no grammar loaded every bash command lands here, including
-	// `cat` of one literal file, and the sentence below would blame the command for the plugin's own fault (D56).
+	// `cat` of one literal file, and the sentence below would blame the command for the plugin's own fault.
 	// The §12 id stays in the text on purpose: `reportedConstruct` reads the construct out of this description to
-	// pick the advice, so a paraphrase alone would leave it guessing and hand back brace-group advice (D54 §1).
+	// pick the advice, so a paraphrase alone would leave it guessing and hand back brace-group advice.
 	const note = seg(
 		"unknown",
 		"unproven_structure",
@@ -630,7 +630,7 @@ function astRedirectDecisions(c: AstCommand, ctx: PathContext): SegmentDecision[
  * Pre-AST engine. Retained for two jobs only: the malformed-input check inside
  * `bash-ast.ts`, and escalation on `unproven` commands (see `unprovenDecision`). Its
  * verdicts are never trusted on their own — an `allow` from here means "unknown".
- * Exported only so `eval/parse-diff.ts` can compare the two engines on a corpus.
+ * Exported so tests can compare the two engines on one input (`risk-policy.test.ts`).
  */
 export function evaluateBashLegacy(command: string, opts: PolicyOptions): PolicyDecision {
 	const text = command.trim()
