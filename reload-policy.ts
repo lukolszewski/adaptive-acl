@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Re-reading the rules files into the policy a session is running on.
  *
  * A rule written mid-session — by an "always" click, by `/grants adopt confirm` — is not part of the policy

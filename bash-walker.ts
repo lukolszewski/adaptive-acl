@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * bash-walker.ts — layer 0: read a bash command string and say whether a trustworthy argument list
  * exists for every simple command in it (docs/LAYER0-WALKER-SPEC.md).
  *

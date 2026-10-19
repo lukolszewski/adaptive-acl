@@ -9,6 +9,9 @@
  *
  * The plan-step helpers follow the shape of pi's own bundled
  * `examples/extensions/plan-mode/utils.ts` (MIT, pi coding agent contributors).
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync, unlinkSync } from "node:fs"

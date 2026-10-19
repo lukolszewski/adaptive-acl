@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Minimal HTTP client for the two narrow classifier tasks (docs/CLASSIFIER-SPEC.md §4). Sends
  * `response_format: json_schema` (chat) / `text.format: json_schema` (responses) so a parse failure is
  * structurally impossible on servers that honour it — llama.cpp, vLLM, OpenAI-compatible servers and, measured,

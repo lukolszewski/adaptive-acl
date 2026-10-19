@@ -1,3 +1,9 @@
+/**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ */
+
 import { describe, expect, it } from "vitest"
 import { evaluateBash, evaluateBashLegacy, evaluateToolCall, storedSecretRead, type PolicyDecision, type PolicyOptions } from "./risk-policy.ts"
 import { lexShell, lexShellChecked } from "./shell-lexer.ts"

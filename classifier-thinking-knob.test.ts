@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * The thinking knob must be sent even when pi does not declare the model as a reasoning model
  * — a behaviour asked of the endpoint, not inferred from the model record.
  *

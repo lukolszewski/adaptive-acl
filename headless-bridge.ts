@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * In-process permission bridge between an interactive pi session and headless
  * subagent sessions created *inside the same process*.
  *

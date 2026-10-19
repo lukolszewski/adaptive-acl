@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * The config surface behind grant-backed authority: `authority.persist` plus the two
  * provenance keys a footer needs to say why the session is unattended.
  *

@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Bare secret-bearing filenames.
  *
  * A file whose NAME ALONE declares it holds credentials — `pass`, `passphrase`, `secrets`,

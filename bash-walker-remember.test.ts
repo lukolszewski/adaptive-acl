@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * The remembered-value slice of layer 0: what a literal assignment makes visible to the caller, and
  * where that memory has to end.
  *

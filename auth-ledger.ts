@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Authorisation ledger (proper-permission-ledger.md §2): compact per-session
  * state of what the user granted or withdrew, folded from per-message
  * extraction (model-client task C). Fixes window amnesia — authorisation is

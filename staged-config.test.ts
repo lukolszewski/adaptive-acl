@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Staged config vs live config, and the approvals that follow from the difference.
  *
  * Reported against a real project: writing `deploy/systemd/pw-build.timer` prompted as

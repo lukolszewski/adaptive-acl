@@ -1,3 +1,9 @@
+/**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ */
+
 import { describe, expect, it } from "vitest";
 import { bashCommandMatchesRuleContent, suggestBashAllowRule } from "./bash-permission-match.ts";
 import { unescapeRuleContent } from "./permission-rule-parser.ts";

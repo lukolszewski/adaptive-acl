@@ -15,6 +15,9 @@
  * never passed, and a rule that can never match is an "Always allow" that silently does nothing. Both
  * producers only describe the approval — whether it can be honoured is decided in `permissions.ts`, which
  * runs the written rules back through the matcher that will have to accept them.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import { homedir } from "node:os"

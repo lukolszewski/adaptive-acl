@@ -11,6 +11,9 @@
  * the command once against that piece list. No regular expression is involved: a rule
  * is data typed by a human into a settings file, and treating it as a regex would let
  * `rm -rf .*`-style text, or an unbalanced `(`, decide how the match behaves.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 const STAR = "*"

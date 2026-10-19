@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Best-effort POSIX/bash lexer for the auto-mode risk policy.
  *
  * Turns a command string into a flat list of simple commands with:

@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Per-verb deterministic classification for the auto-mode risk policy
  * (docs/CLASSIFIER-SPEC.md §2). One handler per command family; everything
  * unhandled falls out as tier "unknown" and is escalated to the model.

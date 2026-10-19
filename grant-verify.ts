@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Code-side verification of transcript authorisation (docs/CLASSIFIER-SPEC.md §3.3, §4.2).
  *
  * The model only *extracts* what the user allowed/forbade; nothing it says can

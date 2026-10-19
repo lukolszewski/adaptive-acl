@@ -6,6 +6,9 @@
  * character was an unescaped backslash. An armed backslash makes the next character literal
  * data, so nothing has to be looked "escaped" by scanning backwards for a run of backslashes,
  * and both parentheses we care about fall out of the same walk.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 export interface PermissionRuleValue {

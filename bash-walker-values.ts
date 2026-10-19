@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * bash-walker-values.ts — part 2 of the layer-0 walker: assignments, remembered values and
  * run-time values (docs/LAYER0-WALKER-SPEC.md §4.2/§4.3, §5, §6, and the §3.1 builtins that
  * assign).

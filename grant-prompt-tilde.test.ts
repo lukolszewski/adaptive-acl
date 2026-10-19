@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Two failure modes that silently cost a user their grant.
  *
  * 1. `~` in what we send the model. A user wrote "I allow you to read

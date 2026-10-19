@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * End-to-end proof for the mv symptom: approving a move must stop it prompting,
  * at the GATE level (not just ledgerCovers), and the delete-verb gate must still
  * refuse a grant whose words never authorised a delete.

@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * bash-walker-heredoc.ts — here-documents (docs/LAYER0-WALKER-SPEC.md §8) for the layer-0 walker.
  *
  * Two jobs live here, and both of them are about the one construct whose text is *below* the line

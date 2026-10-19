@@ -14,6 +14,9 @@
  * (or end in one) rather than merely contain one, and a value that is a path, a number or a run of
  * punctuation is left alone. `token_file=…`, `author_name: …` and `x_key = 100//3` name things
  * about a credential; masking their values hides the command without protecting anything.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 const MASK = "[REDACTED]"

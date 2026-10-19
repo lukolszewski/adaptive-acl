@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * A checkout must carry its own identity.
  *
  * Project state lives at `<cwd>/.pi/projects/<id>/`, so the id is the address of

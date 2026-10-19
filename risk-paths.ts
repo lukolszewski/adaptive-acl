@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Path classification for the auto-mode risk policy (docs/CLASSIFIER-SPEC.md §2.3, §2.5).
  * Pure functions; `home` and `project` are injected so tests are hermetic.
  */

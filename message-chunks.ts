@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Splitting an oversize user message so grant extraction can read all of it
  * is what this module does, and `message-chunks.test.ts` pins the properties.
  *
