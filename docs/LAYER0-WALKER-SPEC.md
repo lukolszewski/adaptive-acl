@@ -2,8 +2,10 @@
 
 Written for whoever implements the walker from scratch. Everything a correct implementation has to
 agree about is here; nothing about how the engine it replaces was built is. The acceptance data is
-`bash-walker.golden.jsonl` (one input plus the required result per line); `eval/golden-check.ts`
-checks that file against this document's vocabulary and shape rules.
+`bash-walker.golden.jsonl` (one input plus the required result per line). `bash-walker-golden.ts`
+loads that file and compares one case against a walker result; `bash-walker-golden.test.ts` runs
+every line of it and asserts this document's shape rules over the file itself. §15 says which of the
+two checks what.
 
 The one question this component answers: **can a trustworthy argument list be produced for every
 simple command in this input string?** Yes → return the commands. No → say why. It never returns a
@@ -69,6 +71,11 @@ pre-filter then trust the tree": a command that passes them still has to survive
 only ever *unblock* the step-5 brace scan, and only with a proof (§8.7).
 2.3 A refusal at step 7–10 must not be softened by an earlier engine's opinion. The walker's job
 ends at the refusal.
+2.4 Nothing after step 10 decides anything. The one thing that runs later is **reporting**: a file a
+command opens for writing through an option (`sort -o /etc/x`) is appended to that command's
+`redirects` once steps 8–10 have vouched for the value the option names, so every reader of "which
+files does this command open" reads one list (§7.7). It adds a fact to a command and never a word to
+`argv`.
 
 ## 3. Structures
 
@@ -142,8 +149,8 @@ substitution only as the placeholder of §6.
 including a redirect target (`brace-expansion`), `$(( … ))` containing anything other than numeric
 literals and operators (`arithmetic-non-literal`), a numeric literal of the form `base#…` with an
 expansion after the `#` (`arithmetic-non-literal`), every `${…}` form (`variable-expansion`),
-`$@`, `$*` and positional parameters `$1`…`$9` anywhere (`variable-expansion`), and any name the
-walker has no value for (`variable-expansion`).
+`$@`, `$*` and any positional parameter (`$1`, and `$10` and above are the same class) anywhere
+(`variable-expansion`), and any name the walker has no value for (`variable-expansion`).
 4.3 `$(( … ))` made only of numeric literals (decimal, hex, octal, `base#digits`) and operators is
 accepted and reported as the literal text that was written, not as its value. Bash computes the
 value; the walker must not pretend to.
@@ -209,7 +216,7 @@ transformation the walker does not model.
 
 | inside double quotes | refused everywhere |
 | --- | --- |
-| `?` (previous exit status), `$` (this shell's id), `!` (last background id), `#` (argument count), `0` (the shell's own name), `-` (current option flags) | `@`, `*`, and the positional parameters `1`…`9` |
+| `?` (previous exit status), `$` (this shell's id), `!` (last background id), `#` (argument count), `0` (the shell's own name), `-` (current option flags) | `@`, `*`, and every positional parameter — `1` and up, `10` included |
 
 Each accepted special name resolves to `__TRACKED_VAR__`. The rejected ones are refused because in
 the shells this runs under they expand to nothing or to caller-supplied text, and a placeholder
@@ -281,6 +288,21 @@ Multiple redirects on one command are reported in source order.
 consequence even when nothing is printed.
 7.6 A placeholder in a target makes the command opaque; a descriptor duplicate target never does,
 because `1` and `2` are descriptors, not paths.
+7.7 A write named by an **option** rather than by an operator arrives on this same channel.
+`sort -o /etc/x` truncates `/etc/x` exactly as `sort > /etc/x` does, and no node in the tree says so:
+the flag is an ordinary word and its operand an ordinary argument, so a reader that only knows
+redirect nodes calls the command read-only. The walker therefore appends `{ op: ">", target: "/etc/x" }`
+to the command that named it — `>>` where the tool's option appends — after the checks have resolved
+the operand, so a placeholder target needs no special case (the command is already `opaque`, §6.3).
+Which options mean this is a short reviewed table, `OUTPUT_FLAG_WRITES` in
+`bash-walker-meaning.ts`: `sort -o` (alone, fused, or in a cluster), `uniq --output`, `patch -o`,
+`tee -o`/`--output`, and `git --output` only when the invocation also names one of `diff`, `show`,
+`log` — because that is the option family `git-diff(1)` documents and no other git verb takes it.
+Words after a bare `--` are operands, not flag operands, so an `--output` written there is a filename
+and reports nothing; a tool that is not in the table reports nothing either, which is what keeps
+`ssh -o BatchMode=yes` and `grep -o` from being read as writes. What the target then costs or buys is
+a policy question and belongs to the gate specification (`docs/CLASSIFIER-SPEC.md` §2.7); the
+walker's obligation ends at reporting it.
 
 ## 8. Here-documents
 
@@ -376,7 +398,11 @@ the input is not a command, so the agent should write a simpler one.
 10.8 The size cap and the parser budgets are the two places where refusing has a cost measured in
 work skipped rather than risk avoided. Both are still refusals, and both are `malformed` — the fix is
 a shorter command.
-10.9 The cap is **10 000 characters** of input. An input over the cap is never partially analysed.
+10.9 The cap is **10 000 characters** of input — one constant, `MAX_COMMAND_CHARS` in
+`bash-parser.ts`, imported by every place that enforces it, so there is no second number to drift.
+An input over the cap is never partially analysed. The parser's own budgets are separate and produce
+`parse-aborted` (§12): `MAX_TREE_NODES` 50 000, checked after the parse, and `PARSE_TIMEOUT_MS`
+300 ms for the whole call, split over `PARSE_ATTEMPTS` 2.
 
 ## 11. Refusals decided from the resolved arguments
 
@@ -385,10 +411,10 @@ result still must not be trusted.
 
 | id | input class |
 | --- | --- |
-| `evaluates-arguments-as-code` | a command whose arguments the shell runs as shell code: `eval`, `source`, `.`, `exec`, `command` (except `-v`/`-V`, which only report a path), `builtin`, `fc` with an edit or re-execute option, `trap`, `enable`, `hash`, `mapfile`/`readarray` with a callback, `bind`, `complete`, `compgen` with an executing or expanding option, `alias`, `let`, `coproc`, and the option-disabling prefixes `noglob` and `nocorrect` |
+| `evaluates-arguments-as-code` | a command whose arguments the shell runs as shell code: `eval`, `source`, `.`, `exec`, `command` (only reporting options `-v`/`-V` lift it), `builtin`, `fc` (a reporting option `-l`/`-n`/`-r`/`-t` lifts it; bare `fc` re-executes and is refused), `trap`, `enable`, `hash`, `mapfile`/`readarray` with a callback (`-C`), `bind`, `complete`, `compgen` with an executing or expanding option (`-C`/`-F`), `alias`, `let`, `coproc`, and the option-disabling prefixes `noglob` and `nocorrect` |
 | `zsh-module-builtin` | a name that is not a program on disk but an internal of another shell, reachable only through a module loader: `zmodload`, `emulate`, `sysopen`, `sysread`, `syswrite`, `sysseek`, `zpty`, `ztcp`, `zsocket`, and the `zf_` file-operations family |
-| `wrapper-not-analysable` | a scheduling or environment wrapper whose arguments the walker cannot walk past: `timeout` with a flag it does not know or a duration it cannot read, `env` with a flag that splits a string into arguments or changes the working directory or path, `stdbuf` with a long option that is not of the `name=value` form, `nice` whose first argument is an expansion. A wrapper whose form is known is peeled so the meaning checks see the wrapped command; a wrapper that cannot be peeled is refused rather than judged as itself |
-| `subscript-evaluation` | a builtin that re-reads a name operand and computes an array subscript in it, so a substitution hidden inside single quotes runs: `-v`/`-R` on the test builtins, `-v` on `printf`, `-a` on `read`, `-v` on `unset`, `-p` on `wait`, the `-i`/`-a` declaring flags (§5.9), a subscripted bare name given to `read` or `unset`, and an arithmetic-comparison operand inside a bracketed test (§9.5). A prompt or other data-taking operand is not a name: `read -p '[dir] ' v` is fine |
+| `wrapper-not-analysable` | a scheduling or environment wrapper whose arguments the walker cannot walk past: `timeout` with a flag it does not know or a duration it cannot read, `env` with a flag that splits a string into arguments or changes the working directory or path, `stdbuf` with a long option that is not of the `name=value` form, `nice` whose first argument is an expansion. A wrapper whose form is known is peeled so the meaning checks see the wrapped command; a wrapper that cannot be peeled is refused rather than judged as itself. The peelable set is `env`, `nice`, `stdbuf`, `timeout`, `nohup`, `time` — `WRAPPERS` in `bash-walker-meaning.ts` — and stacked wrappers are peeled repeatedly |
+| `subscript-evaluation` | a builtin that re-reads a name operand and computes an array subscript in it, so a substitution hidden inside single quotes runs: `-v`/`-R` on the test builtins, `-v` on `printf`, `-a`/`-A` on `read`, `-v` on `unset`, `-p` on `wait`, the `-i`/`-a` declaring flags (§5.9), a subscripted bare name given to `read` or `unset`, and an arithmetic-comparison operand (`-eq`, `-ne`, `-lt`, `-le`, `-gt`, `-ge`) inside a bracketed test (§9.5). A prompt or other data-taking operand is not a name: `read -p '[dir] ' v` is fine |
 | `nameref-assignment` | §5.9 |
 | `proc-environ-read` | an argument or a redirect target naming another process's environment file under `/proc/…` — path segments are resolved in the kernel, so anything that walks to `environ` counts, including through `..` and through an escaped spelling |
 | `jq-system-call` | a `jq` program containing its code-executing builtin |
@@ -411,8 +437,14 @@ about it.
 
 ## 12. Reason vocabulary
 
-The complete set of ids a refusal may carry. A new id is added only with a golden case that needs it,
-and the vocabulary in `eval/golden-check.ts` must match this table exactly, `malformed` included.
+The complete set of ids a refusal may carry. A new id is added only with a golden case that needs it.
+This table is not a description of somebody's list; it *is* the list, kept in three places that have to
+agree item for item: the `Reason` union in `bash-walker.ts`, which is what `refuse()` accepts; the
+`MALFORMED_CLASSES` set beside it, which fills in `malformed` for every refusal; and this table. The
+agreement is only partly machine-checked. `refuse()` derives `malformed` from that set and the corpus
+asserts `malformed` for every case it carries, so the suite fails on any id whose column here disagrees
+with the set — for every id the corpus has a case for. Nothing machine-checks this table against the
+union, which is why adding an id is a change to all three and not to one.
 
 | reason | malformed | refused because |
 | --- | --- | --- |
@@ -474,8 +506,9 @@ and, when useful, `nodeType`.
 12.3 Four ids have no golden case, because no input can produce them: `parse-aborted` and
 `parser-unavailable` describe the process rather than the command; `assignment-name-invalid` and
 `command-name-not-a-literal` are reachable only if some earlier rule of this document is broken. They
-stay in the vocabulary because a caller has to handle them, and `eval/golden-check.ts` lists them as
-uncovered rather than as an error. `inventory-mismatch` was in this list until a defect of the grammar
+stay in the vocabulary because a caller has to handle them, and `bash-walker-golden.test.ts` asserts
+that the corpus carries no case for exactly these four — an id with no case is the expected state
+there, not a gap. `inventory-mismatch` was in this list until a defect of the grammar
 in use (tree-sitter-bash 0.25.1) made it reachable from valid input: a pipeline of three or more stages
 followed by newline-separated commands whose last carries a redirect is parsed as one pipeline whose
 last stage holds the lines below as words. The walker refuses that command under §2 step 8 because its
@@ -529,7 +562,34 @@ secret, or which verbs delete. It says only what a command is made of, and wheth
 
 `bash-walker.golden.jsonl` — one JSON object per line: `id`, `command`, `expect` (the required result
 in the shape of §1; for a refusal, `kind`, `reason`, `malformed`), and `note` on the lines where the
-spec deliberately departs from the engine this replaces, saying why. `nodeType` is never asserted.
-`eval/golden-check.ts` validates the file's shape and vocabulary against §12 and reports the counts;
-the implementation's own test runner, owned by whoever builds the walker, decides pass or fail by
-comparing each line's `expect` against the walker's result.
+required result deliberately departs from the engine this walker replaces, saying which and why — the
+notes name that engine, nothing in this document does. `nodeType` is never asserted.
+
+Three things read this file, and each answers a different question:
+
+- **`loadGolden()` (`bash-walker-golden.ts`)** — shape. It reads the file in line order and throws on
+  any line that is not a case, naming the line, so a half-written corpus fails loudly at load instead
+  of quietly shortening the suite.
+- **`compareCase()` (same file)** — one case against one walker result. It is deliberately stricter
+  than the corpus needs: for an accepted case every field of every command must deep-equal `expect` —
+  `argv`, `envVars`, `redirects`, `heredocs`, `text`, `start`, `end`, `connector`, `opaque` — in the
+  order they were emitted; for a refusal, `kind`, `reason` and `malformed`. It answers with the first
+  difference it found, in words, because "case `hd-dash` failed" is not actionable.
+- **`bash-walker-golden.test.ts`** — the integration proof: every case, no subset, no deferral list,
+  plus the corpus's own rules (ids unique; `inventory-mismatch` present, §12.3; the four ids §12.3
+  calls unreachable absent).
+
+Each walker part's own test file runs a subset of the same corpus, selected by id prefix with
+`selectById` — `bash-walker.test.ts` (`sep-`, `sub-`, `rej-`, `span-`, `test-`, `word-`, `red-`),
+`bash-walker-values.test.ts` (`assign-`, `cs-`, `decl-`, `exp-`, `unset-`),
+`bash-walker-heredoc.test.ts` (`hd-`, `mal-`, `pre-`), `bash-walker-meaning.test.ts` (`sem-` plus
+named cases) and `bash-walker-remember.test.ts` (`mem-`) — so a failure names the module that owns the
+construct. The prefix routes the case and nothing else: the required result is the same object whoever
+runs it.
+
+One exception to "the corpus is the contract", and it belongs to §12.3 rather than to the command:
+`parse-aborted` and `parser-unavailable` describe the machine, and on a loaded machine the same input
+can refuse `parse-aborted` on one run and accept on the next, because the parser's budget is a
+wall-clock. `parseWithEnvironmentRetry` therefore re-runs a case whose verdict carries one of those
+two ids, and the retried verdict is the one asserted. That is not a tolerance: an input that really
+cannot be parsed refuses on every attempt, and no other id is ever retried.
