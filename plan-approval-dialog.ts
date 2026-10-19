@@ -30,7 +30,7 @@ export const DIALOG_CHROME_RESERVE =
 /** @deprecated Use DIALOG_CHROME_RESERVE */
 export const FULLSCREEN_CHROME_RESERVE = DIALOG_CHROME_RESERVE;
 /**
- * Near-fullscreen panel (Cursor / Claude Code style). Leaves a thin strip of
+ * Near-fullscreen panel (92% of the terminal). Leaves a thin strip of
  * chat visible above; options stay pinned to the bottom of the panel.
  */
 export const DIALOG_MAX_HEIGHT_RATIO = 0.92;

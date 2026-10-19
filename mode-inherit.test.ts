@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	applyInheritedModeForChild,
 	PERMISSION_MODES_INHERITED_MODE_ENV,
@@ -10,6 +10,17 @@ import { SUBAGENT_CHILD_ENV } from "./permission-forwarding.ts";
 describe("mode-inherit", () => {
 	const prevMode = process.env[PERMISSION_MODES_INHERITED_MODE_ENV];
 	const prevChild = process.env[SUBAGENT_CHILD_ENV];
+
+	// Establish the baseline every test here assumes. Without it the starting state comes
+	// from the ambient environment — and any shell that has ever run pi has this var set,
+	// because the extension publishes the live mode into process.env. afterEach then
+	// faithfully restores that tainted value instead of clearing it, so a test asserting
+	// "nothing is published" only passes on a clean shell. Snapshot/restore stays for the
+	// outer env; it is not a substitute for a per-test baseline.
+	beforeEach(() => {
+		delete process.env[PERMISSION_MODES_INHERITED_MODE_ENV];
+		delete process.env[SUBAGENT_CHILD_ENV];
+	});
 
 	afterEach(() => {
 		if (prevMode === undefined)
@@ -33,10 +44,18 @@ describe("mode-inherit", () => {
 		expect(process.env[PERMISSION_MODES_INHERITED_MODE_ENV]).toBe("ask");
 	});
 
-	it("ignores invalid modes", () => {
-		delete process.env[SUBAGENT_CHILD_ENV];
+	it("publishes nothing for invalid modes", () => {
 		publishInheritedPermissionMode("yolo");
 		expect(resolveInheritedPermissionMode()).toBeUndefined();
+	});
+
+	it("does not clobber a valid mode with an invalid one", () => {
+		// The safety property the single combined test above assumed away: a bad mode
+		// string must never overwrite the mode that children actually inherit.
+		process.env[PERMISSION_MODES_INHERITED_MODE_ENV] = "auto";
+		publishInheritedPermissionMode("yolo");
+		expect(process.env[PERMISSION_MODES_INHERITED_MODE_ENV]).toBe("auto");
+		expect(resolveInheritedPermissionMode()).toBe("auto");
 	});
 
 	it("applyInheritedModeForChild returns mode for any child when env is set", () => {

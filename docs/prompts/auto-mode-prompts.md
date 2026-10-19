@@ -1,6 +1,6 @@
 # Auto Mode — Prompt Reference
 
-> **v2.2.0 (CC-aligned).** Tiered auto-approve with optional classifier, deny-and-continue on classifier blocks, and fail-closed when classifier is unavailable.
+> **v2.2.0.** Tiered auto-approve with optional classifier, deny-and-continue on classifier blocks, and fail-closed when classifier is unavailable.
 
 ---
 
@@ -21,7 +21,7 @@
 
 Injected via `before_agent_start` anchor (`<!-- permission-modes:context -->`).
 
-Auto mode also injects a **tool-output injection warning** (CC-aligned) and escalates when recent tool results match heuristic injection patterns.
+Auto mode also injects a **tool-output injection warning** and escalates when recent tool results match heuristic injection patterns.
 
 ---
 

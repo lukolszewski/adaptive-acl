@@ -19,6 +19,15 @@ function msg(
 	return { type: "message", id: `e-${role}`, message: { role, content, ...extra } }
 }
 
+/**
+ * pi writes entry kinds beyond `message` and `custom`. `BranchEntry`'s catch-all arm is deliberately just
+ * `{ type: string }` — the port skips what it does not understand — so a fixture carrying one of their
+ * extra fields declares its own shape rather than widening the port.
+ */
+type OtherEntry = { type: string; [field: string]: unknown }
+
+const thinkingLevelChange: OtherEntry = { type: "thinkingLevelChange", thinkingLevel: "high" }
+
 const branch: BranchEntry[] = [
 	msg("user", "list the files"),
 	{
@@ -35,7 +44,9 @@ const branch: BranchEntry[] = [
 		toolCallId: "c1",
 	}),
 	{ type: "custom", customType: "modes", data: { currentMode: "auto" } },
-	{ type: "thinkingLevelChange", thinkingLevel: "high" },
+	// A kind the port knows nothing about: it must survive `readBranchEntries` and be skipped by
+	// `readBranchMessages`, which is what the two assertions below count.
+	thinkingLevelChange,
 ]
 
 const sessionManager = {

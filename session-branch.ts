@@ -24,7 +24,7 @@ export interface BranchAgentMessage {
 	toolCallId?: string
 }
 
-/** pi SessionMessageEntry (vendored typings 0.80+ shape). */
+/** pi SessionMessageEntry (the shape pi's 0.80+ published typings use). */
 export interface BranchMessageEntry {
 	type: "message"
 	id?: string

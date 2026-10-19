@@ -1,7 +1,4 @@
-/**
- * CC-style auto-mode classifier system prompt assembly.
- * Prompt text from Claude Code yolo-classifier-prompts (external build).
- */
+/** Assembles the auto-mode classifier system prompt from the bundled prompt templates. */
 
 import { readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
@@ -12,105 +9,163 @@ const PROMPTS_DIR = join(
 	"classifier-prompts",
 )
 
+const BASE_FILE = "auto_mode_system_prompt.txt"
+const RULES_FILE = "permissions_external.txt"
+
 export type AutoModeRules = {
 	allow?: string[]
 	soft_deny?: string[]
 	environment?: string[]
 }
 
-let basePromptCache: string | undefined
-let permissionsTemplateCache: string | undefined
+type RulesKey = keyof AutoModeRules
 
-function loadPromptFile(name: string): string {
-	return readFileSync(join(PROMPTS_DIR, name), "utf-8")
+/**
+ * Our placeholder vocabulary. A rule block is delimited by a `{{rules:*}}` pair; the
+ * whole rules file and the verdict block are pulled into the base prompt by `{{include:*}}`.
+ */
+type RuleTag = { key: RulesKey; open: string; close: string }
+
+const RULE_TAGS: readonly RuleTag[] = [
+	{ key: "allow", open: "{{rules:allow}}", close: "{{/rules:allow}}" },
+	{ key: "soft_deny", open: "{{rules:deny}}", close: "{{/rules:deny}}" },
+	{ key: "environment", open: "{{rules:env}}", close: "{{/rules:env}}" },
+]
+
+const RULES_INCLUDE = "{{include:permissions}}"
+const VERDICT_INCLUDE = "{{include:verdict}}"
+
+const BULLET = "- "
+
+const VERDICT_FORMAT = `## Verdict Format
+
+Emit one JSON object as your entire reply: no markdown fences, no prose before or after it.
+Shape: {"thinking": string, "shouldBlock": boolean, "reason": string}
+- shouldBlock=true → hold the action for explicit user confirmation
+- shouldBlock=false → allow the action to proceed unattended
+Keep thinking to a few clauses and reason to one short sentence.`
+
+// --------------------------------------------------------------------------------------
+// File loading (cached; clearClassifierPromptCache drops it for tests)
+
+const fileCache = new Map<string, string>()
+
+function promptFile(name: string): string {
+	const cached = fileCache.get(name)
+	if (cached !== undefined) return cached
+	const text = readFileSync(join(PROMPTS_DIR, name), "utf8")
+	fileCache.set(name, text)
+	return text
 }
 
 export function getBaseClassifierPrompt(): string {
-	if (!basePromptCache) {
-		basePromptCache = loadPromptFile("auto_mode_system_prompt.txt")
-	}
-	return basePromptCache
+	return promptFile(BASE_FILE)
 }
 
 export function getExternalPermissionsTemplate(): string {
-	if (!permissionsTemplateCache) {
-		permissionsTemplateCache = loadPromptFile("permissions_external.txt")
-	}
-	return permissionsTemplateCache
+	return promptFile(RULES_FILE)
 }
 
-/** For tests — reset cached prompt reads. */
+/** For tests — drop cached prompt reads so the next call hits disk again. */
 export function clearClassifierPromptCache(): void {
-	basePromptCache = undefined
-	permissionsTemplateCache = undefined
+	fileCache.clear()
 }
 
-const CC_TOOL_OUTPUT_LINE =
-	"Use the classify_result tool to report your classification."
+// --------------------------------------------------------------------------------------
+// Placeholder mechanism (index arithmetic only — no regexes over the templates)
 
-const PI_JSON_OUTPUT = `## Output Format
+/** Byte span between an `open`/`close` marker pair, markers included. */
+type Span = { from: number; bodyFrom: number; bodyTo: number; to: number }
 
-Reply with a single JSON object only — no markdown fences, no prose before or after.
-Required shape: {"thinking": string, "shouldBlock": boolean, "reason": string}
-- shouldBlock=false → ALLOW (auto-approve the pending tool call)
-- shouldBlock=true → BLOCK (require explicit user confirmation)
-Keep thinking brief. Keep reason under one sentence.`
-
-function extractTaggedBullets(tagName: string, template: string): string[] {
-	const match = template.match(
-		new RegExp(`<${tagName}>([\\s\\S]*?)</${tagName}>`),
-	)
-	if (!match) return []
-	return (match[1] ?? "")
-		.split("\n")
-		.map((line) => line.trim())
-		.filter((line) => line.startsWith("- "))
-		.map((line) => line.slice(2))
+function findSpan(text: string, open: string, close: string): Span | undefined {
+	const from = text.indexOf(open)
+	if (from < 0) return undefined
+	const bodyFrom = from + open.length
+	const bodyTo = text.indexOf(close, bodyFrom)
+	if (bodyTo < 0) return undefined
+	return { from, bodyFrom, bodyTo, to: bodyTo + close.length }
 }
 
-export function getDefaultAutoModeRules(): AutoModeRules {
-	const template = getExternalPermissionsTemplate()
-	return {
-		allow: extractTaggedBullets("user_allow_rules_to_replace", template),
-		soft_deny: extractTaggedBullets("user_deny_rules_to_replace", template),
-		environment: extractTaggedBullets(
-			"user_environment_to_replace",
-			template,
-		),
-	}
-}
-
-function formatRuleBullets(rules: string[] | undefined): string | undefined {
-	if (!rules?.length) return undefined
-	return rules.map((r) => `- ${r}`).join("\n")
+/** Splice `replacement` over `text`, replacing exactly the `[from, to)` span. */
+function splice(text: string, span: Span, replacement: string): string {
+	return text.slice(0, span.from) + replacement + text.slice(span.to)
 }
 
 /**
- * Assemble the CC external auto-mode classifier system prompt.
- * User rules in autoMode REPLACE the tagged defaults (external template semantics).
+ * Swap the contents of a `{{rules:*}}` block. `replacement` of `undefined` keeps the
+ * block exactly as written, which is how the bundled defaults survive untouched.
  */
-export function buildClassifierSystemPrompt(
-	autoMode?: AutoModeRules,
+function swapBlock(text: string, tag: RuleTag, replacement?: string): string {
+	const span = findSpan(text, tag.open, tag.close)
+	if (!span) return text
+	const body = text.slice(span.bodyFrom, span.bodyTo)
+	return splice(text, span, replacement ?? body)
+}
+
+/** Replace every occurrence of a standalone marker; an unresolved marker is dropped, never leaked. */
+function swapMarker(
+	text: string,
+	marker: string,
+	replacement?: string,
 ): string {
-	const systemPrompt = getBaseClassifierPrompt()
-		.replace("<permissions_template>", () => getExternalPermissionsTemplate())
-		.replace(CC_TOOL_OUTPUT_LINE, PI_JSON_OUTPUT)
+	let out = ""
+	let cursor = 0
+	for (;;) {
+		const at = text.indexOf(marker, cursor)
+		if (at < 0) break
+		out += text.slice(cursor, at) + (replacement ?? "")
+		cursor = at + marker.length
+	}
+	return out + text.slice(cursor)
+}
 
-	const userAllow = formatRuleBullets(autoMode?.allow)
-	const userDeny = formatRuleBullets(autoMode?.soft_deny)
-	const userEnvironment = formatRuleBullets(autoMode?.environment)
+/** The `- ` bullets inside a block, markers and bullet glyphs stripped. */
+function readBullets(block: string): string[] {
+	const found: string[] = []
+	for (const line of block.split("\n")) {
+		const trimmed = line.trim()
+		if (trimmed.startsWith(BULLET)) {
+			found.push(trimmed.slice(BULLET.length).trim())
+		}
+	}
+	return found
+}
 
-	return systemPrompt
-		.replace(
-			/<user_allow_rules_to_replace>([\s\S]*?)<\/user_allow_rules_to_replace>/,
-			(_m, defaults: string) => userAllow ?? defaults,
-		)
-		.replace(
-			/<user_deny_rules_to_replace>([\s\S]*?)<\/user_deny_rules_to_replace>/,
-			(_m, defaults: string) => userDeny ?? defaults,
-		)
-		.replace(
-			/<user_environment_to_replace>([\s\S]*?)<\/user_environment_to_replace>/,
-			(_m, defaults: string) => userEnvironment ?? defaults,
-		)
+/** Render caller-supplied rules as bullets, or `undefined` when the caller gave none. */
+function renderBullets(values: readonly string[] | undefined): string | undefined {
+	const kept = (values ?? [])
+		.map((value) => value.trim())
+		.filter((value) => value.length > 0)
+	if (kept.length === 0) return undefined
+	return kept.map((value) => `${BULLET}${value}`).join("\n")
+}
+
+// --------------------------------------------------------------------------------------
+// Public assembly
+
+export function getDefaultAutoModeRules(): AutoModeRules {
+	const template = getExternalPermissionsTemplate()
+	const defaults: AutoModeRules = {}
+	for (const tag of RULE_TAGS) {
+		const span = findSpan(template, tag.open, tag.close)
+		defaults[tag.key] = span
+			? readBullets(template.slice(span.bodyFrom, span.bodyTo))
+			: []
+	}
+	return defaults
+}
+
+/**
+ * Build the classifier system prompt. Rules supplied by the caller replace the defaults of
+ * that one block only; omitted or empty blocks keep the defaults shipped in the template.
+ */
+export function buildClassifierSystemPrompt(autoMode?: AutoModeRules): string {
+	let rules = getExternalPermissionsTemplate()
+	for (const tag of RULE_TAGS) {
+		rules = swapBlock(rules, tag, renderBullets(autoMode?.[tag.key]))
+	}
+
+	let prompt = getBaseClassifierPrompt()
+	prompt = swapMarker(prompt, RULES_INCLUDE, rules)
+	return swapMarker(prompt, VERDICT_INCLUDE, VERDICT_FORMAT)
 }

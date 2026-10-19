@@ -7,10 +7,11 @@
  * - Numbered "Plan:" extraction and [DONE:n] step tracking used by Plan mode's
  *   execute/track flow.
  *
- * Ported from pi's bundled `examples/extensions/plan-mode/utils.ts`.
+ * The plan-step helpers follow the shape of pi's own bundled
+ * `examples/extensions/plan-mode/utils.ts` (MIT, pi coding agent contributors).
  */
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync, unlinkSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync, unlinkSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { homedir } from "node:os"
 import path from "node:path"
@@ -370,7 +371,7 @@ export function classifyBashTiers(command: string): {
 // - tier-2 reuses the fallback guardrails (unsafe args, outside-cwd paths).
 // ---------------------------------------------------------------------------
 
-// Tier-2 auto approvals (CC-aligned): routine builds/tests and cwd-local git ops.
+// Tier-2 auto approvals: routine builds/tests and cwd-local git ops.
 // Network fetch, package install, arbitrary interpreters, git fetch/pull,
 // git hook vectors, worktree-loss git forms, and docker run/exec require
 // tier-3 classifier review.
@@ -475,7 +476,10 @@ export function cleanStepText(text: string): string {
 	return cleaned;
 }
 
-/** Extract a numbered list under a `Plan:` header into TodoItems. */
+/**
+ * Extract a numbered list under a `Plan:` header into TodoItems.
+ * Shape follows pi's bundled `examples/extensions/plan-mode/utils.ts` (MIT).
+ */
 export function extractTodoItems(message: string): TodoItem[] {
 	const items: TodoItem[] = [];
 	const headerMatch = message.match(/\*{0,2}Plan:\*{0,2}\s*\n/i);
@@ -675,36 +679,158 @@ export function findProjectRoot(cwd: string): string | null {
 }
 
 /**
- * Resolve the project's stable ID. Looks for the existing
- * `.pi/permission-modes-<hash>.md` marker file (created by pi when the
- * project was opened). Falls back to a hash of `cwd` if not found.
+ * Project identity.
  *
- * The marker filename is the canonical source because pi creates it
- * automatically and uses the same hash for kanban boards, memory, etc.
+ * Every piece of project state — permission rules, the grants journal, the plan
+ * file, outside-write snapshots — lives under `<cwd>/.pi/projects/<id>/`, so the
+ * id is not a label, it is the *address* of a project's authority. An id derived
+ * from the path therefore moves with nothing: rename the directory the checkout
+ * sits in and every rule for it — allows **and denies** — disappears with no
+ * error, and the next session happily asks for what the last one forbade.
+ *
+ * So the id is resolved from the first source that has an opinion, cheapest and
+ * most portable first:
+ *
+ *   1. `<cwd>/.pi/project.json` → `{ "projectId": "…" }`. Lives inside the
+ *      checkout, so it is the only source that survives a move;
+ *   2. `<cwd>/.pi/permission-modes-<id>.md` — pi's own marker, unchanged, used
+ *      for kanban/memory boards too;
+ *   3. `hashPath(cwd)` — correct while the tree stays where it was.
+ *
+ * Resolution reads the filesystem and says nothing: no logging, no `process.env`,
+ * nothing that would make a verdict depend on the session it was asked in.
  */
-// Positive-result cache only: once a plan marker file is seen, its id is
-// stable for the cwd. Negative results (hash fallback) stay uncached so a
-// marker created mid-session switches the id over on the next call.
+
+/** The id becomes one path segment, hence: lowercase alnum, then up to 31 of `-`/`_`. */
+const PROJECT_ID_SHAPE = /^[a-z0-9][a-z0-9_-]{0,31}$/
+const PROJECT_ID_FILE = path.join(".pi", "project.json")
+/** pi generates this name from a hash, so it is hex-only. */
+const PI_MARKER_NAME = /^permission-modes-([a-f0-9]+)\.md$/
+
+type CarriedId =
+	/** No file, or a file with no content and no other keys — free to be stamped. */
+	| { state: "absent" }
+	/** Present but not JSON we can trust: never replaced silently. */
+	| { state: "unparseable" }
+	/** Parseable JSON carrying no usable `projectId` (blank, wrong type, bad charset). */
+	| { state: "unidentified"; doc: Record<string, unknown> }
+	| { state: "id"; id: string; doc: Record<string, unknown> }
+
+function readCarriedId(cwd: string): CarriedId {
+	const file = path.join(cwd, PROJECT_ID_FILE)
+	let raw: string
+	try {
+		if (!existsSync(file)) return { state: "absent" }
+		raw = readFileSync(file, "utf-8")
+	} catch {
+		return { state: "unparseable" }
+	}
+	if (!raw.trim()) return { state: "absent" }
+	let doc: unknown
+	try {
+		doc = JSON.parse(raw)
+	} catch {
+		return { state: "unparseable" }
+	}
+	if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+		return { state: "unidentified", doc: {} }
+	}
+	const kept = doc as Record<string, unknown>
+	const field = kept.projectId
+	if (typeof field === "string" && PROJECT_ID_SHAPE.test(field)) {
+		return { state: "id", id: field, doc: kept }
+	}
+	return { state: "unidentified", doc: kept }
+}
+
+/** pi's marker, if this tree has one — read off the filename, contents are pi's. */
+function readPiMarkerId(cwd: string): string | null {
+	const piDir = path.join(cwd, ".pi")
+	try {
+		if (!existsSync(piDir)) return null
+		for (const name of readdirSync(piDir)) {
+			const hit = PI_MARKER_NAME.exec(name)
+			if (hit) return hit[1]
+		}
+	} catch {
+		/* unreadable .pi/ is "no marker", not an error — resolution continues */
+	}
+	return null
+}
+
+// Positive-result cache only: an id that came from a marker is stable for this
+// cwd. The hash fallback stays uncached, so a marker created mid-session takes
+// over on the next call (and `writeProjectIdMarker` drops the entry it invalidates).
 const projectIdCache = new Map<string, string>()
+
+/**
+ * Stamp the checkout with an id of its own (`.pi/project.json`) so the id — and
+ * therefore the rules + journal directory — travels with it instead of being
+ * re-derived from wherever it happens to sit.
+ *
+ * Every refusal returns `false` and throws nothing:
+ *  - `id` is not a single safe path segment;
+ *  - the carried file already names a **different** id: swapping ids relocates
+ *    the state directory, which is the exact failure this module exists to
+ *    prevent, so it takes `{ force: true }` to mean "yes, on purpose";
+ *  - the carried file is not parseable — we do not write over a file we could
+ *    not read, because we cannot know what identity it held;
+ *  - no carried id, but pi's `.md` marker names a different one — same
+ *    consequence, so same rule.
+ *
+ * Writing the id pi already uses is always allowed (the state directory does not
+ * move, it just stops depending on the path). Unknown keys in the file are kept:
+ * it is hand-edited. A successful write drops the cached id for `cwd`.
+ */
+export function writeProjectIdMarker(
+	cwd: string,
+	id: string,
+	opts: { force?: boolean } = {},
+): boolean {
+	if (!PROJECT_ID_SHAPE.test(id)) return false
+	const carried = readCarriedId(cwd)
+	if (carried.state === "unparseable") return false
+	// Whichever source is authoritative today is the id whose state directory a
+	// swap would strand.
+	const currentId = carried.state === "id" ? carried.id : readPiMarkerId(cwd)
+	if (currentId !== null && currentId !== id && !opts.force) return false
+	const file = path.join(cwd, PROJECT_ID_FILE)
+	try {
+		const doc = carried.state === "absent" ? {} : carried.doc
+		mkdirSync(path.dirname(file), { recursive: true })
+		const tmp = `${file}.tmp-${process.pid}`
+		writeFileSync(
+			tmp,
+			JSON.stringify({ ...doc, projectId: id }, null, 2) + "\n",
+			{ mode: 0o644 },
+		)
+		renameSync(tmp, file)
+		projectIdCache.delete(cwd)
+		return true
+	} catch (err) {
+		console.warn(`[permission-modes] Failed to write ${file}:`, err)
+		return false
+	}
+}
+
+/** The carried marker's id, or null when there is none that can be used. */
+export function readProjectIdMarker(cwd: string): string | null {
+	const carried = readCarriedId(cwd)
+	return carried.state === "id" ? carried.id : null
+}
 
 export function getProjectId(cwd: string): string {
 	const cached = projectIdCache.get(cwd)
 	if (cached) return cached
-	try {
-		const piDir = path.join(cwd, ".pi")
-		if (existsSync(piDir)) {
-			const entries = readdirSync(piDir)
-			const match = entries.find((e) =>
-				/^permission-modes-[a-f0-9]+\.md$/.test(e),
-			)
-			if (match) {
-				const id = match.replace(/^permission-modes-/, "").replace(/\.md$/, "")
-				projectIdCache.set(cwd, id)
-				return id
-			}
-		}
-	} catch {
-		/* ignore — fall through to hash fallback */
+	const carried = readCarriedId(cwd)
+	if (carried.state === "id") {
+		projectIdCache.set(cwd, carried.id)
+		return carried.id
+	}
+	const piMarker = readPiMarkerId(cwd)
+	if (piMarker) {
+		projectIdCache.set(cwd, piMarker)
+		return piMarker
 	}
 	return hashPath(cwd)
 }
@@ -712,6 +838,34 @@ export function getProjectId(cwd: string): string {
 /** First 8 hex chars of sha256(input). Deterministic. */
 export function hashPath(p: string): string {
 	return createHash("sha256").update(p).digest("hex").slice(0, 8)
+}
+
+/**
+ * Where project state lives for `cwd` — `<cwd>/.pi/projects/<projectId>` unless a test installed a temp root.
+ *
+ * Production never sets the override. The seam exists because a suite that simulates a session with
+ * `cwd = process.cwd()` writes into the REAL checkout's state, and those rows are not invisible: `/grants outside-writes`
+ * reads this very directory, so a test fixture named `/tmp/outside.txt` shows up as if the user had written it. Measured
+ * on 2026-10-16: 55 rows left behind in the port checkout by unit tests — 43 from `mkdtemp` dirs the suites had already
+ * deleted, 12 from hardcoded fixtures like `/tmp/outside.txt` and `/opt/outside.txt`.
+ */
+let projectStateRootOverride: string | null = null
+
+/**
+ * Test seam, same shape as `config.ts:setConfigPath`. Install a temp root in a `beforeEach`, clear it in `afterEach`.
+ * It redirects the outside-writes journal only — the plan file path is unchanged, because that is the leak being plugged
+ * and widening it would change behaviour tests elsewhere legitimately assert.
+ */
+export function setProjectStateRoot(dir: string | null): void {
+	projectStateRootOverride = dir
+}
+
+/** The state dir for `cwd`, honouring the test override. Does not create anything. */
+export function getProjectStateDir(cwd: string): string {
+	const id = getProjectId(cwd)
+	return projectStateRootOverride
+		? path.join(projectStateRootOverride, id)
+		: path.join(cwd, ".pi", "projects", id)
 }
 
 /**
@@ -724,10 +878,85 @@ export function hashPath(p: string): string {
  * Safe to call repeatedly — idempotent.
  */
 export function getProjectTmpDir(cwd: string): string {
-	const id = getProjectId(cwd)
-	const dir = path.join(cwd, ".pi", "projects", id, "tmp", "outside-writes")
+	const dir = path.join(getProjectStateDir(cwd), "tmp", "outside-writes")
 	mkdirSync(dir, { recursive: true })
 	return dir
+}
+
+/** What one project id owns under `.pi/projects/<id>/`. */
+export type ProjectStateDir = {
+	id: string
+	path: string
+	rules: { permissions: boolean; local: boolean }
+	grants: boolean
+	/** True when the directory holds a deny rule — the case that must never go quiet. */
+	hasDenyRules: boolean
+}
+
+/**
+ * A deny list that can be read is a deny list; anything else (absent file, blank
+ * file, malformed JSON, `deny: "Bash(rm *)"` written as a string instead of an
+ * array) reads as "no deny rule found here" — which is *not* the same claim as
+ * "this directory is safe". The listing type has no `unknown`, so a caller that
+ * wants to say "unreadable" has to say so itself; what this guarantees is only
+ * that a read-only scan never throws.
+ */
+function holdsDenyRules(filePath: string): boolean {
+	let doc: unknown
+	try {
+		if (!existsSync(filePath)) return false
+		const raw = readFileSync(filePath, "utf-8")
+		if (!raw.trim()) return false
+		doc = JSON.parse(raw)
+	} catch {
+		return false
+	}
+	if (!doc || typeof doc !== "object" || Array.isArray(doc)) return false
+	const root = doc as Record<string, unknown>
+	const nested = root.permissions
+	const lists =
+		nested && typeof nested === "object" && !Array.isArray(nested)
+			? (nested as Record<string, unknown>)
+			: root
+	const deny = lists.deny
+	return Array.isArray(deny) && deny.some((r) => typeof r === "string" && !!r.trim())
+}
+
+/**
+ * Read-only inventory of `<cwd>/.pi/projects/` for every id **except**
+ * `currentId` — the state a moved or renamed checkout left behind. Nothing here
+ * migrates, adopts, merges or deletes: it reports, and the caller decides how
+ * loud to be. Every subdirectory is listed, including ones holding nothing but
+ * a scratch `tmp/` and ones whose name this plugin would never have generated,
+ * because an orphan we did not create is still evidence. Files directly under
+ * `.pi/projects/` are not ids and are skipped. Sorted by id, so the output is
+ * stable enough to compare in a test.
+ */
+export function listProjectStateDirs(cwd: string, currentId: string): ProjectStateDir[] {
+	const root = path.join(cwd, ".pi", "projects")
+	let dirs: string[]
+	try {
+		dirs = readdirSync(root, { withFileTypes: true })
+			.filter((e) => e.isDirectory())
+			.map((e) => e.name)
+	} catch {
+		return []
+	}
+	const found: ProjectStateDir[] = []
+	for (const id of dirs) {
+		if (id === currentId) continue
+		const dir = path.join(root, id)
+		const permissions = path.join(dir, "permissions.json")
+		const local = path.join(dir, "permissions.local.json")
+		found.push({
+			id,
+			path: dir,
+			rules: { permissions: existsSync(permissions), local: existsSync(local) },
+			grants: existsSync(path.join(dir, "grants.json")),
+			hasDenyRules: holdsDenyRules(permissions) || holdsDenyRules(local),
+		})
+	}
+	return found.sort((a, b) => a.id.localeCompare(b.id))
 }
 
 /**
@@ -955,8 +1184,6 @@ export interface ResolveModePromptOpts {
 	planFilePath?: string
 	needsAskReminder?: boolean
 	needsBypassSecurityReminder?: boolean
-	pendingComplianceInject?: boolean
-	complianceCategory?: string
 }
 
 export function resolveModePrompt(opts: ResolveModePromptOpts): string {
@@ -966,14 +1193,7 @@ export function resolveModePrompt(opts: ResolveModePromptOpts): string {
 		planFilePath,
 		needsAskReminder,
 		needsBypassSecurityReminder,
-		pendingComplianceInject,
-		complianceCategory,
 	} = opts
-
-	if (pendingComplianceInject) {
-		const cat = complianceCategory ? ` (${complianceCategory})` : ""
-		return `[Auto] Your last tool call was blocked${cat}. Confirm the action aligns with the user's request and is the safest approach. Retry with a safer alternative if unsure.`
-	}
 
 	if (mode === "ask" && needsAskReminder) {
 		return "[Ask] Edits, outside-cwd access, and mutating commands need approval. Inside-cwd reads are automatic."

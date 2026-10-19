@@ -1,10 +1,18 @@
 /**
- * CC-style classifier transcript: user text + assistant tool calls only.
- * Assistant free-text is excluded to prevent prompt injection into the classifier.
+ * The transcript we show the safety model.
+ *
+ * It holds exactly two kinds of evidence: what the user typed, and which tools the agent ran with
+ * what arguments. Assistant prose is left out on purpose — the model being graded is the one that
+ * wrote it, so quoting it back would let that same text argue for its own actions.
+ *
+ * Two spellings come out of `toCompactBlock`: a human-readable line (`User: …`, `Bash {…}`) and,
+ * with `jsonlTranscript`, one JSON object per block. Both are capped by the caller's entry/char
+ * budget, oldest entries dropped first.
  */
 
 import { redactForClassifier } from "./classifier-redact.ts"
 import { toClassifierInput } from "./classifier-tool-projection.ts"
+import { tokensToChars } from "./context-budget.ts"
 
 export type TranscriptBlock =
 	| { type: "text"; text: string }
@@ -50,7 +58,7 @@ function extractAssistantToolCalls(content: unknown): TranscriptBlock[] {
 				input: block.arguments ?? {},
 			})
 		}
-		// CC uses tool_use; some paths may still emit tool_use in stored sessions
+		// Older sessions stored on disk carry the block under its transport name rather than pi's
 		if (block?.type === "tool_use" && typeof block.name === "string") {
 			blocks.push({
 				type: "tool_use",
@@ -147,12 +155,22 @@ export function buildTranscriptForClassifier(
 	jsonl = false,
 	maxEntries = 40,
 	maxChars = 12_000,
+	budgetTokens?: number,
 ): string {
+	// A token budget, when the caller has one (it knows the model's window), replaces the fixed
+	// character cap; entries are still dropped whole from the oldest end and never truncated — dropping
+	// one is a statement about the conversation, shortening one is a lie.
+	const budgeted = budgetTokens !== undefined
+	const charBudget = budgeted ? tokensToChars(budgetTokens!) : maxChars
+	// Without a budget the oldest-entry drop stops at one entry, as it always has: something is better
+	// than nothing when the cap is only a courtesy. A token budget is not a courtesy — it is the size of
+	// the server's window — so under a budget even the newest entry goes rather than overflow.
+	const keepAtLeast = budgeted ? 0 : 1
 	const entries = buildTranscriptEntriesFromBranch(branch)
 	let slice =
 		entries.length > maxEntries ? entries.slice(-maxEntries) : entries
 	let text = slice.map((e) => toCompact(e, jsonl)).join("")
-	while (slice.length > 1 && text.length > maxChars) {
+	while (slice.length > keepAtLeast && text.length > charBudget) {
 		slice = slice.slice(1)
 		text = slice.map((e) => toCompact(e, jsonl)).join("")
 	}
