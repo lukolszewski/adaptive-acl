@@ -25,15 +25,22 @@ function makeMockTheme(): Theme {
   } as Theme;
 }
 
+/**
+ * The dialog reads three things off the TUI: `terminal.rows`, `terminal.columns` and `requestRender`
+ * (plus `terminal.write` for the mouse-mode strings). The real interface carries the whole widget tree,
+ * so the stub has no overlap with it and goes through `unknown` — a cast that names what the component
+ * is actually handed, not one that silences a mismatch.
+ */
 function makeMockTui(rows: number, columns = 80): TUI {
-  return {
+  const stub = {
     terminal: {
       rows,
       columns,
       write: () => {},
     },
     requestRender: () => {},
-  } as TUI;
+  };
+  return stub as unknown as TUI;
 }
 
 describe("plan-approval-dialog layout helpers", () => {

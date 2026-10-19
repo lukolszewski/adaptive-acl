@@ -1,41 +1,41 @@
 ## Allow Rules
 
-The following types of actions should be auto-approved:
+Actions of these kinds go through without confirmation:
 
-<user_allow_rules_to_replace>
-- Running read-only shell commands (ls, cat, head, tail, wc, echo, env, which, whereis, uname, date, whoami, pwd, stat, file, du, df, free, top -b -n 1, ps)
-- Running version and help commands (node --version, python --version, ruby --version, go version, rustc --version, cargo --version, npm --version, bun --version, git --version, --help flags)
-- Running git read-only commands (git status, git log, git diff, git show, git branch, git tag, git remote, git stash list, git config --list --local)
-- Running tests, linters, formatters, and build commands within the project (npm test, npm run lint, npm run build, bun test, cargo test, go test, pytest, jest, vitest, eslint, prettier, biome, tsc)
-- Running package install commands within the project (npm install, yarn, pnpm install, bun install, pip install within a virtual environment, cargo build)
-- Reading, writing, creating, editing, and moving files within the current working directory
-- Running common development tools (node, python, ruby, go, cargo, make, cmake, gcc, clang) for compilation and execution of project code
-- Running Docker commands for building and running project containers (docker build, docker run, docker compose)
-- Creating and switching git branches, committing, stashing (git checkout -b, git commit, git add, git stash)
-</user_allow_rules_to_replace>
+{{rules:allow}}
+- Shell commands that only read: listing directories, printing or paging files, counting lines, showing environment and system facts (ls, cat, head, tail, wc, env, which, uname, date, whoami, pwd, stat, file, du, df, free, ps, a single non-interactive top)
+- Asking tools for their version or usage text (--version, -V, version subcommands, --help, -h)
+- Git commands that change nothing: status, log, diff, show, branch and tag listings, remote listings, stash list, reading local config
+- The project's own test, lint, format and build commands (npm test, npm run lint, npm run build, bun test, cargo test, go test, pytest, jest, vitest, eslint, prettier, biome, tsc)
+- Installing the project's declared dependencies in place (npm install, yarn, pnpm install, bun install, pip install inside an activated virtual environment, cargo build)
+- Creating, reading, editing, renaming and moving files under the working directory
+- Compiling and running the project's own code with its toolchain (node, python, ruby, go, cargo, make, cmake, gcc, clang)
+- Building and running the project's own containers (docker build, docker run, docker compose)
+- Local git bookkeeping: git add, git commit, git stash, creating and switching branches
+{{/rules:allow}}
 
 ## Deny Rules
 
-The following types of actions should be blocked (require user confirmation):
+Actions of these kinds wait for the person to confirm them:
 
-<user_deny_rules_to_replace>
-- Downloading and executing untrusted code from the internet (curl | bash, wget | sh, pip install from unverified URLs, npx from unknown packages)
-- Recursive force deletion of directories or files (rm -rf, Remove-Item -Recurse -Force) unless the user explicitly requested it
-- Modifying shell profiles, login scripts, or system startup items (.bashrc, .zshrc, .profile, cron jobs, launch agents/daemons)
-- Using sudo, su, or doas for privilege escalation unless the user explicitly mentions needing it
-- Starting network servers or listeners that accept external connections (python -m http.server, nc -l, ng serve --host 0.0.0.0)
-- Disabling security tools, modifying firewall rules, changing file permissions to world-writable on sensitive paths
-- Pushing to git remotes, force-pushing, modifying remote branches
-- Exporting, printing, or logging secrets, API keys, tokens, or credentials to public or shared locations
-- Installing system-level packages outside the project (apt-get install, brew install, yum install as root)
-- Modifying files outside the current working directory and standard config paths without explicit user request
-</user_deny_rules_to_replace>
+{{rules:deny}}
+- Running something that was just downloaded (a download piped into a shell, pip installs from arbitrary URLs, npx of a package nobody named)
+- Recursive or forced deletion (rm -rf, Remove-Item -Recurse -Force) that the person did not ask for in so many words
+- Editing files that run code at login, at boot or on a schedule (.bashrc, .zshrc, .profile, crontab, launch agents and daemons, systemd units)
+- sudo, su or doas, unless the person said elevated access would be needed
+- Starting anything that listens for connections from other machines (python -m http.server, nc -l, a dev server bound to 0.0.0.0)
+- Switching off security tooling, changing firewall rules, making sensitive paths world-writable
+- git push, force-push, or any change to a remote branch
+- Writing, printing or logging secrets, API keys, tokens or credentials where others could read them
+- Installing or removing packages at system level (apt-get install, brew install, yum install, anything as root)
+- Changing files outside the working directory and its standard config paths without being asked
+{{/rules:deny}}
 
-## Environment Context
+## Working environment
 
-<user_environment_to_replace>
-- The agent operates within a terminal session in the user's project directory
-- The user has chosen auto mode, meaning they trust the agent to perform routine development tasks autonomously
-- Standard development tools (git, node, python, etc.) are expected to be available
-- The project may use any common language or framework
-</user_environment_to_replace>
+{{rules:env}}
+- The agent runs in a terminal, in the working directory of the person's project
+- The person has switched on auto mode: they expect routine development work to proceed without being asked, and anything beyond that to wait
+- The usual developer tooling (git, node, python and the like) can be assumed to be installed
+- The project can be in any mainstream language or framework
+{{/rules:env}}

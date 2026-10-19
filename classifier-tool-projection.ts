@@ -1,5 +1,6 @@
 /**
- * Per-tool classifier input projection (CC toAutoClassifierInput equivalent).
+ * Per-tool classifier input projection: the part of a tool call the safety model actually needs
+ * to see (and '' for tools whose input carries no security signal).
  */
 
 import { redactForClassifier } from "./classifier-redact.ts"
