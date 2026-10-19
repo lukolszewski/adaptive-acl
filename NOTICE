@@ -1,0 +1,10 @@
+adaptive-acl — licensing notice
+
+Upstream work: derived from the pi extension "permission-modes" by Aditya Prima,
+MIT licensed (SPDX: MIT) — notice reproduced in LICENSE, part 1.
+
+Bundled grammar: wasm/tree-sitter-bash.wasm, tree-sitter-bash by Max Brunsfeld,
+MIT licensed (SPDX: MIT) — notice reproduced in LICENSE, part 2.
+
+This repository's own work: Copyright (C) 2026 Łukasz Olszewski, GNU Affero
+General Public License v3 or later (SPDX: AGPL-3.0-or-later) — text in LICENSE, part 3.
