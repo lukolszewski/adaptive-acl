@@ -1,3 +1,9 @@
+/**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ */
+
 import { beforeAll, describe, expect, it, vi } from "vitest"
 import { initBashParser } from "./bash-parser.ts"
 import { refuse, walkBash, type Reason, type Refusal } from "./bash-walker.ts"

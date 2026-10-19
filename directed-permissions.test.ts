@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * The direction matrix: which permission implies which.
  *
  * Rules under test, all one-way:

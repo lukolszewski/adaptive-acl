@@ -1,3 +1,8 @@
+/**
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
+ */
+
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";

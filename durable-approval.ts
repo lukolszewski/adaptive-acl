@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * What an "always" click stores when authority lives in the journal instead of rule files.
  *
  * `authority.persist: "grants"` — the zero-hand-authored-file policy this workspace runs under — means the

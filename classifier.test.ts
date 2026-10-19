@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * "The classifier is on" must mean two things: the config actually reaches the
  * gate, and a transport that cannot answer never leaves the call unjudged (the silent-uselessness
  * bug: a config that enables a model nobody can reach, presenting itself as a working auto mode).

@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * The confirmation half of `/grants adopt`.
  *
  * `adoptOrphans()` (grants-adopt.ts) takes an orphan's deny/ask rules quietly and hands everything

@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Prompt-once session grants (docs/CLASSIFIER-SPEC.md §3.2).
  * A grant is {category, entity} or {category, scope-prefix}; grants never widen
  * automatically. Pure in-memory store with (de)serialisation for session persist.

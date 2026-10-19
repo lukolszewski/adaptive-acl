@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * A grant to read a secret-bearing path must never authorise writing it.
  *
  * `read_secret` and `write_sensitive` used to share the kind group "secret", and

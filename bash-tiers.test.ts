@@ -1,3 +1,9 @@
+/**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ */
+
 import { beforeAll, describe, expect, it } from "vitest"
 import { classifyBashTiers, isFallbackBash, isReadOnlyBash, isWorkflowBash } from "./bash-tiers.ts"
 import { categoryHasStrictOperands, hitsNeverFloor } from "./bash-audit.ts"

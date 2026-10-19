@@ -13,6 +13,9 @@
  *
  * The advice that follows a refusal is exported separately because other call sites may want
  * to repeat it without repeating the refusal itself.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import { attributionLine, type DenialContext } from "./gate-bridge.ts"

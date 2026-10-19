@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Layer-0 bash parsing: the public shape of what the walker (`bash-walker.ts`) produces, and
  * the view of it the verb handlers still consume.
  *

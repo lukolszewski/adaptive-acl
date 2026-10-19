@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * bash-parser.ts — a licensed bash grammar for the gate's layer 0.
  *
  * Thin, self-written wrapper around two MIT packages:

@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * The whole golden corpus (`bash-walker.golden.jsonl`) through `walkBash`, in one place.
  *
  * Each walker part's test file runs its own subset (`sep-`, `val-`, `hd-`, `sem-`, …) so a failure

@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Orphaned project state, made visible.
  *
  * `<cwd>/.pi/projects/` can hold state for ids the current session does not use:

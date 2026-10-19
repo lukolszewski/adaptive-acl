@@ -2,6 +2,9 @@
  * Auto-mode classifier client for pi.
  * Asks one safety model about a pending action: pi-ai completeSimple over the assembled system
  * prompt plus a redacted transcript, with the reply parsed back into a block/no-block verdict.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import { existsSync, readFileSync, statSync } from "node:fs"

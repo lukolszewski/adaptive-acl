@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * `Bash(...)` allow rules, matched against argv instead of against a re-split of the command text.
  *
  * A rule specifier and a shell command are two spellings of one thing — a command word plus its

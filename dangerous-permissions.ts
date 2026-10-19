@@ -11,6 +11,9 @@
  * (`git`, `git:*`, `git*`, `git *`, `git -<flag>*`), or when it names no command at all
  * (`Bash` / `Bash(*)`). A rule that pins a subcommand or an argument — `npm run test`,
  * `git status`, `npm install lodash:*` — stays in force.
+ *
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
  */
 
 import {

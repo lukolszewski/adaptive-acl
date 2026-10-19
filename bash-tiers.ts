@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * The auto-mode tier ladder, computed over layer 0.
  *
  * `utils.ts` reaches its tier verdicts through its own tokeniser: `splitShellSegments` cuts the command

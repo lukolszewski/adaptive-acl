@@ -1,4 +1,8 @@
 /**
+ * Copyright © 2026 Łukasz Olszewski
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * See LICENSE.
+ *
  * Restoring a session blob. The rule this file pins: a restore COPIES
  * a row, it does not re-decide one.
  *

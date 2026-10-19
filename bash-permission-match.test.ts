@@ -1,3 +1,8 @@
+/**
+ * Modified for @lukolszewski/adaptive-acl (2026); upstream pi-permission-modes remains
+ * MIT-licensed — see LICENSE.
+ */
+
 import { describe, expect, it } from "vitest"
 import {
 	bashCommandMatchesRuleContent,
