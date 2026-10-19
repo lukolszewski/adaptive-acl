@@ -55,7 +55,7 @@ describe("the grant question cannot hide behind a tilde", () => {
 
 describe("a grant that cannot register is visible", () => {
 	it("'read files' maps now — it used to fall through and register nothing", () => {
-		// Regression pin for defect D1 in DIRECTED-PERMISSIONS-PLAN.md: ACTION_MAP had no read
+		// Regression pin for the hole this closed: ACTION_MAP had no read
 		// row at all, so a user's explicit folder read became the inert label `*read files*`.
 		// Asserting the CLOSED hole, and that the secret row still wins by ordering.
 		expect(mapActionToCategory("read files")).toBe("read_only")

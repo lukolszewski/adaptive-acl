@@ -1,6 +1,6 @@
 /**
  * Splitting an oversize user message so grant extraction can read all of it
- * (docs/CLASSIFIER-CONTEXT-BUDGET-PLAN.md item 2).
+ * is what this module does, and `message-chunks.test.ts` pins the properties.
  *
  * The per-message extraction call used to send `message.slice(0, 4000)`. A pasted
  * design document whose approval sits in the last paragraph had that approval cut off

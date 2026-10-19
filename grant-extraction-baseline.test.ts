@@ -49,7 +49,7 @@ describe("folder READS now register (they did not before the read rows landed)",
 		// "you can read files in /etc", in Polish. The category resolves identically — that part
 		// is language-independent because it comes from the action label, not the prose. The
 		// folder scope does NOT form: the legacy path scrapes `in|under|inside|below|within`
-		// from the user's own words, and Polish "w" is not in that list. This is defect D2
+		// from the user's own words, and Polish "w" is not in that list. That is the defect
 		// made visible — the schema's `kind: "scope"` field is what fixes it (tested in
 		// schema-first-grants.test.ts), and it only works on an endpoint that enforces the
 		// schema. Widening the English preposition list would be the wrong repair.
@@ -64,7 +64,7 @@ describe("folder READS now register (they did not before the read rows landed)",
 		const events = fold(quote, "read files", ["/etc/hosts"])
 		expect(events).toHaveLength(0)
 		expect(registerAndCover(quote, "read files", ["/etc/hosts"], "read_only", "/etc/hosts")).toBe(false)
-		// Same sentence with an English preposition does register. That asymmetry IS defect D2:
+		// Same sentence with an English preposition does register. That asymmetry IS the defect:
 		// the fix is the schema's `kind: "scope"` field, not a wider English regex.
 	})
 

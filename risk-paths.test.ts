@@ -1,5 +1,5 @@
 /**
- * Bare secret-bearing filenames (decision D18).
+ * Bare secret-bearing filenames.
  *
  * A file whose NAME ALONE declares it holds credentials — `pass`, `passphrase`, `secrets`,
  * `api_key`, `.env.local` — is secret-bearing wherever it sits, so reading it is `ask` under the

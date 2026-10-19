@@ -397,7 +397,7 @@ export function grantsCover(
 const MAX_SESSION_GRANTS = 200
 
 /**
- * Import session grants from a grants file (plan.md Phase B2).
+ * Import session grants from a grants file.
  *
  * Revocations are honoured AT THE BOUNDARY, not left to the caller to remember:
  *  - revocations arriving with the file veto the rows arriving with it (compared by
@@ -502,7 +502,7 @@ export function serializeGrants(store: GrantStore): string {
 /**
  * Restore rows from a session blob INTO an existing store, passing the payload through.
  *
- * This is the D5 rule expressed as a function: a restore copies the row, it does not
+ * The rule, expressed as a function: a restore copies the row, it does not
  * re-decide it. `at`, `durable` and `origin` come from the stored row and nothing else.
  * Rebuilding the row instead — `addGrant(store, category, value, kind)`, which stamps
  * `at: Date.now()` and forgets `durable` — is a correctness bug even while it appears to

@@ -3,7 +3,7 @@
  * real SessionEntry shape. Messages arrive wrapped as
  * {type:"message", message: AgentMessage} with roles user/assistant/toolResult
  * (never "tool"). A private shape guess elsewhere previously left the
- * injection probe dead at runtime (plan B1); every session read goes through
+ * injection probe dead at runtime; every session read goes through
  * this port so the shape has one owner and one test surface.
  */
 

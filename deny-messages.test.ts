@@ -1,7 +1,7 @@
 /**
  * Denial-message precision. The gate's job is not only to decide but to tell the
  * agent WHY, so it can rewrite instead of bouncing to the user. Measured
- * justification: docs/DENY-MESSAGES-PLAN.md.
+ * justification: the cases below, each one a sentence an agent acts on.
  *
  * The last block guards a different property: every sentence in this file is advice an agent acts on, so
  * it may only name a capability the extension actually provides. That is checked against `index.ts`, the
@@ -285,7 +285,7 @@ describe("the denial text agrees with the tools that exist", () => {
 		// repo has already been bitten by: a negative assertion nobody checked the inverse of.
 		const registered = registeredToolNames()
 		// The negative half needs a name that will never be real, because `request_user_permission` became real in
-		// index.ts (D11) — keeping it here would assert that a registered tool is unregistered, which is exactly the
+		// index.ts — keeping it here would assert that a registered tool is unregistered, which is exactly the
 		// vacuous-fixture trap this file exists to avoid.
 		const decoyRung =
 			" Ask the user now with request_somebody_else_permission (the request waits up to 10 minutes and fails closed — if nobody answers, move on)"

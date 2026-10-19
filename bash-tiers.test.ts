@@ -173,7 +173,7 @@ describe("tier 2 — compose is split by verb (D1)", () => {
 	]
 	table(rows)
 	it("refuses run/exec from the table, not only from the guardrail", () => {
-		// `exec` is also a refused word, so the guardrail would catch it on its own; D1 is about the entry, so
+		// `exec` is also a refused word, so the guardrail would catch it on its own; the split is about the entry, so
 		// what has to be pinned is that the table itself is what says no to `run`.
 		expect(tiersOf("docker compose run web pytest").reason).toBe("workflow-table")
 		expect(tiersOf("docker compose exec web bash").workflow).toBe(false)
@@ -398,7 +398,7 @@ describe("the offline face is never the widest one", () => {
 			"ls", "npm test", "npm run build", "make all", "cmake -S . -B b", "git add .", "mkdir x",
 			"cat f", "sed -n 1,2p f", "docker compose up", "mocha", "echo hi > out.txt", "npm install",
 			"git push", "ls && git status", "sudo ls", "echo $(ls)", "mkdir /tmp/x", "vitest --globalSetup /tmp/g",
-			// The D1/D2 tables, so the containment claim covers the tables this change added rather than only
+			// The compose/task-runner tables, so the containment claim covers the tables this change added rather than only
 			// the ones it inherited.
 			"docker compose ps", "docker compose exec web bash", "make", "make -j4 test", "make bootstrap",
 			"cmake --build .", "cmake --install .", "ninja", "ninja -C build test", "just", "just build",
@@ -493,7 +493,7 @@ describe("a remote secret read is floored by layer 0, not by a table here (D16)"
 		}
 	})
 	it("is not the never floor, because one approval is allowed to cover it", () => {
-		// D16 reserves the never floor for what is never legitimate in an agent session. Reading your own
+		// The never floor is reserved for what is never legitimate in an agent session. Reading your own
 		// staging secret is not that, so nothing here may reach the floor the exfiltration rows reach.
 		expect(hitsNeverFloor("kubectl get secret prod-db", cwd)).toBe(false)
 		expect(hitsNeverFloor("aws secretsmanager get-secret-value --secret-id prod/db", cwd)).toBe(false)
