@@ -556,6 +556,8 @@ const CATALOG = [
 	{ id: "gpt-5-mini", api: "openai-responses", reasoning: true },
 	{ id: "mai-code-1.1-flash", api: "openai-responses", reasoning: true },
 	{ id: "claude-haiku-4.5", api: "anthropic-messages", reasoning: true },
+	// A catalog api this client has no encoder for; stands in for "a dialect we cannot speak".
+	{ id: "gemini-native-x", api: "google-generative-ai", reasoning: true },
 ].map(catalogEntry)
 
 function configFor(model: string, copilot?: Record<string, unknown>) {
@@ -635,8 +637,8 @@ describe("resolveGateEndpoint — the Copilot cases", () => {
 		expect(ep).toBeUndefined()
 	})
 
-	it("an Auto pick the client cannot speak (anthropic-messages) is no endpoint, not a wrong request", async () => {
-		stubSession(sessionBody({ selected: "claude-haiku-4.5" }))
+	it("an Auto pick the client cannot speak is no endpoint, not a wrong request", async () => {
+		stubSession(sessionBody({ selected: "gemini-native-x" }))
 		const ep = await resolveGateEndpoint(configFor("github-copilot/auto") as never, registryFor(CATALOG) as never)
 		expect(ep).toBeUndefined()
 	})
@@ -655,7 +657,7 @@ describe("resolveGateEndpoint — the Copilot cases", () => {
 		const credential = noKey.ok ? "" : noKey.error
 
 		resetClassifierUnavailability()
-		stubSession(sessionBody({ selected: "claude-haiku-4.5" }))
+		stubSession(sessionBody({ selected: "gemini-native-x" }))
 		await resolveGateEndpoint(configFor("github-copilot/auto") as never, registryFor(CATALOG) as never)
 		const unspeakable = classifierUnavailability()
 		expect(unspeakable?.cause).toBe("auto-pick-unspeakable")
@@ -708,9 +710,22 @@ describe("resolveGateEndpoint — the Copilot cases", () => {
 		expect(ep).toBeUndefined()
 	})
 
-	it("an explicit anthropic-messages model is not speakable by this client", async () => {
-		const ep = await resolveGateEndpoint(configFor("github-copilot/claude-haiku-4.5") as never, registryFor(CATALOG) as never)
+	it("an explicit model in a dialect with no encoder is not speakable by this client", async () => {
+		const ep = await resolveGateEndpoint(configFor("github-copilot/gemini-native-x") as never, registryFor(CATALOG) as never)
 		expect(ep).toBeUndefined()
+	})
+
+	it("an explicit anthropic-messages model resolves to the anthropic dialect", async () => {
+		const calls = stubSession(okBodyLive)
+		const ep = await resolveGateEndpoint(configFor("github-copilot/claude-haiku-4.5") as never, registryFor(CATALOG) as never)
+		expect(calls).toHaveLength(0)
+		expect(ep).toMatchObject({ model: "claude-haiku-4.5", api: "anthropic-messages", copilot: { auto: false } })
+	})
+
+	it("an Auto pick in anthropic-messages is used, not discarded", async () => {
+		stubSession(sessionBody({ selected: "claude-haiku-4.5" }))
+		const ep = await resolveGateEndpoint(configFor("github-copilot/auto") as never, registryFor(CATALOG) as never)
+		expect(ep).toMatchObject({ model: "claude-haiku-4.5", api: "anthropic-messages", copilot: { auto: true } })
 	})
 
 	it("without a credential there is no endpoint, and no session is minted", async () => {
@@ -740,6 +755,32 @@ describe("resolveGateEndpoint — the Copilot cases", () => {
 		const ep = await resolveGateEndpoint({ ...configFor("litellm-lab/clf-gate"), copilot: undefined } as never, registry as never)
 		expect(ep).toEqual({ baseUrl: "http://x/v1", model: "clf-gate", apiKey: "k", timeoutMs: 15_000, contextTokens: 4096 })
 	})
+
+	// Measured on a Copilot Business seat (github.com org, no GHE domain): the token's proxy-ep is
+	// proxy.business.githubcopilot.com; api.individual answers 401 to it, api.business answers 200.
+	const BUSINESS_BASE = "https://api.business.githubcopilot.com"
+	function businessRegistry() {
+		return {
+			...registryFor(CATALOG),
+			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: KEY, baseUrl: BUSINESS_BASE } as never),
+		}
+	}
+
+	it("an explicit model uses the credential's host, not the catalog's individual host", async () => {
+		const ep = await resolveGateEndpoint(configFor("github-copilot/gpt-5-mini") as never, businessRegistry() as never)
+		expect(ep).toMatchObject({ baseUrl: BUSINESS_BASE, model: "gpt-5-mini", api: "responses" })
+	})
+
+	it("the Auto session is minted on the credential's host", async () => {
+		const urls: string[] = []
+		vi.stubGlobal("fetch", async (url: string) => {
+			urls.push(url)
+			return { ok: true, status: 200, text: async () => JSON.stringify(okBodyLive) } as unknown as Response
+		})
+		const ep = await resolveGateEndpoint(configFor("github-copilot/auto") as never, businessRegistry() as never)
+		expect(urls[0]).toBe(`${BUSINESS_BASE}/models/session`)
+		expect(ep).toMatchObject({ baseUrl: BUSINESS_BASE, copilot: { auto: true } })
+	})
 })
 
 describe("the D57 narrowing is wired to the resolver (gate-bridge → copilot-session)", () => {
@@ -766,11 +807,11 @@ describe("the D57 narrowing is wired to the resolver (gate-bridge → copilot-se
 		vi.stubGlobal("fetch", async (_url: string, init?: { body?: string }) => {
 			bodies.push(JSON.parse(String(init?.body)))
 			const second = bodies.length > 1
-			const pool = ["claude-haiku-4.5", "gpt-5-mini"]
+			const pool = ["gemini-native-x", "gpt-5-mini"]
 			return {
 				ok: true,
 				status: 200,
-				text: async () => JSON.stringify(mintResponse(second ? "gpt-5-mini" : "claude-haiku-4.5", pool)),
+				text: async () => JSON.stringify(mintResponse(second ? "gpt-5-mini" : "gemini-native-x", pool)),
 			} as unknown as Response
 		})
 
@@ -784,7 +825,7 @@ describe("the D57 narrowing is wired to the resolver (gate-bridge → copilot-se
 		// Hints are MODEL IDS taken from the pool GitHub just named, filtered to the encodable ones — never a dialect
 		// name, which the wire answers with an empty pool at HTTP 200 (§2b), and never an id invented from pi's catalog.
 		expect(bodies[1].auto_mode.model_hints).toEqual(["gpt-5-mini"])
-		expect(bodies[1].auto_mode.model_hints).not.toContain("claude-haiku-4.5")
+		expect(bodies[1].auto_mode.model_hints).not.toContain("gemini-native-x")
 		expect((ep as { model?: string }).model).toBe("gpt-5-mini")
 	})
 

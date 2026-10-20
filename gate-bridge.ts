@@ -252,7 +252,8 @@ async function classifyEndpointResolution(
 		if (!auth.ok) return {}
 		return {
 			endpoint: {
-				baseUrl: model.baseUrl,
+				// The credential may name its own host (pi's OAuth `toAuth`); the catalog URL is only the default.
+				baseUrl: auth.baseUrl ?? model.baseUrl,
 				model: model.id ?? parsed.modelId,
 				apiKey: auth.apiKey,
 				headers: auth.headers,
@@ -274,12 +275,12 @@ async function classifyEndpointResolution(
  *  The carrier is never the model the classifier is asked about. */
 const COPILOT_AUTH_CARRIERS: readonly string[] = ["gpt-4.1", "gpt-5-mini", "claude-haiku-4.5"]
 
-/** Catalog `api` → the dialect this client speaks. `anthropic-messages` is DELIBERATELY absent: that would be a
- *  third encoder, and until someone writes it the endpoint does not resolve and the gate asks a person — which is
- *  the owner's ruling for an unreachable classifier, not a silent loosening. */
+/** Catalog `api` → the dialect this client speaks. A catalog api missing here does not resolve, and the gate
+ *  asks a person — the owner's ruling for an unreachable classifier, not a silent loosening. */
 const COPILOT_DIALECTS: Record<string, ModelApi> = {
 	"openai-completions": "chat-completions",
 	"openai-responses": "responses",
+	"anthropic-messages": "anthropic-messages",
 }
 
 type CatalogModel = { id?: string; api?: string; baseUrl?: string; reasoning?: boolean }
@@ -366,7 +367,10 @@ async function resolveCopilotEndpoint(
 	}
 	if (!auth.ok || !auth.apiKey) return {}
 	// Unlike a self-hosted LiteLLM endpoint, Copilot has no no-auth mode: the token IS the credential.
-	const baseUrl = carrier.baseUrl
+	// The catalog says api.individual.githubcopilot.com for every account, but a Business/Enterprise token routes
+	// elsewhere (its `proxy-ep`, e.g. proxy.business.githubcopilot.com → api.business.githubcopilot.com). pi
+	// derives that per credential and returns it here; the individual host answers 401 to a business token.
+	const baseUrl = auth.baseUrl ?? carrier.baseUrl
 	const shared = {
 		baseUrl,
 		apiKey: auth.apiKey,

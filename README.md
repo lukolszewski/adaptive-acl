@@ -508,6 +508,12 @@ calls, and cools down after a failure instead of retrying per tool call. `budget
 the classifier may spend per process; once spent, it stops asking and says so rather than consuming
 the allowance. Name a specific model with `github-copilot/<id>`.
 
+All three request dialects in pi's Copilot catalog are spoken: `openai-completions`, `openai-responses`
+and `anthropic-messages` (Claude models, via `/v1/messages` with `output_config.format`). Anthropic's
+structured output refuses JSON Schema length/count limits (`maxItems`, `maxLength`, …), so those are
+stripped for that dialect only. The host comes from the Copilot credential, so Business/Enterprise
+seats (`api.business.githubcopilot.com`, …) work as well as individual ones.
+
 ### Extending the ruleset
 
 The `autoMode` key merges extra bullets into the classifier's system prompt:

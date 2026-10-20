@@ -381,6 +381,8 @@ describe("every classifier failure reaches the user as unavailable, with its cau
 		{ id: "gpt-4.1", api: "openai-completions", reasoning: false },
 		{ id: "mai-code-1.1-flash", api: "openai-responses", reasoning: true },
 		{ id: "claude-haiku-4.5", api: "anthropic-messages", reasoning: true },
+		// A catalog api this client has no encoder for; stands in for "a dialect we cannot speak".
+		{ id: "gemini-native-x", api: "google-generative-ai", reasoning: true },
 	].map((m) => ({ ...m, baseUrl: COPILOT_BASE, name: m.id, contextWindow: 200_000, maxTokens: 64_000 }))
 
 	function copilotRegistry(auth: { ok: boolean; apiKey?: string } = { ok: true, apiKey: KEY }) {
@@ -503,29 +505,29 @@ describe("every classifier failure reaches the user as unavailable, with its cau
 		vi.stubGlobal("fetch", async () =>
 			respond(200, {
 				session_token: "s".repeat(60),
-				selected_model: "claude-haiku-4.5",
-				available_models: ["claude-haiku-4.5"],
+				selected_model: "gemini-native-x",
+				available_models: ["gemini-native-x"],
 				expires_at: Math.floor(Date.now() / 1000) + 3600,
 			}),
 		)
 		const ep = await resolveGateEndpoint(copilotConfig("github-copilot/auto") as never, copilotRegistry() as never)
 		expect(ep).toBeUndefined()
 		expect(classifierUnavailability()?.cause).toBe("auto-pick-unspeakable")
-		expect(classifierUnavailability()?.detail).toContain("anthropic-messages")
+		expect(classifierUnavailability()?.detail).toContain("google-generative-ai")
 
 		const out = denial(await gateWithoutEndpoint(), false)
 		expect(out).toContain("classifier — unavailable")
-		expect(out).toContain("anthropic-messages")
+		expect(out).toContain("google-generative-ai")
 		expect(out).not.toContain("no endpoint configured")
 		// A dialect we cannot speak is not a verdict either way: the gate asked a person instead.
 		expect(out).not.toContain(AUTO_MODE_REJECTION_PREFIX)
 	})
 
 	it("an explicitly configured model in an unspeakable dialect is also an unavailable classifier", async () => {
-		const ep = await resolveGateEndpoint(copilotConfig("github-copilot/claude-haiku-4.5") as never, copilotRegistry() as never)
+		const ep = await resolveGateEndpoint(copilotConfig("github-copilot/gemini-native-x") as never, copilotRegistry() as never)
 		expect(ep).toBeUndefined()
 		expect(classifierUnavailability()?.cause).toBe("model-unspeakable")
-		expect(classifierUnavailability()?.detail).toContain("claude-haiku-4.5")
+		expect(classifierUnavailability()?.detail).toContain("gemini-native-x")
 		expect(denial(await gateWithoutEndpoint(), false)).toContain("classifier — unavailable")
 	})
 

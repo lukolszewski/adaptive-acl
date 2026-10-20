@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Claude models through Copilot as the classifier** — a third request dialect, `anthropic-messages` (`POST /v1/messages`, `anthropic-version: 2023-06-01`, structured output via `output_config.format`). Explicit `github-copilot/claude-*` models resolve, and an Auto pick in this dialect is used instead of discarded. JSON Schema keywords Anthropic refuses (`maxItems`, `maxLength`, …) are stripped for this dialect only (`anthropicCompatibleSchema`); `stop_reason: max_tokens` is a truncation and `refusal` is never read as a verdict. Cached input tokens count toward `budgetTokens`.
+
+### Fixed
+- **Copilot Business/Enterprise seats** — the endpoint host now comes from the credential (`auth.baseUrl`, derived by pi from the token's `proxy-ep`) instead of the catalog's `api.individual.githubcopilot.com`, which answers 401 to a business token. Fixes both the 401 on explicit models and the failed Auto session mint.
+
 ## [2.8.0] - 2026-10-19
 
 This release is a fork of `@georgedong32/permission-modes` 2.7.0 (MIT); this fork is licensed AGPL-3.0-or-later, and `LICENSE` carries the upstream MIT notice (`LICENSE:1`) alongside the notices for the two tree-sitter components it now ships (`LICENSE:31`, `LICENSE:56`).

@@ -404,7 +404,11 @@ export function readCopilotUsage(json: unknown): CopilotUsage | undefined {
 	const usage = (json as { usage?: Record<string, unknown> } | null)?.usage
 	if (!usage || typeof usage !== "object") return undefined
 	const details = usage.output_tokens_details as Record<string, unknown> | undefined
-	const input = num(usage.input_tokens) || num(usage.prompt_tokens)
+	// Anthropic splits cached input out of `input_tokens`; all of it is still input this process spent.
+	const input =
+		(num(usage.input_tokens) || num(usage.prompt_tokens)) +
+		num(usage.cache_read_input_tokens) +
+		num(usage.cache_creation_input_tokens)
 	const output = num(usage.output_tokens) || num(usage.completion_tokens)
 	const total = num(usage.total_tokens) || input + output
 	if (!total && !input && !output) return undefined
