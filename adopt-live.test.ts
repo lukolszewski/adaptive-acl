@@ -49,8 +49,8 @@ beforeEach(() => {
 	roots.push(cwd)
 	expect(writeProjectIdMarker(cwd, LIVE_ID)).toBe(true)
 	// The global rules source is a path inside the fixture: without this the reload would read the
-	// developer's own ~/.pi/agent/permission-modes.json and the assertions would be about the machine.
-	setConfigPath(join(cwd, "permission-modes.json"))
+	// developer's own ~/.pi/agent/adaptive-acl.json and the assertions would be about the machine.
+	setConfigPath(join(cwd, "adaptive-acl.json"))
 })
 
 afterEach(() => {

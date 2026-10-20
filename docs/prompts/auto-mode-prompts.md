@@ -74,7 +74,7 @@ if currentMode === "auto":
 
 ---
 
-## 6. Config (`~/.pi/agent/permission-modes.json`)
+## 6. Config (`~/.pi/agent/adaptive-acl.json`)
 
 ```json
 {

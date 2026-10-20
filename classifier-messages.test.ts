@@ -49,7 +49,7 @@ describe("classifier-messages", () => {
 	it("orders the advice: reason, then carry on elsewhere, then detour rules, then rules", () => {
 		const msg = buildYoloRejectionMessage(REASON)
 		const advice = msg.indexOf(DENIAL_WORKAROUND_GUIDANCE)
-		const ruleFile = msg.indexOf("permission-modes.json")
+		const ruleFile = msg.indexOf("adaptive-acl.json")
 		expect(msg.indexOf(REASON)).toBeLessThan(advice)
 		expect(advice).toBeLessThan(ruleFile)
 		expect(ruleFile).toBeGreaterThan(-1)
@@ -67,7 +67,7 @@ describe("classifier-messages", () => {
 
 	it("points at this plugin's real rule syntax, not an invented one", () => {
 		const msg = buildYoloRejectionMessage(REASON)
-		expect(msg).toContain("permission-modes.json")
+		expect(msg).toContain("adaptive-acl.json")
 		expect(msg).toContain("permissions.json")
 		expect(msg).toMatch(/Bash\(<command prefix>:\*\)/)
 		expect(msg).toMatch(/Read\(<path>\)/)

@@ -115,7 +115,7 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ### Model calls (the safety model, when there is one)
 
-- `config.ts` — `~/.pi/agent/permission-modes.json` and `<cwd>/.pi/permission-modes.json`: classifier,
+- `config.ts` — `~/.pi/agent/adaptive-acl.json` and `<cwd>/.pi/adaptive-acl.json`: classifier,
   Copilot and authority settings, validated into defaults and cached; the resolvers are pure and the getters
   allocate nothing.
 - `classifier-client.ts` — the single-shot classifier (pi-ai `completeSimple`): prompt assembly, stages, XML
@@ -179,7 +179,8 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ```bash
 npm install --ignore-scripts --no-audit --no-fund   # what CI does; nothing here has a build step
-npx vitest run        # 85 files, 3485 tests, all green
+npx vitest run        # 85 files, all green (the test count varies with the machine's installed pi
+                      # registry; CI reported 3485 for the same commit this workspace reports 3503)
 npm run typecheck     # tsc --noEmit -p tsconfig.json — zero errors
 npm run pack:dry      # 64 files, ~595 kB tarball, 2.7 MB unpacked
 ```
@@ -374,6 +375,6 @@ The extension source is licensed MIT under [`LICENSE`](LICENSE) (`LICENSE:1-3`),
 notices for the bundled tree-sitter-bash grammar (`LICENSE:26-78`); `package.json:9` currently declares
 `AGPL-3.0-or-later`, which contradicts that file — reconcile the two deliberately, in a packaging change, and
 never by silently editing one side. The package grew out of an earlier permission-modes extension for pi, and
-several names still say so (`~/.pi/agent/permission-modes.json`, the `modes` session entry, the
+several names still say so (`~/.pi/agent/adaptive-acl.json`, the `modes` session entry, the
 `permission-modes:` prompt anchor). Those are user-visible and session-visible: renaming them orphans
 existing configuration and saved state, so leave them.

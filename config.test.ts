@@ -26,7 +26,7 @@ import { DEFAULT_CONTEXT_TOKENS } from "./context-budget.ts"
 
 function freshConfigPath(): string {
 	const dir = mkdtempSync(join(tmpdir(), "pm-cfg-"))
-	return join(dir, "nested", "permission-modes.json")
+	return join(dir, "nested", "adaptive-acl.json")
 }
 
 describe("updatePermissionModesConfig", () => {

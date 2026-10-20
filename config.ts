@@ -1,6 +1,6 @@
 /**
- * Permission-modes extension config (`~/.pi/agent/permission-modes.json`, plus the
- * project-scoped `<cwd>/.pi/permission-modes.json`).
+ * adaptive-acl config (`~/.pi/agent/adaptive-acl.json`, plus the
+ * project-scoped `<cwd>/.pi/adaptive-acl.json`).
  * Pure fs helpers — no pi dependency.
  *
  * Two kinds of thing live here, deliberately kept apart:
@@ -239,9 +239,9 @@ const LAYER_ORDER: readonly ConfigLayerName[] = [
  *  that sets a key to an unusable value is refused and reported, never honoured and
  *  never silently replaced by the default. */
 export interface ConfigLayers {
-	/** `~/.pi/agent/permission-modes.json`. */
+	/** `~/.pi/agent/adaptive-acl.json`. */
 	user?: PermissionModesConfig
-	/** `<cwd>/.pi/permission-modes.json`. Rules are NOT read from here — see
+	/** `<cwd>/.pi/adaptive-acl.json`. Rules are NOT read from here — see
 	 *  {@link getProjectConfigPath} for why. */
 	project?: PermissionModesConfig
 	/** Start flags, dialog answers, restored state — highest. */
@@ -517,7 +517,7 @@ export function updatePermissionModesConfig(
 	}
 }
 
-let _configPath = join(homedir(), ".pi", "agent", "permission-modes.json")
+let _configPath = join(homedir(), ".pi", "agent", "adaptive-acl.json")
 
 export function getConfigPath(): string {
 	return _configPath
@@ -621,7 +621,7 @@ export function resolveAutoModeConfig(
 }
 
 /**
- * The project-scoped config file: `<cwd>/.pi/permission-modes.json`.
+ * The project-scoped config file: `<cwd>/.pi/adaptive-acl.json`.
  *
  * Deliberately NOT under `.pi/projects/<id>/` where the rule files live: that
  * directory is named by a derived id, so a moved checkout orphans whatever was
@@ -629,7 +629,7 @@ export function resolveAutoModeConfig(
  * path the user can see and a `git worktree move` carries with the tree.
  *
  * **Rules are not read from this file.** Permission rules keep exactly two sources, one
- *  per scope — `~/.pi/agent/permission-modes.json.permissions` (global) and
+ *  per scope — `~/.pi/agent/adaptive-acl.json.permissions` (global) and
  *  `<cwd>/.pi/projects/<id>/permissions{,.local}.json` (project), both via
  *  `permissions-loader.ts`.
  * A second rule source reachable through a project directory would be a second
@@ -637,7 +637,7 @@ export function resolveAutoModeConfig(
  *  and provenance ONLY; a `permissions` block in this file does nothing.
  */
 export function getProjectConfigPath(cwd: string): string {
-	return join(cwd, ".pi", "permission-modes.json")
+	return join(cwd, ".pi", "adaptive-acl.json")
 }
 
 /** Same contract as {@link loadPermissionModesConfig}: unreadable, unparseable or not a

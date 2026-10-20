@@ -42,7 +42,7 @@ export const DENIAL_WORKAROUND_GUIDANCE =
 const PERMISSION_RULE_HINT =
 	"When the user wants this class of action to go through unattended, they can grant it as a " +
 	"permission rule instead: `Bash(<command prefix>:*)` for shell calls, `Read(<path>)` or " +
-	"`Edit(<path>)` for file tools. Global rules live in ~/.pi/agent/permission-modes.json, " +
+	"`Edit(<path>)` for file tools. Global rules live in ~/.pi/agent/adaptive-acl.json, " +
 	"per-project rules in the project's .pi/projects/<id>/permissions.json."
 
 /** Prompt to harvest rule suggestions once the current request is otherwise wrapped up. */

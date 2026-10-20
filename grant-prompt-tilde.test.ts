@@ -7,7 +7,7 @@
  *
  * 1. `~` in what we send the model. A user wrote "I allow you to read
  *    /home/u/.pi config contents"; the gate rendered the target as
- *    `~/.pi/agent/permission-modes.json`. To a model that has never seen this
+ *    `~/.pi/agent/adaptive-acl.json`. To a model that has never seen this
  *    machine those are unrelated strings, and it answered "not authorised" with an
  *    empty quote even though the grant was in the very message list it was given.
  *
@@ -21,16 +21,16 @@ import { homedir } from "node:os"
 import { absolutize, buildGrantUserPrompt } from "./model-client.ts"
 import { eventsFromExtraction, extractionStats, mapActionToCategory } from "./auth-ledger.ts"
 
-const TARGET = { kind: "target" as const, value: "~/.pi/agent/permission-modes.json" }
+const TARGET = { kind: "target" as const, value: "~/.pi/agent/adaptive-acl.json" }
 const QUOTE = "I allow you to read /home/u/.pi config contents"
 
 function prompt(overrides: Partial<Parameters<typeof buildGrantUserPrompt>[0]> = {}) {
 	return buildGrantUserPrompt({
 		userMessages: [QUOTE],
-		description: "read secret-bearing path ~/.pi/agent/permission-modes.json",
+		description: "read secret-bearing path ~/.pi/agent/adaptive-acl.json",
 		category: "read_secret",
 		entities: [TARGET],
-		command: "jq . ~/.pi/agent/permission-modes.json",
+		command: "jq . ~/.pi/agent/adaptive-acl.json",
 		...overrides,
 	})
 }
@@ -38,7 +38,7 @@ function prompt(overrides: Partial<Parameters<typeof buildGrantUserPrompt>[0]> =
 describe("the grant question cannot hide behind a tilde", () => {
 	it("shows the model absolute targets", () => {
 		const p = prompt()
-		expect(p).toContain(`${homedir()}/.pi/agent/permission-modes.json`)
+		expect(p).toContain(`${homedir()}/.pi/agent/adaptive-acl.json`)
 		expect(p).not.toContain("Action targets: ~/.")
 	})
 
@@ -104,10 +104,10 @@ const ROWS = [
 ]
 const SECTION = `Authorisation so far (verified earlier, oldest first):\n${ROWS.join("\n")}\n\n`
 const FIXED = {
-	description: "read secret-bearing path ~/.pi/agent/permission-modes.json",
+	description: "read secret-bearing path ~/.pi/agent/adaptive-acl.json",
 	category: "read_secret",
 	entities: [TARGET],
-	command: "jq . ~/.pi/agent/permission-modes.json",
+	command: "jq . ~/.pi/agent/adaptive-acl.json",
 }
 
 describe("the ledger block in the grant prompt", () => {

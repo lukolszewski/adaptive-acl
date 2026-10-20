@@ -328,10 +328,10 @@ describe("permission-modes extension: tool_call gate", () => {
 	beforeEach(async () => {
 		pi = createFakePi()
 		configTmp = mkdtempSync(join(tmpdir(), "pm-idx-cfg-"))
-		setConfigPath(join(configTmp, "permission-modes.json"))
+		setConfigPath(join(configTmp, "adaptive-acl.json"))
 		setProjectStateRoot(configTmp)
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({ classifier: { enabled: false } }),
 		)
 		// Use real fs: the current repo IS a project (has package.json).
@@ -828,7 +828,7 @@ describe("permission-modes extension: tool_call gate", () => {
 
 		it("fail-closed when classifier is unavailable", async () => {
 			writeFileSync(
-				join(configTmp, "permission-modes.json"),
+				join(configTmp, "adaptive-acl.json"),
 				JSON.stringify({
 					classifier: {
 						enabled: true,
@@ -853,10 +853,10 @@ describe("permission-modes extension: tool_call gate", () => {
 
 		beforeEach(() => {
 			configTmp = mkdtempSync(join(tmpdir(), "pm-idx-perm-"))
-			setConfigPath(join(configTmp, "permission-modes.json"))
+			setConfigPath(join(configTmp, "adaptive-acl.json"))
 			setProjectStateRoot(configTmp)
 			writeFileSync(
-				join(configTmp, "permission-modes.json"),
+				join(configTmp, "adaptive-acl.json"),
 				JSON.stringify({ classifier: { enabled: false } }),
 			)
 		})
@@ -1835,10 +1835,10 @@ describe("unattended mode", () => {
 	beforeEach(async () => {
 		pi = createFakePi()
 		configTmp = mkdtempSync(join(tmpdir(), "pm-idx-unatt-"))
-		setConfigPath(join(configTmp, "permission-modes.json"))
+		setConfigPath(join(configTmp, "adaptive-acl.json"))
 		setProjectStateRoot(configTmp)
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({ classifier: { enabled: false } }),
 		)
 		realProjectRoot = process.cwd()
@@ -1932,10 +1932,10 @@ describe("unparseable-command fix-and-retry", () => {
 	beforeEach(async () => {
 		pi = createFakePi()
 		configTmp = mkdtempSync(join(tmpdir(), "pm-idx-unp-"))
-		setConfigPath(join(configTmp, "permission-modes.json"))
+		setConfigPath(join(configTmp, "adaptive-acl.json"))
 		setProjectStateRoot(configTmp)
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({ classifier: { enabled: false } }),
 		)
 		realProjectRoot = process.cwd()
@@ -2345,11 +2345,11 @@ describe("permission-modes: subagent ask forwarding", () => {
 		pi = createFakePi()
 		configTmp = mkdtempSync(join(tmpdir(), "pm-fwd-idx-cfg-"))
 		agentDir = mkdtempSync(join(tmpdir(), "pm-fwd-idx-agent-"))
-		setConfigPath(join(configTmp, "permission-modes.json"))
+		setConfigPath(join(configTmp, "adaptive-acl.json"))
 		setProjectStateRoot(configTmp)
 		setModelsPath(join(configTmp, "model-profiles.json"))
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({ classifier: { enabled: false } }),
 		)
 		writeFileSync(
@@ -2524,11 +2524,11 @@ describe("permission-modes: subagent inherits parent mode", () => {
 	beforeEach(() => {
 		pi = createFakePi()
 		configTmp = mkdtempSync(join(tmpdir(), "pm-inh-cfg-"))
-		setConfigPath(join(configTmp, "permission-modes.json"))
+		setConfigPath(join(configTmp, "adaptive-acl.json"))
 		setProjectStateRoot(configTmp)
 		setModelsPath(join(configTmp, "model-profiles.json"))
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({ classifier: { enabled: false } }),
 		)
 		writeFileSync(
@@ -2595,10 +2595,10 @@ describe("stable system prompt across turns", () => {
 	beforeEach(async () => {
 		pi = createFakePi()
 		configTmp = mkdtempSync(join(tmpdir(), "pm-idx-stable-"))
-		setConfigPath(join(configTmp, "permission-modes.json"))
+		setConfigPath(join(configTmp, "adaptive-acl.json"))
 		setProjectStateRoot(configTmp)
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({ classifier: { enabled: false } }),
 		)
 		permissionModesExtension(makeFakePiForExtension(pi))
@@ -2693,10 +2693,10 @@ describe("injection probe in before_agent_start (plan B1)", () => {
 	beforeEach(async () => {
 		pi = createFakePi()
 		configTmp = mkdtempSync(join(tmpdir(), "pm-idx-inj-"))
-		setConfigPath(join(configTmp, "permission-modes.json"))
+		setConfigPath(join(configTmp, "adaptive-acl.json"))
 		setProjectStateRoot(configTmp)
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({ classifier: { enabled: false } }),
 		)
 		permissionModesExtension(makeFakePiForExtension(pi))
@@ -2786,7 +2786,7 @@ describe("injection probe in before_agent_start (plan B1)", () => {
 
 	it("injectionWarning:false silences the standing note but KEEPS escalation", async () => {
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({ classifier: { enabled: false }, injectionWarning: false }),
 		)
 		await pi.simulateSessionStart(realProjectRoot) // reloads the toggle
@@ -2814,7 +2814,7 @@ describe("injection probe in before_agent_start (plan B1)", () => {
 
 	it("injectionEscalation:false silences the strong warning, and both can be off", async () => {
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({
 				classifier: { enabled: false },
 				injectionWarning: false,
@@ -2846,7 +2846,7 @@ describe("injection probe in before_agent_start (plan B1)", () => {
 
 	it("escalation alone can be disabled while the standing note stays", async () => {
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({
 				classifier: { enabled: false },
 				injectionEscalation: false,
@@ -2908,10 +2908,10 @@ describe("approval flow parity: outside-write tracking (plan B2)", () => {
 		pi = createFakePi()
 		realProjectRoot = process.cwd()
 		configTmp = mkdtempSync(join(tmpdir(), "pm-idx-par-"))
-		setConfigPath(join(configTmp, "permission-modes.json"))
+		setConfigPath(join(configTmp, "adaptive-acl.json"))
 		setProjectStateRoot(configTmp)
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({ classifier: { enabled: false } }),
 		)
 		outsideTmpDir = mkdtempSync(join(tmpdir(), "pm-par-out-"))
@@ -3000,10 +3000,10 @@ describe("permission-modes capability channel (plan B7)", () => {
 	beforeEach(async () => {
 		pi = createFakePi()
 		configTmp = mkdtempSync(join(tmpdir(), "pm-idx-cap-"))
-		setConfigPath(join(configTmp, "permission-modes.json"))
+		setConfigPath(join(configTmp, "adaptive-acl.json"))
 		setProjectStateRoot(configTmp)
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({ classifier: { enabled: false } }),
 		)
 		delete (globalThis as Record<string, unknown>).__piPermissionModes
@@ -3119,10 +3119,10 @@ describe("grants portability via /grants (plan B)", () => {
 		grantsTmp = mkdtempSync(join(tmpdir(), "pm-idx-port-"))
 		fixture = join(grantsTmp, "grants.json")
 		notes = []
-		setConfigPath(join(configTmp, "permission-modes.json"))
+		setConfigPath(join(configTmp, "adaptive-acl.json"))
 		setProjectStateRoot(configTmp)
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({ classifier: { enabled: false } }),
 		)
 		permissionModesExtension(makeFakePiForExtension(pi))
@@ -3191,7 +3191,7 @@ describe("grants portability via /grants (plan B)", () => {
 			session: [{ category: "read_only", value: "/data/auto-session" }],
 		})
 		writeFileSync(
-			join(configTmp, "permission-modes.json"),
+			join(configTmp, "adaptive-acl.json"),
 			JSON.stringify({
 				classifier: { enabled: false },
 				grantsAutoImport: { enabled: true, path: fixture },
@@ -3248,7 +3248,7 @@ describe("round 2: injection picker, project-local grants, predefined messages",
 		pi = createFakePi()
 		projectRoot = mkdtempSync(join(tmpdir(), "pm-r2-project-"))
 		configTmp = mkdtempSync(join(tmpdir(), "pm-r2-cfg-"))
-		configPath = join(configTmp, "permission-modes.json")
+		configPath = join(configTmp, "adaptive-acl.json")
 		notes = []
 		setConfigPath(configPath)
 		writeFileSync(configPath, JSON.stringify({ classifier: { enabled: false } }))
@@ -3553,8 +3553,8 @@ describe("the /classifier-status readout", () => {
 	async function statusWith(config: Record<string, unknown>): Promise<string> {
 		const tmp = mkdtempSync(join(tmpdir(), "pm-status-"))
 		try {
-			writeFileSync(join(tmp, "permission-modes.json"), JSON.stringify(config))
-			setConfigPath(join(tmp, "permission-modes.json"))
+			writeFileSync(join(tmp, "adaptive-acl.json"), JSON.stringify(config))
+			setConfigPath(join(tmp, "adaptive-acl.json"))
 			setProjectStateRoot(tmp)
 			const pi = createFakePi()
 			permissionModesExtension(makeFakePiForExtension(pi))

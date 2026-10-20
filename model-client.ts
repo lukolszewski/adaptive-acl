@@ -612,7 +612,7 @@ export function buildGrantUserPrompt(opts: {
 	const msgs = opts.userMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")
 	// `~` means nothing to a model that has never seen this machine. A user words a
 	// grant absolutely (`/home/u/.pi`) while the gate renders outside paths with a
-	// tilde (`~/.pi/agent/permission-modes.json`), and to the model those are two
+	// tilde (`~/.pi/agent/adaptive-acl.json`), and to the model those are two
 	// unrelated strings - measured, where a correct extraction was answered
 	// "not authorised" with an empty quote. Our matcher canonicalises both sides; a
 	// model cannot be expected to, so absolute paths go out and the equivalence is

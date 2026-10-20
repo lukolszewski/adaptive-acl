@@ -18,7 +18,7 @@ import { applyEvent, createLedger, ledgerCovers } from "./auth-ledger.ts"
 import type { Entity } from "./risk-policy.ts"
 
 const HOME = "/home/u"
-const SECRET = "/home/u/.pi/agent/permission-modes.json"
+const SECRET = "/home/u/.pi/agent/adaptive-acl.json"
 
 function granted(category: string) {
 	const l = createLedger()

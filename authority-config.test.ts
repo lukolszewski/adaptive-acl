@@ -342,9 +342,9 @@ describe("the cached view the hot paths read", () => {
 	})
 })
 
-describe("the project config file `<cwd>/.pi/permission-modes.json`", () => {
+describe("the project config file `<cwd>/.pi/adaptive-acl.json`", () => {
 	it("is resolved at a fixed path under the project, not under a derived project id", () => {
-		expect(getProjectConfigPath("/home/x/proj")).toBe("/home/x/proj/.pi/permission-modes.json")
+		expect(getProjectConfigPath("/home/x/proj")).toBe("/home/x/proj/.pi/adaptive-acl.json")
 	})
 
 	it("a project file selecting rule-file persistence loads and wins over the default", () => {
@@ -353,8 +353,8 @@ describe("the project config file `<cwd>/.pi/permission-modes.json`", () => {
 		expect(project.authority?.persist).toBe("rules")
 
 		// Hermetic: point the *user* layer at a file that does not exist, so this test cannot
-		// be retargeted by whatever is in the real ~/.pi/agent/permission-modes.json.
-		setConfigPath(join(cwd, "agent", "permission-modes.json"))
+		// be retargeted by whatever is in the real ~/.pi/agent/adaptive-acl.json.
+		setConfigPath(join(cwd, "agent", "adaptive-acl.json"))
 		applyAuthorityLayers({ user: loadPermissionModesConfig(), project })
 		expect(getAuthorityPersist()).toBe("rules")
 		expect(getAuthorityPersistOrigin()).toBe("project")
@@ -363,7 +363,7 @@ describe("the project config file `<cwd>/.pi/permission-modes.json`", () => {
 
 	it("a user file alone can select rule-file persistence (the npm-user escape hatch)", () => {
 		const dir = tmpProject()
-		const agent = join(dir, "agent", "permission-modes.json")
+		const agent = join(dir, "agent", "adaptive-acl.json")
 		mkdirSync(join(dir, "agent"), { recursive: true })
 		writeFileSync(agent, JSON.stringify({ authority: { persist: "rules" } }), "utf-8")
 		setConfigPath(agent)
@@ -416,7 +416,7 @@ describe("the config writer round-trips the new keys", () => {
 	it("preserves authority + provenance alongside keys the plugin does not model", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pm-authority-write-"))
 		tmpDirs.push(dir)
-		const path = join(dir, "nested", "permission-modes.json")
+		const path = join(dir, "nested", "adaptive-acl.json")
 		setConfigPath(path)
 
 		expect(

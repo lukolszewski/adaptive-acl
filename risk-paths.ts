@@ -218,7 +218,7 @@ const SECRET_EXAMPLE_RE = /\.(example|sample|template|dist|schema)$/i
 
 /** Files under a secret directory that hold no credential: this plugin's own config (modes, rules,
  *  classifier endpoint — provider keys live in the agent's models/settings files, not here). */
-const NON_SECRET_UNDER_HOME = new Set([".pi/agent/permission-modes.json"])
+const NON_SECRET_UNDER_HOME = new Set([".pi/agent/adaptive-acl.json"])
 
 const SECRET_DIRS_UNDER_HOME = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config/gh", ".config/gcloud", ".azure", ".password-store", ".pi/agent", ".claude", ".config/pi", ".vault-token"]
 
