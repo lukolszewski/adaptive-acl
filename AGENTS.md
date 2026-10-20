@@ -179,8 +179,8 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ```bash
 npm install --ignore-scripts --no-audit --no-fund   # what CI does; nothing here has a build step
-npx vitest run        # 85 files, all green (the test count varies with the machine's installed pi
-                      # registry; CI reported 3485 for the same commit this workspace reports 3503)
+npx vitest run        # 85 files, all green. 3503 tests at this commit — the number moves with the
+                      # suite, so quote CI's log rather than a figure copied out of a doc.
 npm run typecheck     # tsc --noEmit -p tsconfig.json — zero errors
 npm run pack:dry      # 64 files, ~595 kB tarball, 2.7 MB unpacked
 ```
