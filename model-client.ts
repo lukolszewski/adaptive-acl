@@ -14,7 +14,7 @@
  * Copilot support here is two request builders rather than one call through the registry: `complete()` cannot
  * send the schema, and the schema is the whole point.
  *
- * Two dialects, chosen by the endpoint (`ep.api`), never inferred here — see {@link ModelApi}.
+ * Three dialects, chosen by the endpoint (`ep.api`), never inferred here — see {@link ModelApi}.
  */
 
 import { homedir } from "node:os"
@@ -37,7 +37,7 @@ import type { Entity } from "./risk-policy.ts"
  *  not per provider — measured on one Copilot account: `gpt-4.1` answers `/chat/completions` and rejects
  *  `/responses` with `unsupported_api_for_model`, while `mai-code-1.1-flash` answers `/responses` and calls
  *  `/chat/completions` "not accessible". So the endpoint has to say which one it is; nobody can infer it. */
-export type ModelApi = "chat-completions" | "responses"
+export type ModelApi = "chat-completions" | "responses" | "anthropic-messages"
 
 /** Everything that is true only because this endpoint is GitHub Copilot.
  *  Absent means "not Copilot", which is every endpoint that existed before this type did. */
@@ -120,7 +120,39 @@ const RESPONSES_INSTRUCTION_ROLE = "developer"
 export const DEFAULT_COPILOT_ANSWER_RESERVE = 512
 
 export function modelApi(ep: ModelEndpoint): ModelApi {
-	return ep.api === "responses" ? "responses" : "chat-completions"
+	if (ep.api === "responses" || ep.api === "anthropic-messages") return ep.api
+	return "chat-completions"
+}
+
+/** `anthropic-version` for `/v1/messages`. Required by the Anthropic API; measured accepted by Copilot. */
+export const ANTHROPIC_API_VERSION = "2023-06-01"
+
+/** JSON Schema keywords Anthropic's structured output refuses. Measured on Copilot (claude-haiku-4.5):
+ *  `output_config.format.schema: For 'array' type, property 'maxItems' is not supported`; the same request
+ *  without the length/count limits answers 200 with a schema-valid object. The limits only bound answer size,
+ *  so dropping them for this dialect changes no verdict semantics. */
+const ANTHROPIC_UNSUPPORTED_SCHEMA_KEYS = new Set([
+	"maxItems", "minLength", "maxLength", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+])
+
+/** A copy of `schema` without the keywords Anthropic refuses. Walks schema positions only, so a PROPERTY that
+ *  happens to be named `maxLength` survives. `minItems` is kept only at 0/1, the values Anthropic accepts. */
+export function anthropicCompatibleSchema(schema: unknown): unknown {
+	if (Array.isArray(schema)) return schema.map(anthropicCompatibleSchema)
+	if (!schema || typeof schema !== "object") return schema
+	const out: Record<string, unknown> = {}
+	for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
+		if (ANTHROPIC_UNSUPPORTED_SCHEMA_KEYS.has(key)) continue
+		if (key === "minItems" && !(value === 0 || value === 1)) continue
+		if ((key === "properties" || key === "$defs" || key === "definitions") && value && typeof value === "object") {
+			out[key] = Object.fromEntries(
+				Object.entries(value as Record<string, unknown>).map(([name, sub]) => [name, anthropicCompatibleSchema(sub)]),
+			)
+			continue
+		}
+		out[key] = key === "enum" || key === "const" || key === "required" ? value : anthropicCompatibleSchema(value)
+	}
+	return out
 }
 
 /**
@@ -176,15 +208,18 @@ async function readResponseBody(res: Response): Promise<string> {
  *     `ep.headers`, because "an explicit model with a session header" is a bug in this encoder, not a state a
  *     caller is allowed to construct. */
 export function modelRequestHeaders(ep: ModelEndpoint): Record<string, string> {
+	const anthropic: Record<string, string> =
+		modelApi(ep) === "anthropic-messages" ? { "anthropic-version": ANTHROPIC_API_VERSION } : {}
 	if (ep.copilot) {
 		const token = ep.copilot.auto ? ep.copilot.sessionToken : undefined
-		const headers = { ...copilotRequestHeaders(ep.apiKey ?? "", token), ...(ep.headers ?? {}) }
+		const headers = { ...copilotRequestHeaders(ep.apiKey ?? "", token), ...anthropic, ...(ep.headers ?? {}) }
 		if (!ep.copilot.auto) delete headers[SESSION_TOKEN_HEADER]
 		return headers
 	}
 	return {
 		"Content-Type": "application/json",
 		...(ep.apiKey ? { Authorization: `Bearer ${ep.apiKey}` } : {}),
+		...anthropic,
 		...(ep.headers ?? {}),
 	}
 }
@@ -260,6 +295,30 @@ export function buildResponsesBody(
 	return body
 }
 
+/** `/v1/messages` — Anthropic's dialect, with structured output via `output_config.format`.
+ *
+ *  Measured on Copilot (claude-haiku-4.5): `output_config.format: {type:"json_schema", schema}` answers 200 with
+ *  exactly the schema's object; the older `output_format` is a 400 ("deprecated"); without either the model
+ *  invents its own JSON in a code fence. Thinking is not requested: the reserve is sized for an answer, and the
+ *  forced-tool fallback that would otherwise be next refuses thinking outright. No `temperature`, matching what
+ *  this client sends to Copilot on the other dialects. */
+export function buildAnthropicMessagesBody(
+	ep: ModelEndpoint,
+	systemPrompt: string,
+	userPrompt: string,
+	schema: Record<string, unknown>,
+	maxTokens: number,
+): Record<string, unknown> {
+	return {
+		model: ep.model,
+		max_tokens: maxTokens,
+		stream: false,
+		system: systemPrompt,
+		messages: [{ role: "user", content: userPrompt }],
+		output_config: { format: { type: "json_schema", schema: anthropicCompatibleSchema(schema) } },
+	}
+}
+
 /** The one place the dialect is dispatched. */
 export function buildModelRequest(
 	ep: ModelEndpoint,
@@ -270,6 +329,12 @@ export function buildModelRequest(
 	requestedReserve: number,
 ): ModelRequest {
 	const maxTokens = answerReserveTokens(ep, requestedReserve)
+	if (modelApi(ep) === "anthropic-messages") {
+		return {
+			path: "/v1/messages",
+			body: buildAnthropicMessagesBody(ep, systemPrompt, userPrompt, schema, maxTokens),
+		}
+	}
 	if (modelApi(ep) === "responses") {
 		return {
 			path: "/responses",
@@ -339,7 +404,26 @@ export function readResponsesCompletion(json: unknown): CompletionText {
 	}
 }
 
+/** The `/v1/messages` reader: assistant `text` blocks only — a `thinking` block is the model reasoning, not the
+ *  answer. `stop_reason: "max_tokens"` is a truncation; `refusal` is reported as its own reason so it is never
+ *  read as a verdict. */
+export function readAnthropicCompletion(json: unknown): CompletionText {
+	const root = json as { stop_reason?: unknown; content?: Array<Record<string, unknown>> } | null
+	const stop = typeof root?.stop_reason === "string" ? root.stop_reason : undefined
+	const pieces: string[] = []
+	for (const block of root?.content ?? []) {
+		if (block?.type !== "text") continue
+		if (typeof block.text === "string" && block.text) pieces.push(block.text)
+	}
+	return {
+		text: stop === "refusal" ? "" : pieces.join(""),
+		truncated: stop === "max_tokens",
+		reason: stop,
+	}
+}
+
 export function readCompletionText(api: ModelApi, json: unknown): CompletionText {
+	if (api === "anthropic-messages") return readAnthropicCompletion(json)
 	return api === "responses" ? readResponsesCompletion(json) : readChatCompletion(json)
 }
 
@@ -357,7 +441,13 @@ function describeHttpFailure(ep: ModelEndpoint, status: number, body: string): s
 					? " — the session header restricts a request to the Auto picks; an explicitly chosen model must not send it"
 					: /Unsupported parameter/i.test(body)
 						? " — Copilot rejects parameters it does not implement (temperature is one); this request should not have sent it"
-						: ""
+						: /output_format.*deprecated/i.test(body)
+							? " — Anthropic's structured output moved to output_config.format; this request used the old field"
+							: /schema.*is not supported/i.test(body)
+								? " — Anthropic's structured output refuses some JSON Schema keywords; anthropicCompatibleSchema should have removed this one"
+								: /Thinking may not be enabled when tool_choice/i.test(body)
+									? " — Anthropic refuses thinking together with a forced tool call"
+									: ""
 	return base + hint
 }
 

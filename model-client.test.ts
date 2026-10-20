@@ -8,7 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
 	DEFAULT_COPILOT_ANSWER_RESERVE,
+	ANTHROPIC_API_VERSION,
+	anthropicCompatibleSchema,
 	answerReserveTokens,
+	buildAnthropicMessagesBody,
 	buildChatCompletionsBody,
 	buildModelRequest,
 	buildResponsesBody,
@@ -532,5 +535,179 @@ describe("the builders in isolation", () => {
 		stubFetch(() => ({ status: 200, body: responsesJson('{"a":1}') }))
 		await chatJson({ ...AUTO, baseUrl: `${COPILOT_BASE}/` }, "S", "U", "n", SCHEMA, 1)
 		expect(sent[0]!.url).toBe(`${COPILOT_BASE}/responses`)
+	})
+})
+
+// ---------------------------------------------------------------- the anthropic-messages dialect
+//
+// Shapes measured on a Copilot Business seat (claude-haiku-4.5, /v1/messages): `output_config.format` answers
+// 200 with exactly the schema's object; `maxItems` in the schema is a 400; `output_format` is a 400.
+
+/** An explicitly chosen Claude model on Copilot. */
+const CLAUDE: ModelEndpoint = {
+	...AUTO,
+	model: "claude-haiku-4.5",
+	api: "anthropic-messages",
+	copilot: { auto: false, maxOutputTokens: 512, supportsReasoning: true, reasoningEffort: "low" },
+}
+
+function anthropicJson(text: string | null, stop = "end_turn", extra: Record<string, unknown> = {}) {
+	return {
+		type: "message",
+		role: "assistant",
+		model: "claude-haiku-4.5",
+		content: text === null ? [] : [{ type: "text", text }],
+		stop_reason: stop,
+		usage: { input_tokens: 159, output_tokens: 8, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+		...extra,
+	}
+}
+
+describe("the anthropic-messages dialect", () => {
+	it("is selected only by ep.api", () => {
+		expect(modelApi(CLAUDE)).toBe("anthropic-messages")
+		expect(modelApi({ ...CLAUDE, api: undefined })).toBe("chat-completions")
+	})
+
+	it("posts /v1/messages with output_config.format and no OpenAI or reasoning fields", async () => {
+		stubFetch(() => ({ status: 200, body: anthropicJson('{"effect":"read_only"}') }))
+		const r = await chatJson<{ effect: string }>(CLAUDE, "SYS", "USER", "effect", SCHEMA, 200)
+		expect(r).toMatchObject({ ok: true, value: { effect: "read_only" } })
+		expect(sent[0]!.url).toBe(`${COPILOT_BASE}/v1/messages`)
+		expect(lastBody()).toEqual({
+			model: "claude-haiku-4.5",
+			max_tokens: 512,
+			stream: false,
+			system: "SYS",
+			messages: [{ role: "user", content: "USER" }],
+			output_config: { format: { type: "json_schema", schema: SCHEMA } },
+		})
+		for (const field of ["temperature", "response_format", "text", "reasoning", "thinking", "output_format", "tools"]) {
+			expect(lastBody()).not.toHaveProperty(field)
+		}
+	})
+
+	it("carries anthropic-version plus the Copilot headers, and no session header when explicit", () => {
+		const h = modelRequestHeaders(CLAUDE)
+		expect(h["anthropic-version"]).toBe(ANTHROPIC_API_VERSION)
+		expect(h.Authorization).toBe("Bearer copilot-key")
+		expect(h["Copilot-Integration-Id"]).toBe("vscode-chat")
+		expect(h["X-GitHub-Api-Version"]).toBeDefined()
+		expect(h[SESSION_TOKEN_HEADER]).toBeUndefined()
+	})
+
+	it("an Auto pick in this dialect carries the session header", () => {
+		const h = modelRequestHeaders({ ...CLAUDE, copilot: { ...CLAUDE.copilot!, auto: true, sessionToken: "tok" } })
+		expect(h[SESSION_TOKEN_HEADER]).toBe("tok")
+		expect(h["anthropic-version"]).toBe(ANTHROPIC_API_VERSION)
+	})
+
+	it("other dialects never get anthropic-version", () => {
+		expect(modelRequestHeaders(AUTO)["anthropic-version"]).toBeUndefined()
+		expect(modelRequestHeaders(PLAIN)["anthropic-version"]).toBeUndefined()
+	})
+
+	it("reads text blocks only, skipping thinking", () => {
+		const json = {
+			stop_reason: "end_turn",
+			content: [
+				{ type: "thinking", thinking: '{"effect":"delete_outside"}' },
+				{ type: "text", text: '{"effect":' },
+				{ type: "text", text: '"read_only"}' },
+			],
+		}
+		expect(readCompletionText("anthropic-messages", json)).toEqual({
+			text: '{"effect":"read_only"}',
+			truncated: false,
+			reason: "end_turn",
+		})
+	})
+
+	it("stop_reason max_tokens is a truncation, never a verdict", async () => {
+		stubFetch(() => ({ status: 200, body: anthropicJson('{"effect":"rea', "max_tokens") }))
+		const r = await chatJson(CLAUDE, "S", "U", "effect", SCHEMA, 200)
+		expect(r.ok).toBe(false)
+		expect(!r.ok && r.error).toMatch(/^truncated: .*max_tokens=512, max_tokens/)
+	})
+
+	it("a refusal is not read as an answer", async () => {
+		stubFetch(() => ({ status: 200, body: anthropicJson('{"effect":"read_only"}', "refusal") }))
+		const r = await chatJson(CLAUDE, "S", "U", "effect", SCHEMA, 200)
+		expect(r).toMatchObject({ ok: false, error: "empty completion" })
+	})
+
+	it("usage is counted, cached input included", async () => {
+		stubFetch(() => ({
+			status: 200,
+			body: anthropicJson('{"effect":"read_only"}', "end_turn", {
+				usage: { input_tokens: 100, output_tokens: 8, cache_read_input_tokens: 50, cache_creation_input_tokens: 10 },
+			}),
+		}))
+		await chatJson(CLAUDE, "S", "U", "effect", SCHEMA, 200)
+		expect(copilotTokensSpent()).toBe(168)
+	})
+
+	it("names the measured 400s", async () => {
+		stubFetch(() => ({
+			status: 400,
+			body: { type: "error", error: { type: "invalid_request_error", message: "output_config.format.schema: For 'array' type, property 'maxItems' is not supported" } },
+		}))
+		const r = await chatJson(CLAUDE, "S", "U", "effect", SCHEMA, 200)
+		expect(!r.ok && r.error).toContain("refuses some JSON Schema keywords")
+	})
+
+	it("the builder in isolation", () => {
+		expect(buildAnthropicMessagesBody(CLAUDE, "S", "U", SCHEMA, 300)).toMatchObject({ max_tokens: 300, system: "S" })
+		expect(buildModelRequest(CLAUDE, "S", "U", "n", SCHEMA, 1).path).toBe("/v1/messages")
+	})
+})
+
+describe("anthropicCompatibleSchema", () => {
+	it("drops the length and count limits Anthropic refuses, everywhere in the tree", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				targets: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 16 },
+				rows: {
+					type: "array",
+					maxItems: 8,
+					minItems: 1,
+					items: { type: "object", properties: { quote: { type: "string", maxLength: 400, minLength: 2 } } },
+				},
+				n: { type: "integer", minimum: 0, maximum: 9 },
+			},
+			required: ["targets"],
+			additionalProperties: false,
+		}
+		expect(anthropicCompatibleSchema(schema)).toEqual({
+			type: "object",
+			properties: {
+				targets: { type: "array", items: { type: "string" } },
+				rows: {
+					type: "array",
+					minItems: 1,
+					items: { type: "object", properties: { quote: { type: "string" } } },
+				},
+				n: { type: "integer" },
+			},
+			required: ["targets"],
+			additionalProperties: false,
+		})
+	})
+
+	it("keeps a property that happens to be named like a keyword, and enum values verbatim", () => {
+		const schema = {
+			type: "object",
+			properties: { maxLength: { type: "string", enum: ["maxItems", "x"] } },
+			required: ["maxLength"],
+		}
+		expect(anthropicCompatibleSchema(schema)).toEqual(schema)
+	})
+
+	it("drops minItems above 1 and does not mutate its input", () => {
+		const schema = { type: "array", minItems: 3, maxItems: 5, items: { type: "string" } }
+		const copy = JSON.parse(JSON.stringify(schema))
+		expect(anthropicCompatibleSchema(schema)).toEqual({ type: "array", items: { type: "string" } })
+		expect(schema).toEqual(copy)
 	})
 })

@@ -50,6 +50,8 @@ export type ResolvedAuth =
 			ok: true
 			apiKey?: string
 			headers?: Record<string, string>
+			/** Per-credential host (pi's OAuth `toAuth`), e.g. a Copilot Business token's proxy-ep. */
+			baseUrl?: string
 			env?: Record<string, string>
 	  }
 	| { ok: false; error: string }
