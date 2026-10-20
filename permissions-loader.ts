@@ -253,7 +253,7 @@ export function writeProjectPermissionsFile(
 	)
 }
 
-/** For tests: write global permission-modes.json permissions block. */
+/** For tests: write global adaptive-acl.json permissions block. */
 export function writeGlobalPermissionsConfig(
 	perms: PermissionsConfig,
 	configPath?: string,

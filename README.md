@@ -278,7 +278,7 @@ lists. Scopes merge and evaluation is **deny → ask → allow**.
 
 | Scope | Path |
 |---|---|
-| Global | `~/.pi/agent/permission-modes.json`, `permissions` block |
+| Global | `~/.pi/agent/adaptive-acl.json`, `permissions` block |
 | Project (shareable) | `<cwd>/.pi/projects/<id>/permissions.json` |
 | Project local | `<cwd>/.pi/projects/<id>/permissions.local.json`, where an "Allow always (this project)" click writes |
 
@@ -447,7 +447,7 @@ lifts it.
 
 ## Classifier configuration
 
-`~/.pi/agent/permission-modes.json`. The defaults are what applies with no file at all.
+`~/.pi/agent/adaptive-acl.json`. The defaults are what applies with no file at all.
 
 ```json
 {
@@ -653,7 +653,7 @@ pi -e ./index.ts          # load without installing
 
 ```bash
 npm install --ignore-scripts --no-audit --no-fund
-npx vitest run          # 85 files, 3485 tests
+npx vitest run          # 85 files, all green
 npm run typecheck       # tsc --noEmit
 npm run pack:dry        # what the package ships
 ```
@@ -698,7 +698,7 @@ config.ts                 the config file: resolvers, defaults, layered view
 
 adaptive-acl grew out of a fork of the `pi-permission-modes` 2.7.0 extension (MIT). The mode
 cycle, its commands and its config file names are kept for compatibility, which is why the config
-still lives at `~/.pi/agent/permission-modes.json`. The tree-sitter walker and its specification,
+still lives at `~/.pi/agent/adaptive-acl.json`. The tree-sitter walker and its specification,
 the tiered policy, the authorisation ledger and grant journal, natural-language grants and
 revocations, the unattended ladder, the precise denials, the Copilot transport and the headless
 paths are this project's own work.

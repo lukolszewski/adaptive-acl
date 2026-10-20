@@ -116,10 +116,10 @@ vi.mock("@earendil-works/pi-ai/compat", async (importActual) => {
 })
 
 describe("enablement: the config reaches the gate", () => {
-	it("re-reads permission-modes.json on every resolve, so flipping it on needs no restart", () => {
+	it("re-reads adaptive-acl.json on every resolve, so flipping it on needs no restart", () => {
 		const original = getConfigPath()
 		const dir = mkdtempSync(join(tmpdir(), "pm-enable-"))
-		const path = join(dir, "permission-modes.json")
+		const path = join(dir, "adaptive-acl.json")
 		setConfigPath(path)
 		try {
 			writeFileSync(path, JSON.stringify({ classifier: { enabled: false } }), "utf8")
@@ -169,7 +169,7 @@ describe("enablement: the config reaches the gate", () => {
 	})
 
 	it("the project-scoped file the brief points at is not on the classifier read path at all", async () => {
-		// /home/u/dev/pm/.pi/permission-modes.json is `getProjectConfigPath(cwd)` — the project layer.
+		// /home/u/dev/pm/.pi/adaptive-acl.json is `getProjectConfigPath(cwd)` — the project layer.
 		// Nothing imports its loader, so a `classifier` block written there configures nothing, and the
 		// "is it hot-reloaded?" question in the brief was being asked about a file nobody reads.
 		const src = await readFile(new URL("./index.ts", import.meta.url), "utf8")

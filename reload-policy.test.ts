@@ -17,7 +17,7 @@
  * treats as the worst there is.
  *
  * Every fixture is a tmp checkout with its own user-level config path, so nothing here reads or writes a
- * real `~/.pi/agent/permission-modes.json` or any real project's `.pi/projects/`.
+ * real `~/.pi/agent/adaptive-acl.json` or any real project's `.pi/projects/`.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -53,7 +53,7 @@ let globalFile = ""
 beforeEach(() => {
 	cwd = mkdtempSync(join(tmpdir(), "pm-reload-"))
 	roots.push(cwd)
-	globalFile = join(cwd, "permission-modes.json")
+	globalFile = join(cwd, "adaptive-acl.json")
 	// The global source is a real path, not the developer's own config. Every read in this file goes
 	// through it, so this one line is what keeps the suite from reading the machine it runs on.
 	setConfigPath(globalFile)

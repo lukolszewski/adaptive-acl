@@ -98,12 +98,12 @@ describe("what still authorises nothing, and should", () => {
 		// endpoint cannot be expressed at all: see the schema-not-honoured warning in
 		// /classifier-status and DIRECTED-PERMISSIONS-PLAN.md.
 		const quote = "I allow you to read /home/u/.pi config contents"
-		expect(registerAndCover(quote, "read files", ["/home/u/.pi"], "read_secret", "/home/u/.pi/agent/permission-modes.json")).toBe(false)
+		expect(registerAndCover(quote, "read files", ["/home/u/.pi"], "read_secret", "/home/u/.pi/agent/adaptive-acl.json")).toBe(false)
 	})
 
 	it("the Polish equivalent fails the same way, for the same reason", () => {
 		const quote = "zezwalam ci na odczyt /home/u/.pi"
-		expect(registerAndCover(quote, "read files", ["/home/u/.pi"], "read_secret", "/home/u/.pi/agent/permission-modes.json")).toBe(false)
+		expect(registerAndCover(quote, "read files", ["/home/u/.pi"], "read_secret", "/home/u/.pi/agent/adaptive-acl.json")).toBe(false)
 	})
 
 	it('"write into /dir" still yields no entries — "into" is not in the preposition list', () => {

@@ -115,7 +115,7 @@ describe("credential filenames are a reviewed table, not one long regex", () => 
 		expect(cls("~/.docker/config.json", { ...CTX, cwd: "/home/dev" }).isSecret).toBe(true)
 		expect(cls("~/.aws/credentials", { ...CTX, cwd: "/home/dev" }).isSecret).toBe(true)
 		// …and this plugin's own config under a secret directory stays non-secret.
-		expect(cls("~/.pi/agent/permission-modes.json", { ...CTX, cwd: "/home/dev" }).isSecret).toBe(false)
+		expect(cls("~/.pi/agent/adaptive-acl.json", { ...CTX, cwd: "/home/dev" }).isSecret).toBe(false)
 	})
 })
 

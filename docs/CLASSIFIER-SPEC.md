@@ -222,7 +222,7 @@ mechanisms, and a name list alone cannot cover the last one.
 1. **A directory under the home directory**: `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`,
    `.config/gh`, `.config/gcloud`, `.azure`, `.password-store`, `.config/pi`, `.vault-token`,
    `.claude`, and `.pi/agent` — this plugin's own state directory, treated as one whole because
-   whatever the agent is handed lands beside its settings. Its own `permission-modes.json` is exempt:
+   whatever the agent is handed lands beside its settings. Its own `adaptive-acl.json` is exempt:
    it holds modes, rules and the classifier endpoint, and provider keys live in the agent's own
    settings files, not there.
    Two exemptions inside `~/.ssh`: `known_hosts` and `config` are sensitive *config* (§2.6), not
@@ -486,9 +486,9 @@ evidence these tasks exist to read.
 
 ### 4.0 Transport and classifier configuration
 
-One block in `~/.pi/agent/permission-modes.json` under `classifier` decides which transport every layer-1
+One block in `~/.pi/agent/adaptive-acl.json` under `classifier` decides which transport every layer-1
 question uses (resolved by `resolveClassifierConfig` in `config.ts`; the project-scoped
-`<cwd>/.pi/permission-modes.json` covers `authority.persist` and provenance only — classifier settings are
+`<cwd>/.pi/adaptive-acl.json` covers `authority.persist` and provenance only — classifier settings are
 not read from there). Three cases are supported; which one is live is decided by `classifier.baseUrl` and
 `classifier.model` alone.
 

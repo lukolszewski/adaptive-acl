@@ -136,8 +136,8 @@ describe("risk-paths", () => {
 		expect(classifyPath("~/.ssh/id_ed25519", CTX).isSecret).toBe(true)
 		expect(classifyPath("~/.ssh/known_hosts", CTX).isSecret).toBe(false)
 		expect(classifyPath("~/.aws/credentials", CTX).isSecret).toBe(true)
-		expect(classifyPath("~/.pi/agent/permission-modes.json", CTX).isSecret).toBe(false)
-		expect(classifyPath("~/.pi/agent/permission-modes.json", CTX).isSensitiveConfig).toBe(true)
+		expect(classifyPath("~/.pi/agent/adaptive-acl.json", CTX).isSecret).toBe(false)
+		expect(classifyPath("~/.pi/agent/adaptive-acl.json", CTX).isSensitiveConfig).toBe(true)
 		expect(classifyPath("~/.pi/agent/models.json", CTX).isSecret).toBe(true)
 	})
 	it("marks unresolved variable roots", () => {

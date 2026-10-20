@@ -748,7 +748,7 @@ describe("derivation: the keyword must not fire on the noun, and a named thing i
 			must: (r: { type: string; value: string; quote: string }[]) =>
 				r.length === 2 &&
 				r.every((e) => e.type === "forbid" && e.value !== "*" && e.quote === "I do not want to use ANY permission files") &&
-				r.some((e) => e.value.endsWith("permission-modes.json")) &&
+				r.some((e) => e.value.endsWith("adaptive-acl.json")) &&
 				r.some((e) => e.value.includes(".pi/projects/")),
 		},
 		{

@@ -1120,8 +1120,8 @@ describe("the tool_call hook carries the attribution to the user", () => {
 	async function gatedInAuto(opts: { hasUI: boolean; select?: (label: string, options: string[]) => Promise<string> }) {
 		const dir = mkdtempSync(join(tmpdir(), "pm-attrib-hook-"))
 		writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "throwaway" }))
-		setConfigPath(join(dir, "permission-modes.json"))
-		writeFileSync(join(dir, "permission-modes.json"), JSON.stringify({ classifier: { enabled: false } }))
+		setConfigPath(join(dir, "adaptive-acl.json"))
+		writeFileSync(join(dir, "adaptive-acl.json"), JSON.stringify({ classifier: { enabled: false } }))
 		const pi = fakePi()
 		permissionModesExtension(pi as never)
 		const boot = fakeCtx(dir, { hasUI: false })

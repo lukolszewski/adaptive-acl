@@ -951,7 +951,7 @@ const RULE_FILE_CLASS_RE =
 /** The paths the class names, spelled the way the gate RENDERS them — `~/…` outside the project,
  *  `./…` inside — because `canonicalPath` resolves both halves at match time against the caller's
  *  own home and project root. Hardcoding an absolute `/home/<user>` here would match nobody else. */
-const RULE_FILE_PATHS = ["~/.pi/agent/permission-modes.json", "./.pi/projects/"]
+const RULE_FILE_PATHS = ["~/.pi/agent/adaptive-acl.json", "./.pi/projects/"]
 
 /** Paths named by the class, or none when the sentence also said an ACL verb: a sentence that
  *  names `chmod` really is about privilege, and the verb is the stronger signal of the two. */

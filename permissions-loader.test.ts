@@ -14,7 +14,7 @@ describe("permissions-loader", () => {
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), "pm-perm-"))
-		setConfigPath(join(tmpDir, "permission-modes.json"))
+		setConfigPath(join(tmpDir, "adaptive-acl.json"))
 	})
 
 	afterEach(() => {
