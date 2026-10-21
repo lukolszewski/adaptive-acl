@@ -202,7 +202,7 @@ describe("a redirect is offered as an exact rule that names the target", () => {
 
 describe("a destructive leg is offered as the exact argv, never as a shorter prefix", () => {
 	// The rule this table guards: where the verdict is set by the targets the command names — the categories
-	// listed in `STRICT_OPERAND_CATEGORIES` (`bash-audit.ts:469-486`) — coverage requires argv equality: no
+	// listed in `STRICT_OPERAND_CATEGORIES` (`bash-audit.ts:475-492`) — coverage requires argv equality: no
 	// extension, options included (the `coverage.strictOperands` branch of `bashRuleCoversArgv` in
 	// `bash-rule-argv.ts`). A suggestion that dropped words would therefore be an offer the matcher refuses
 	// to honour — a rule written into the file and never fired, the dead offer the withheld table above exists
