@@ -696,8 +696,12 @@ export function findProjectRoot(cwd: string): string | null {
  *
  *   1. `<cwd>/.pi/project.json` → `{ "projectId": "…" }`. Lives inside the
  *      checkout, so it is the only source that survives a move;
- *   2. `<cwd>/.pi/permission-modes-<id>.md` — pi's own marker, unchanged, used
- *      for kanban/memory boards too;
+ *   2. `<cwd>/.pi/permission-modes-<id>.md`, if such a file exists — read here, never
+ *      written here. Checked 2026-10-21 rather than assumed: nothing in pi's `dist/`
+ *      mentions this name and nothing in this package creates it, so today this tier
+ *      resolves nothing. It stays because reading an extra candidate is free and a
+ *      marker by that name would be honoured if some tool ever wrote one — but it is
+ *      not a contract anyone offers, and no behaviour may depend on it;
  *   3. `hashPath(cwd)` — correct while the tree stays where it was.
  *
  * Resolution reads the filesystem and says nothing: no logging, no `process.env`,
