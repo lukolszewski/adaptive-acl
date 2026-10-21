@@ -946,7 +946,7 @@ const RE_ENABLE_CHANGES =
  * no session can spell without the cwd, hence the project-relative form for that half.
  */
 const RULE_FILE_CLASS_RE =
-	/\b(?:permissions?|rules?) files?\b|\bpermissions?\.json\b|\bpermission-modes\.json\b|\bpermissions\.local\.json\b|\bgrants\.json\b/i
+	/\b(?:permissions?|rules?) files?\b|\bpermissions?\.json\b|\badaptive-acl\.json\b|\bpermission-modes\.json\b|\bpermissions\.local\.json\b|\bgrants\.json\b/i
 
 /** The paths the class names, spelled the way the gate RENDERS them — `~/…` outside the project,
  *  `./…` inside — because `canonicalPath` resolves both halves at match time against the caller's

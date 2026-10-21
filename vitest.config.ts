@@ -10,7 +10,7 @@ export default defineConfig({
 		globals: true,
 		environment: "node",
 		include: ["**/*.test.ts"],
-		// Baseline PERMISSION_MODES_* / PI_SUBAGENT_* before every file: these are the
+		// Baseline ADAPTIVE_ACL_* / PI_SUBAGENT_* before every file: these are the
 		// plugin's live state channel and are read at call time, so an inherited shell
 		// value silently retargets the gate. See vitest.setup.ts.
 		setupFiles: ["./vitest.setup.ts"],

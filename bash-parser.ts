@@ -24,8 +24,8 @@
  * `wasm/LICENSE-tree-sitter-bash`**, and `wasm/` is in the package `files` list.
  *
  * Resolution order for the grammar, both rooted at `import.meta.url` so it works
- * from an installed location (`~/.pi/agent/npm/node_modules/@georgedong32/
- * permission-modes/`) and not just from a checkout with a given cwd:
+ * from an installed location (`~/.pi/agent/npm/node_modules/@lukolszewski/
+ * adaptive-acl/`) and not just from a checkout with a given cwd:
  *   1. `./wasm/tree-sitter-bash.wasm` next to this file — the shipped path.
  *   2. `tree-sitter-bash/tree-sitter-bash.wasm` in the nearest `node_modules`
  *      (a dev checkout that ran `npm install --no-save tree-sitter-bash`).
@@ -272,10 +272,10 @@ let pendingWarning: string | null = null
 /**
  * Say it once, loudly.
  *
- * The plugin's warning channel outside `index.ts` is `console.warn` with the `[permission-modes]` prefix —
+ * The plugin's warning channel outside `index.ts` is `console.warn` with the `[adaptive-acl]` prefix —
  * `config.ts`, `profiles.ts`, `permissions-loader.ts` and `utils.ts` all use it, each firing once per distinct
  * problem — because a parse failure repeats on every tool call and a log full of one line teaches nobody
- * anything. `debugLine` is not enough here: it is gated on `PERMISSION_MODES_DEBUG`, and the whole point is that
+ * anything. `debugLine` is not enough here: it is gated on `ADAPTIVE_ACL_DEBUG`, and the whole point is that
  * the failure is invisible to a user who has no reason to set a debug variable.
  *
  * Once per failed initialization, which is what the invariant needs: init is attempted once per process (see
@@ -284,7 +284,7 @@ let pendingWarning: string | null = null
  */
 function announceFailure(line: string): void {
   pendingWarning ??= line
-  console.warn(`[permission-modes] ${line}`)
+  console.warn(`[adaptive-acl] ${line}`)
 }
 
 /**
@@ -309,7 +309,7 @@ export function lastParseCost(): ParseCost {
 }
 
 function debugLine(text: string): void {
-  if (process.env.PERMISSION_MODES_DEBUG) console.error(`[permission-modes] ${text}`)
+  if (process.env.ADAPTIVE_ACL_DEBUG) console.error(`[adaptive-acl] ${text}`)
 }
 
 function reasonOf(err: unknown): string {

@@ -356,7 +356,7 @@ in one reply.
 A session with no UI (pi's `-p`, `--mode json`, an in-process scheduler job) behaves as unattended
 whether or not the flag was set: a prompt that cannot be drawn is a denial, never a pass.
 
-- **Spawned children** inherit the parent's mode through `PERMISSION_MODES_INHERITED_MODE`. If a
+- **Spawned children** inherit the parent's mode through `ADAPTIVE_ACL_INHERITED_MODE`. If a
   child would prompt, the ask is forwarded to the parent's UI through a filesystem inbox; the
   response carries a challenge the child issued, so a file nobody read cannot approve. Timeout,
   cancel or Block hands the child a block reason.

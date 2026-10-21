@@ -19,7 +19,7 @@
 
 ## 2. System context injection
 
-Injected via `before_agent_start` anchor (`<!-- permission-modes:context -->`).
+Injected via `before_agent_start` anchor (`<!-- adaptive-acl:context -->`).
 
 Auto mode also injects a **tool-output injection warning** and escalates when recent tool results match heuristic injection patterns.
 

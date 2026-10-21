@@ -42,7 +42,7 @@ All prompts use `ctx.ui.select(title, options)` when `ctx.hasUI` is true.
 | Condition | Action |
 |---|---|
 | `!ctx.hasUI` and no `PI_SUBAGENT_PARENT_SESSION` | Block with `needs approval: no UI available` |
-| `!ctx.hasUI` and `PI_SUBAGENT_PARENT_SESSION` set | Forward ask to parent session UI via `permission-modes-forwarding` inbox; parent Allow / Allow always / Block; timeout or deny → block |
+| `!ctx.hasUI` and `PI_SUBAGENT_PARENT_SESSION` set | Forward ask to parent session UI via `adaptive-acl-forwarding` inbox; parent Allow / Allow always / Block; timeout or deny → block |
 
 Local ask-mode `edit`/`write` with UI still offers the five-option dialog (including bypass). Forwarded asks use the shared four-option set only (no bypass).
 

@@ -36,7 +36,7 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 - `permission-forwarding.ts` — cross-process ask forwarding: a headless child writes a request into a
   filesystem inbox, the parent session's UI answers; a challenge echoed on the response means a file nobody
   read cannot approve.
-- `mode-inherit.ts` — publishes the live mode in `PERMISSION_MODES_INHERITED_MODE` so spawned children
+- `mode-inherit.ts` — publishes the live mode in `ADAPTIVE_ACL_INHERITED_MODE` so spawned children
   start in the same mode the parent is in.
 - `plan-approval-dialog.ts` — the TUI component that renders `plan.md` for execute / refine / stay / cancel,
   including the terminal-height arithmetic.
@@ -171,7 +171,7 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 ### Test harness (matched by the module-map command, not shipped)
 
 - `vitest.config.ts` — collects `**/*.test.ts` and installs the setup file below.
-- `vitest.setup.ts` — clears every `PERMISSION_MODES_*` / `PI_SUBAGENT_*` variable before **each** test file
+- `vitest.setup.ts` — clears every `ADAPTIVE_ACL_*` / `PI_SUBAGENT_*` variable before **each** test file
   and awaits `initBashParser()`. Both halves matter: the plugin reads those variables at call time, and layer
   0 refuses every command as `parser-unavailable` until the grammar is loaded.
 
@@ -337,7 +337,7 @@ Each line names where the code enforces it. These are the things a confident, pl
   is active, `index.ts:1444` is the only call. Profiles are opt-in and live in
   `~/.pi/agent/model-profiles.json` (`profiles.ts:9`, `profiles.ts:62`) — not `models.json`, which pi uses for
   provider definitions.
-- Mode context is injected through the `<!-- permission-modes:context -->` anchor
+- Mode context is injected through the `<!-- adaptive-acl:context -->` anchor
   (`utils.ts:1163-1164`, `resolveModePrompt` at `utils.ts:1189`), not as per-turn messages. Per-mode skill
   filtering strips skill blocks from the prompt string (`utils.ts:1437`, called `index.ts:3379`, and
   `index.ts:3386` warns loudly if the strip changed nothing).
@@ -371,10 +371,18 @@ feature is noise to the person who has to maintain it next.
 
 ## Licence and origin
 
-The extension source is licensed MIT under [`LICENSE`](LICENSE) (`LICENSE:1-3`), which also carries the MIT
-notices for the bundled tree-sitter-bash grammar (`LICENSE:26-78`); `package.json:9` currently declares
-`AGPL-3.0-or-later`, which contradicts that file — reconcile the two deliberately, in a packaging change, and
-never by silently editing one side. The package grew out of an earlier permission-modes extension for pi, and
-several names still say so (`~/.pi/agent/adaptive-acl.json`, the `modes` session entry, the
-`permission-modes:` prompt anchor). Those are user-visible and session-visible: renaming them orphans
-existing configuration and saved state, so leave them.
+The licence is in [`LICENSE`](LICENSE) as three labelled parts: the upstream MIT notice (`LICENSE:13-43`),
+third-party notices for the bundled grammar and `web-tree-sitter` (`LICENSE:44-102`), and the AGPL-3.0 text
+that governs this repository's own work (`LICENSE:103`), which is what `package.json:9` declares — manifest
+and file agree. The package grew out of `pi-permission-modes` 2.7.0, and `NOTICE` keeps that attribution.
+
+Everything the package calls itself now says `adaptive-acl`: the config files, the `ADAPTIVE_ACL_*` env vars,
+the `[adaptive-acl]` console prefix, the `adaptive-acl:context` and `adaptive-acl:plan` prompt anchors, the
+`adaptive-acl-forwarding` session directory, and the `adaptive-acl-notice` transcript entry.
+
+One identifier keeps the old spelling and must keep it. `PI_MARKER_NAME` (`utils.ts:711`) matches
+`.pi/permission-modes-<id>.md` — a marker **pi** writes and this package only reads (`utils.ts:699`).
+Renaming that regex rebrands nothing: it stops the fork recognising pi's marker, so the project id falls back
+to `hashPath(cwd)` without a word, and a checkout that moved loses the grants and ledger rows filed under the
+id it used to have (`grants-adopt.ts`, `adopt-live.ts`). Change it only together with whatever writes that
+file.

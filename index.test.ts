@@ -1,5 +1,5 @@
 /**
- * Integration tests for the permission-modes extension.
+ * Integration tests for the adaptive-acl extension.
  *
  * Strategy: import the extension factory with a fake `ExtensionAPI` stub.
  * The stub captures all `pi.on(event, handler)` subscriptions; we then invoke
@@ -320,7 +320,7 @@ function makeCtx(
 
 // ---- tests --------------------------------------------------------------
 
-describe("permission-modes extension: tool_call gate", () => {
+describe("adaptive-acl extension: tool_call gate", () => {
 	let pi: FakePi
 	let realProjectRoot: string
 	let configTmp: string
@@ -934,7 +934,7 @@ describe("permission-modes extension: tool_call gate", () => {
 	})
 })
 
-describe("permission-modes extension: no auto follow-up (v2.0.0)", () => {
+describe("adaptive-acl extension: no auto follow-up (v2.0.0)", () => {
 	let pi: FakePi
 
 	beforeEach(() => {
@@ -1194,7 +1194,7 @@ describe("request_user_permission: the ask bridge (D11)", () => {
 	});
 });
 
-describe("permission-modes extension: model profiles", () => {
+describe("adaptive-acl extension: model profiles", () => {
 	let pi: FakePi
 
 	beforeEach(() => {
@@ -1534,7 +1534,7 @@ describe("permission-modes extension: model profiles", () => {
 // around, notifies the user, and re-applies the model mapping for the
 // current mode.
 
-describe("permission-modes extension: Alt+I cycle profile shortcut", () => {
+describe("adaptive-acl extension: Alt+I cycle profile shortcut", () => {
 	let pi: FakePi
 
 	beforeEach(() => {
@@ -2334,7 +2334,7 @@ describe("skill filtering in before_agent_start", () => {
 	})
 })
 
-describe("permission-modes: subagent ask forwarding", () => {
+describe("adaptive-acl: subagent ask forwarding", () => {
 	let pi: ReturnType<typeof createFakePi>
 	let configTmp: string
 	let agentDir: string
@@ -2515,11 +2515,11 @@ describe("permission-modes: subagent ask forwarding", () => {
 	})
 })
 
-describe("permission-modes: subagent inherits parent mode", () => {
+describe("adaptive-acl: subagent inherits parent mode", () => {
 	let pi: ReturnType<typeof createFakePi>
 	let configTmp: string
 	const prevChild = process.env.PI_SUBAGENT_CHILD
-	const prevInherited = process.env.PERMISSION_MODES_INHERITED_MODE
+	const prevInherited = process.env.ADAPTIVE_ACL_INHERITED_MODE
 
 	beforeEach(() => {
 		pi = createFakePi()
@@ -2536,7 +2536,7 @@ describe("permission-modes: subagent inherits parent mode", () => {
 			JSON.stringify({ active: "default", default: {} }),
 		)
 		delete process.env.PI_SUBAGENT_CHILD
-		delete process.env.PERMISSION_MODES_INHERITED_MODE
+		delete process.env.ADAPTIVE_ACL_INHERITED_MODE
 		permissionModesExtension(makeFakePiForExtension(pi))
 	})
 
@@ -2546,13 +2546,13 @@ describe("permission-modes: subagent inherits parent mode", () => {
 		if (prevChild === undefined) delete process.env.PI_SUBAGENT_CHILD
 		else process.env.PI_SUBAGENT_CHILD = prevChild
 		if (prevInherited === undefined)
-			delete process.env.PERMISSION_MODES_INHERITED_MODE
-		else process.env.PERMISSION_MODES_INHERITED_MODE = prevInherited
+			delete process.env.ADAPTIVE_ACL_INHERITED_MODE
+		else process.env.ADAPTIVE_ACL_INHERITED_MODE = prevInherited
 	})
 
 	it("child in inherited bypass allows mutating bash without UI", async () => {
 		process.env.PI_SUBAGENT_CHILD = "1"
-		process.env.PERMISSION_MODES_INHERITED_MODE = "bypass"
+		process.env.ADAPTIVE_ACL_INHERITED_MODE = "bypass"
 		// Default flag is ask — inheritance must override for children.
 		pi.flags["permission-mode"] = undefined
 		await pi.simulateSessionStart(process.cwd())
@@ -2568,7 +2568,7 @@ describe("permission-modes: subagent inherits parent mode", () => {
 	it("parent setMode publishes inherited env", async () => {
 		await pi.simulateSessionStart(process.cwd())
 		await pi.simulateCommand("bypass", "", makeCtx(pi, { cwd: process.cwd(), ui: {} }))
-		expect(process.env.PERMISSION_MODES_INHERITED_MODE).toBe("bypass")
+		expect(process.env.ADAPTIVE_ACL_INHERITED_MODE).toBe("bypass")
 	})
 
 	it("every mode in the cycle publishes an inheritable value", async () => {
@@ -2578,9 +2578,9 @@ describe("permission-modes: subagent inherits parent mode", () => {
 		// a stale bypass. Clearing before each step is what turns a skip into a failure.
 		await pi.simulateSessionStart(configTmp)
 		for (const mode of ["ask", "plan", "auto", "bypass"]) {
-			delete process.env.PERMISSION_MODES_INHERITED_MODE
+			delete process.env.ADAPTIVE_ACL_INHERITED_MODE
 			await pi.simulateCommand(mode, "", makeCtx(pi, { cwd: configTmp, ui: {} }))
-			expect(process.env.PERMISSION_MODES_INHERITED_MODE, mode).toBe(mode)
+			expect(process.env.ADAPTIVE_ACL_INHERITED_MODE, mode).toBe(mode)
 		}
 	})
 })
@@ -2655,7 +2655,7 @@ describe("stable system prompt across turns", () => {
 		expect(result.messages[0]).toMatchObject({ role: "user" })
 		expect(result.messages[1]).toMatchObject({
 			role: "custom",
-			customType: "permission-modes-notice",
+			customType: "adaptive-acl-notice",
 			display: false,
 		})
 	})
@@ -2993,7 +2993,7 @@ describe("approval flow parity: outside-write tracking (plan B2)", () => {
 })
 
 // ---- pm↔cctui capability channel ----------------------------------------
-describe("permission-modes capability channel (plan B7)", () => {
+describe("adaptive-acl capability channel", () => {
 	let pi: FakePi
 	let configTmp: string
 

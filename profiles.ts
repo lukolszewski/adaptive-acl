@@ -109,7 +109,7 @@ function readConfigFromDisk(): ModelProfilesConfig {
 		return JSON.parse(raw) as ModelProfilesConfig
 	} catch (err) {
 		console.warn(
-			`[permission-modes] Failed to load ${_modelsPath}:`,
+			`[adaptive-acl] Failed to load ${_modelsPath}:`,
 			err,
 		)
 		return {}
@@ -164,10 +164,10 @@ export function ensureModelProfilesConfig(): ModelProfilesConfig {
 		writeFileSync(_modelsPath, JSON.stringify(defaults, null, 2) + "\n", {
 			mode: 0o600,
 		})
-		console.log(`[permission-modes] Created ${_modelsPath} with defaults`)
+		console.log(`[adaptive-acl] Created ${_modelsPath} with defaults`)
 	} catch (err) {
 		console.warn(
-			`[permission-modes] Failed to create ${_modelsPath}:`,
+			`[adaptive-acl] Failed to create ${_modelsPath}:`,
 			err,
 		)
 	}

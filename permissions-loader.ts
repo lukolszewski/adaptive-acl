@@ -77,7 +77,7 @@ function readJsonFile(filePath: string): PermissionsConfig | null {
 		if (parsed.allow || parsed.deny || parsed.ask) return parsed
 		return null
 	} catch (err) {
-		console.warn(`[permission-modes] Failed to read ${filePath}:`, err)
+		console.warn(`[adaptive-acl] Failed to read ${filePath}:`, err)
 		return null
 	}
 }
@@ -165,7 +165,7 @@ function writePermissionsToFile(
 		writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf-8")
 		return true
 	} catch (err) {
-		console.warn(`[permission-modes] Failed to write ${filePath}:`, err)
+		console.warn(`[adaptive-acl] Failed to write ${filePath}:`, err)
 		return false
 	}
 }

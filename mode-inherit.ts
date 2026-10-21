@@ -9,8 +9,8 @@ import {
 } from "./permission-forwarding.ts";
 
 /** Written by the parent session; read by PI_SUBAGENT_CHILD processes. */
-export const PERMISSION_MODES_INHERITED_MODE_ENV =
-	"PERMISSION_MODES_INHERITED_MODE";
+export const ADAPTIVE_ACL_INHERITED_MODE_ENV =
+	"ADAPTIVE_ACL_INHERITED_MODE";
 
 export const INHERITABLE_MODES = [
 	"ask",
@@ -32,12 +32,12 @@ export function isInheritableMode(value: string): value is InheritableMode {
 export function publishInheritedPermissionMode(mode: string): void {
 	if (isSubagentChildProcess()) return;
 	if (!isInheritableMode(mode)) return;
-	process.env[PERMISSION_MODES_INHERITED_MODE_ENV] = mode;
+	process.env[ADAPTIVE_ACL_INHERITED_MODE_ENV] = mode;
 }
 
 /** Read parent mode from env (set at spawn via merged process.env). */
 export function resolveInheritedPermissionMode(): InheritableMode | undefined {
-	const raw = process.env[PERMISSION_MODES_INHERITED_MODE_ENV]?.trim();
+	const raw = process.env[ADAPTIVE_ACL_INHERITED_MODE_ENV]?.trim();
 	if (!raw || !isInheritableMode(raw)) return undefined;
 	return raw;
 }
