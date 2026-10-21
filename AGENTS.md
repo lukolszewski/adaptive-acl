@@ -26,7 +26,7 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ### Entry point and pi surface
 
-- `index.ts` — the extension. Registers the mode commands (`index.ts:1751-1756`), shortcuts, start flags,
+- `index.ts` — the extension. Registers the mode commands (`index.ts:1768-1773`), shortcuts, start flags,
   the `tool_call` gate, the footer, plan mode, prompts, session persistence. ~3 900 lines; everything a user
   sees is wired here, almost nothing is decided here.
 - `session-branch.ts` — typed port over `ctx.sessionManager`. The only file that writes down pi's session
@@ -120,7 +120,7 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
   allocate nothing.
 - `classifier-client.ts` — the single-shot classifier (pi-ai `completeSimple`): prompt assembly, stages, XML
   and JSON verdict formats, retries. Reachable only through the `classifier.engine: "legacy"` path
-  (`config.ts:534`, wired at `index.ts:3191`).
+  (`config.ts:534`, wired at `index.ts:3254`).
 - `classifier-prompt.ts` — assembles the system prompt out of `classifier-prompts/` with index arithmetic on
   `{{rules:*}}` / `{{include:*}}` markers; the verdict block is built here, not in the template
   (`classifier-prompt.ts:40-46`).
@@ -214,12 +214,12 @@ hour each if you learn them by hand:
 pi -e ./index.ts        # from the repository root — the same entry a published install reads (package.json:24-26)
 ```
 
-What you can then exercise by hand: the four mode names as commands (`index.ts:1751-1756`), plus `/mode`,
+What you can then exercise by hand: the four mode names as commands (`index.ts:1768-1773`), plus `/mode`,
 `/permissions`, `/grants`, `/plan-execute`, `/model-profile`, `/classifier-status`, `/outside-writes`,
-`/undo-outside-writes`, `/unattended`, `/msg` and `/injection-note` (registered between `index.ts:1751` and
-`index.ts:2819`); Shift+Tab for the mode cycle (`index.ts:2915`), Alt+T for thinking level
-(`index.ts:2959`), Alt+I for profiles (`index.ts:2992`); `--permission-mode` (`index.ts:3000`) and
-`--model-profile` (`index.ts:3007`) at start-up. Outside-cwd write tracking caps at 100 snapshots and evicts
+`/undo-outside-writes`, `/unattended`, `/msg` and `/injection-note` (registered between `index.ts:1768` and
+`index.ts:2882`); Shift+Tab for the mode cycle (`index.ts:2978`), Alt+T for thinking level
+(`index.ts:3022`), Alt+I for profiles (`index.ts:3055`); `--permission-mode` (`index.ts:3063`) and
+`--model-profile` (`index.ts:3070`) at start-up. Outside-cwd write tracking caps at 100 snapshots and evicts
 the oldest (`utils.ts:19`, `utils.ts:1005-1008`) — relevant if you touch the undo path.
 
 ## Invariants
@@ -228,11 +228,11 @@ Each line names where the code enforces it. These are the things a confident, pl
 
 ### Modes and the tool-call gate
 
-- The four modes are the cycle `ask → plan → auto → bypass` (`index.ts:238`), which `/mode`
-  (`index.ts:2345`) and Shift+Tab (`index.ts:2915`) step through. The per-mode commands are registered from
-  their own literal array (`index.ts:1751-1756`) rather than from that constant, so a rename has to be made
+- The four modes are the cycle `ask → plan → auto → bypass` (`index.ts:242`), which `/mode`
+  (`index.ts:2408`) and Shift+Tab (`index.ts:2978`) step through. The per-mode commands are registered from
+  their own literal array (`index.ts:1768-1773`) rather than from that constant, so a rename has to be made
   in both places or `/mode` offers a mode with no command of its own.
-- The start flag is `--permission-mode` because pi owns `--mode` for output format (`index.ts:2998-3000`).
+- The start flag is `--permission-mode` because pi owns `--mode` for output format (`index.ts:3061-3063`).
   Do not "tidy" the name.
 - Configured rules evaluate **before** any mode gate, in the order deny → ask → allow → passthrough
   (`permissions.ts:3`, the loops at `permissions.ts:85` and `permissions.ts:428`). An allow short-circuits the
@@ -243,9 +243,9 @@ Each line names where the code enforces it. These are the things a confident, pl
   allow rule can cover it, while `Bash(rm *)` must still stop
   `for f in *; do rm -f $f; done`, which has no argv either. Do not "unify" the two matchers.
 - No UI means the session behaves as unattended: a prompt that cannot be drawn is a denial, never a pass
-  (`index.ts:1093-1103`), and `never`-tier stays blocked regardless (`index.ts:1111-1115`). Every failure path
+  (`index.ts:1108-1118`), and `never`-tier stays blocked regardless (`index.ts:1126-1130`). Every failure path
   in this package points the same way — fail closed, and say why.
-- Plan mode writes only the plan file (`index.ts:3079-3082`) and runs only the read-only allowlist.
+- Plan mode writes only the plan file (`index.ts:3142-3145`) and runs only the read-only allowlist.
 - Writes outside the project in bypass mode are **tracked, not blocked** (`utils.ts:998`
   `trackOutsideWrite`, surfaced by `/outside-writes` and `/undo-outside-writes`). Blocking them would be a
   behaviour change, not a safety fix.
@@ -268,7 +268,7 @@ Each line names where the code enforces it. These are the things a confident, pl
   `allow` verdicts are demoted to `unknown`. It can never lower a tier or authorise anything
   (`risk-policy.ts:16-17`).
 - If the grammar fails to load, every bash command is refused `parser-unavailable` (`bash-parser.ts:186`) — a
-  dead analyzer, never a pass. Initialisation happens at load (`index.ts:3586`) and in `vitest.setup.ts`; the
+  dead analyzer, never a pass. Initialisation happens at load (`index.ts:3649`) and in `vitest.setup.ts`; the
   fact a packaging bug is caught by is which wasm file was used (`bash-parser.ts:229`).
 
 ### Authority
@@ -282,7 +282,7 @@ Each line names where the code enforces it. These are the things a confident, pl
   row is indistinguishable from permission.
 - Importing is not declaring. Rule files are user-authored and evaluate before the mode gate; imported rows
   are background authority that anything said in the current session outranks
-  (`grants-file.ts:7-10`, implemented in `importLedger`, `auth-ledger.ts:1456`).
+  (`grants-file.ts:7-10`, implemented in `importLedger`, `auth-ledger.ts:1865`).
 - Adopting an orphan project's state may take its **tightening** rules (deny/ask) without asking and must
   never apply its **widening** ones — every allow rule and every journal row comes back as a candidate
   (`grants-adopt.ts:10-20`, `grants-adopt.ts:402`).
@@ -306,8 +306,8 @@ Each line names where the code enforces it. These are the things a confident, pl
 - The classifier's system prompt **is** the auto-mode ruleset — `classifier-prompt.ts:12` loads
   `classifier-prompts/auto_mode_system_prompt.txt`, whose first line says it is the auto-mode safety check.
   The user prompt then names the live mode in its header (`classifier-client.ts:221`, filled from
-  `currentMode` at `index.ts:1310`), and the classifier is only reachable from auto mode
-  (`index.ts:3097-3117`, with the legacy path at `index.ts:3191`). Route another mode through this prompt and
+  `currentMode` at `index.ts:1327`), and the classifier is only reachable from auto mode
+  (`index.ts:3160-3180`, with the legacy path at `index.ts:3254`). Route another mode through this prompt and
   you hand a model a header describing one mode and rules describing another; `classifier-client.test.ts:483`
   pins the header.
 - The transcript holds user messages and tool calls only. Assistant prose is excluded on purpose — the model
@@ -334,17 +334,17 @@ Each line names where the code enforces it. These are the things a confident, pl
 
 - pi's session entry shape is written down in exactly one file (`session-branch.ts:1-8`). A private shape
   guess elsewhere once left the injection probe dead at runtime while its test, using the same guess, passed.
-- Session state travels in two custom entries: `modes` (written `index.ts:373`, restored `index.ts:3624`) and
-  `gate-ledger` (written `index.ts:826`, restored `index.ts:3666`). Renaming either silently discards every
+- Session state travels in two custom entries: `modes` (written `index.ts:377`, restored `index.ts:3687`) and
+  `gate-ledger` (written `index.ts:830`, restored `index.ts:3729`). Renaming either silently discards every
   saved session's mode, grants and ledger.
-- `pi.setModel()` runs only inside an explicitly configured profile: `index.ts:1404` returns when no profile
-  is active, `index.ts:1444` is the only call. Profiles are opt-in and live in
+- `pi.setModel()` runs only inside an explicitly configured profile: `index.ts:1421` returns when no profile
+  is active, `index.ts:1461` is the only call. Profiles are opt-in and live in
   `~/.pi/agent/model-profiles.json` (`profiles.ts:9`, `profiles.ts:62`) — not `models.json`, which pi uses for
   provider definitions.
 - Mode context is injected through the `<!-- adaptive-acl:context -->` anchor
   (`utils.ts:1163-1164`, `resolveModePrompt` at `utils.ts:1189`), not as per-turn messages. Per-mode skill
-  filtering strips skill blocks from the prompt string (`utils.ts:1437`, called `index.ts:3379`, and
-  `index.ts:3386` warns loudly if the strip changed nothing).
+  filtering strips skill blocks from the prompt string (`utils.ts:1437`, called `index.ts:3442`, and
+  `index.ts:3449` warns loudly if the strip changed nothing).
 
 ## What does not live here
 

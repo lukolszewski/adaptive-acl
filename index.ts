@@ -3272,7 +3272,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
           // Prior authorisation first. Permission rules ARE consulted above
           // (applyConfiguredPermissionRules), but NEITHER grant store was consulted on this path, so
           // approving one outside-cwd read prompted again forever - the original complaint. This is
-          // also the only place write-implies-read (auth-ledger.ts:225) can bite: layer 0 answers
+          // also the only place write-implies-read (auth-ledger.ts:237) can bite: layer 0 answers
           // every read_only verdict with tier allow, so the gate never needs the ledger for reads.
           const pctx = { cwd: ctx.cwd, project: ctx.cwd, home: homedir() };
           const pc = classifyPath(pathStr, pctx);
@@ -3296,7 +3296,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
           );
           if (res === undefined) {
             // Remember exactly what was approved: this file, never its directory. A plain Allow used
-            // to store nothing here - the same defect the gate dialog fixed at index.ts:884-900.
+            // to store nothing here - the same defect the gate dialog fixed at index.ts:888-904.
             addGrant(gateGrants, readCategory, resolved, "entity");
             scheduleLedgerPersist();
           }
