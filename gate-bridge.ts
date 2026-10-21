@@ -29,12 +29,16 @@ import {
 	applyEvents,
 	eventsFromExtraction,
 	isSyntheticUserTurn,
+	kindGroup,
 	ledgerCovers,
 	readOnlyActive,
 	readOnlyLiftedByGrant,
 	type Ledger,
 	type LedgerEntry,
 } from "./auth-ledger.ts"
+import { canonicalPath, entityMatchesTarget, targetNamedByUser } from "./grant-verify.ts"
+import { coversByGrammar, isProtectedBranch } from "./target-grammar.ts"
+import type { GrantStore } from "./session-grants.ts"
 import { DENIAL_LIMITS } from "./denial-tracking.ts"
 import { policyProject, type Entity, type PolicyOptions } from "./risk-policy.ts"
 
@@ -545,6 +549,23 @@ export type DenialDecider =
 	| "user"
 
 /**
+ * One row that nearly fitted — display only, see {@link DenialContext.nearMiss}.
+ *
+ * `store` says WHERE the row was held, because the two stores are cleared by different acts: a `ledger` row is
+ * a remembered sentence and is lifted by revoking its value, a `session` row is a prompt answer and is lifted by
+ * answering differently. `why` is the single clause saying what stopped it authorising THIS call.
+ */
+export type DenialNearMiss = {
+	store: "ledger" | "session"
+	category: string
+	value: string
+	/** The user's own sentence, when the store kept one. The ledger does; the session store keeps only
+	 *  {category, value, kind}, so a session row legitimately has no quote to show. */
+	quote?: string
+	why: string
+}
+
+/**
  * What the caller knows about a refusal it is about to render. Every field is optional and every
  * default reproduces the pre-attribution text, so a call site that has not been wired yet still
  * compiles and still gets a truthful message — with `undetermined` where the decider is unknown,
@@ -574,6 +595,21 @@ export type DenialContext = {
 	classifierCause?: string
 	/** Whether the store held a revocation or nothing at all, when `decidedBy === "grant"`. */
 	grantState?: "revoked" | "absent"
+	/**
+	 * DISPLAY ONLY, and never a claim of coverage: the rows the gate actually held that sat NEAR this
+	 * target. Three shapes, in that order of interest: a row whose value would reach a pending target but is
+	 * filed under a kind group this action is not in; a row in a kind group this action IS in whose value does
+	 * not reach any target; and a row whose own words name this command or one of this target's `/`-components
+	 * while filing it somewhere else.
+	 *
+	 * What makes this safe to print: every entry is computed by {@link nearMissRows} from `e.ledger.grants` and
+	 * `e.grants.grants` — rows that were in the store when the gate decided — using the gate's own predicates
+	 * (`entityMatchesTarget`, `kindGroup`, `targetNamedByUser`) on the gate's own inputs. No new matcher, no new
+	 * authority: a row that really covered the call is not here, because the gate would have allowed the call and
+	 * this rung would never have been reached. Nothing downstream may read these entries as permission — the
+	 * reader is a person deciding what to say next, and the entries name what to say about, not what is allowed.
+	 */
+	nearMiss?: DenialNearMiss[]
 	/** A human is looking at this session, so a prompt WOULD have been shown. */
 	humanPresent?: boolean
 	/** For callers that hand-build a denial and have no GateResult to read these off. */
@@ -693,7 +729,7 @@ export function ledgerLever(ctx?: DenialContext): string | undefined {
 function classifierPhrase(ctx: DenialContext): string {
 	switch (ctx.classifierWhy) {
 		case "denied":
-			return "classifier — denied: the safety model judged this and said no (its own verdict, not a rule and not layer 0)"
+			return `classifier — denied: the safety model judged this and said no (its own verdict, not a rule and not layer 0)${nearMissSuffix(ctx)}`
 		case "unavailable":
 			// The cause is the actionable half of this sentence: "unavailable" says nothing was judged, the cause says
 			// what to fix. Absent is admitted as absent rather than papered over with a generic guess.
@@ -716,6 +752,83 @@ function causeClause(ctx: DenialContext): string {
 	if (!flat) return ""
 	const shown = flat.length > CAUSE_MAX_CHARS ? `${flat.slice(0, CAUSE_MAX_CHARS)}…` : flat
 	return ` — cause: \`${shown}\``
+}
+
+/**
+ * The one clause the near-miss block adds to the decider itself.
+ *
+ * "the classifier said no" was read in a live session as "the model is the blocker", while `/grants` listed a
+ * row for the same branch — so the reader went looking for a classifier setting instead of saying the one
+ * sentence that would have fitted. When rows are listed below, the denial has to say WHICH part of the model's
+ * job failed: it was asked and found no sentence covering THIS target, which is a gap in what was said, not a
+ * judgement about the target. Printed only next to a real `denied` verdict and only when the block follows.
+ */
+function nearMissSuffix(ctx: DenialContext): string {
+	return ctx.nearMiss?.length ? " — it found no sentence covering this target; see near miss" : ""
+}
+
+/** Store data as plain text inside a clause: flattened, backtick-free, clamped like {@link causeClause}. A
+ *  value from a store is not text this file wrote — it can hold a newline (a quoted filename) or a backtick, and
+ *  either one would otherwise split the denial into lines that read as the gate's own instructions. */
+function dataText(raw: string): string {
+	const flat = raw.replace(/\s+/g, " ").replace(/`/g, "'").trim()
+	return flat.length > CAUSE_MAX_CHARS ? `${flat.slice(0, CAUSE_MAX_CHARS)}…` : flat
+}
+
+/** The same, inside a code span. */
+function dataSpan(raw: string): string {
+	return `\`${dataText(raw)}\``
+}
+
+/** The near-miss rows, one line each, in the order {@link nearMissRows} ranked them. */
+export function nearMissLines(ctx?: DenialContext): string[] {
+	return (ctx?.nearMiss ?? []).map((m) => {
+		const quote = displayQuote(m.quote)
+		const said = quote ? ` ("${quote}")` : ""
+		return `near miss: ${m.store} grant ${dataSpan(`${m.category} ${m.value}`)}${said} — ${m.why}`
+	})
+}
+
+/** The categories whose target has a shape a sentence can name — a ref, an image — and therefore a sentence
+ *  shape worth printing. Everything else has no grammar to imitate and gets the generic line. */
+const NEAR_MISS_GRAMMARS = new Set(["vcs_remote", "container_mutation", "network_send"])
+
+/**
+ * The sentence that WOULD have covered this, in the shape the grant extractor reads.
+ *
+ * Keyed on the first grammar-bearing segment of the pending category, because the category says what kind of
+ * object the target is (`vcs_remote` → a ref on a remote, `container_mutation`/`network_send` → an image) and
+ * nothing about the target's spelling does: `docs/x` looks exactly like `origin/x` and would be offered a
+ * sentence about branches. The shape is the one the grant extractor is shown in its own examples — "you can drop
+ * the sessions table", "you can write into /home/me/proj" — so the line is a sentence the extraction step reads,
+ * not prose about permissions.
+ *
+ * An image is offered WITHOUT its tag, because a tag is a version, and the thing a person means when they
+ * approve an image push is the repository. The tag stays visible in the attribution line above.
+ *
+ * A protected pending branch is offered the exact sentence ONLY. The `remote/*` wildcard means "every branch except
+ * protected", so "you can push any branch to `origin`" does not cover `main` — offering it would send the user to say a
+ * sentence that lands them in this same denial again, which is the one thing a lever line must not do. The wildcard
+ * alternative stays for every other branch, because there it really is the wider sentence.
+ */
+export function nearMissLever(category: string | undefined, targets: string[]): string | undefined {
+	const target = (targets[0] ?? "").trim()
+	if (!target) return undefined
+	const grammar = categorySegments(category ?? "").find((s) => NEAR_MISS_GRAMMARS.has(s))
+	if (grammar === "vcs_remote") {
+		const cut = target.indexOf("/")
+		const remote = target.slice(0, cut)
+		const branch = target.slice(cut + 1)
+		if (cut > 0 && remote && branch) {
+			const exact = `"you can push ${dataSpan(branch)} to ${dataSpan(remote)}"`
+			if (isProtectedBranch(branch)) return `lever: say ${exact}`
+			return `lever: say ${exact} or "you can push any branch to ${dataSpan(remote)}"`
+		}
+	} else if (grammar === "container_mutation" || grammar === "network_send") {
+		const image = target.includes(":") ? target.slice(0, target.lastIndexOf(":")) : target
+		if (image) return `lever: say "you can push images to ${dataSpan(image)}"`
+	}
+	return `lever: say the permission naming the exact target (${dataSpan(target)})`
 }
 
 /**
@@ -805,7 +918,14 @@ const DENIAL_GUIDANCE: Record<string, { mechanism: string; fix: string }> = {
 	network_listen: { mechanism: "this binds a port or opens a tunnel", fix: "stay on a project-local port and ask before exposing anything." },
 	process_control: { mechanism: "this stops or signals running processes", fix: "target one named process rather than a pattern." },
 	process_massacre: { mechanism: "this looks like a self-replicating function (fork bomb)", fix: "do not attempt variants." },
-	package_system: { mechanism: "this installs system packages", fix: "prefer a project-local install, and ask before touching the system." },
+	package_system: {
+		mechanism: "this installs system packages",
+		// The fix has to name the project-local shape that actually works, not just say "project-local".
+		// A venv is the common one, and the second half matters as much as the first: if pi was started from a
+		// shell WITHOUT the venv activated, no rewrite of the command finds it, so the agent needs to know the
+		// other route exists rather than retry variants of the same install.
+		fix: "prefer a project-local install — `.venv/bin/pip install …`, or start pi from the shell that has the virtualenv activated — and ask before touching the system.",
+	},
 	remote_exec: { mechanism: "this downloads and runs remote code", fix: "download first, read it, then run the local file." },
 	disk_destroy: { mechanism: "this targets disk or partition state", fix: "do not attempt variants; ask the user to run it." },
 	system_power: { mechanism: "this changes machine power state", fix: "ask the user to run it." },
@@ -1192,9 +1312,16 @@ export function buildPreciseDenial(opts: {
 	/** One line between the segments and the retry hint, for a fact the reader needs before deciding what to do
 	 *  — today that is the effect model's category being called what it is when the analyzer never finished. */
 	note?: string
+	/** The rows that sat near this target (`nearMissLines`), then the one sentence that would have
+	 *  covered it (`nearMissLever`). Both printed directly under the attribution, because they answer the same
+	 *  question the attribution asked — who could still say yes — and are display only, never authority. */
+	nearMiss?: string[]
+	nearMissLever?: string
 }): string {
 	const lines: string[] = [opts.head]
 	if (opts.attribution) lines.push(opts.attribution)
+	for (const line of opts.nearMiss ?? []) lines.push(line)
+	if (opts.nearMissLever) lines.push(opts.nearMissLever)
 	if (opts.lever) lines.push(opts.lever)
 	const shown = opts.segments.slice(0, 3)
 	for (const s of shown) {
@@ -1252,18 +1379,18 @@ export function gateDenialMessage(
 	// command nobody parsed. Say so, before the retry hint: left unsaid, the reader reads `write_outside` as a
 	// verdict about the target and goes looking for a rule to add.
 	const guessedCategory = wall === "analysis" && wallFor(r.category) === "authority" ? r.category : undefined
+	const pendingTargets = r.entities.filter((e) => e.kind === "target").map((e) => e.value)
 	// The whole-call category and targets come straight off the gate result — they have always been
 	// there, they were just never printed, which is why every denial read as one undifferentiated
 	// "not auto-approved".
-	const attribution = attributionLine({
-		ctx,
-		category: r.category,
-		targets: r.entities.filter((e) => e.kind === "target").map((e) => e.value),
-	})
+	const attribution = attributionLine({ ctx, category: r.category, targets: pendingTargets })
+	const nearMiss = nearMissLines(ctx)
 	return buildPreciseDenial({
 		head: headWithWall,
 		attribution,
 		lever: ledgerLever(ctx),
+		nearMiss,
+		nearMissLever: nearMiss.length ? nearMissLever(r.category, pendingTargets) : undefined,
 		note: guessedCategory
 			? `GUESS: \`${guessedCategory}\` is what the safety model called a command the analyzer could not verify — a guess about intent, not a verdict about the target. The blocker is the command's shape, so the FIX above is the step that clears it.`
 			: undefined,
@@ -1300,6 +1427,10 @@ export type GateDenialEvidence = {
 	userMessages?: number
 	/** The ledger the gate consulted; omit it when the gate ran without one. */
 	ledger?: Ledger
+	/** The session grant store the gate consulted (`gateGrants`). Absent means the caller did not pass the
+	 *  store, and then only the ledger is scanned for near misses — an absent store is never read as an empty
+	 *  one, because "nothing nearly fitted" and "nobody looked" are different answers. */
+	grants?: GrantStore
 	/** A person answered the dialog and chose Block. */
 	blockedByHuman?: boolean
 }
@@ -1375,8 +1506,24 @@ function answeredCall(r: GateResult, task: "grant" | "effect"): boolean {
 	return callsOf(r, task).some((c) => c.ok)
 }
 
-/** The last authority consulted for an ask-tier call: the model layer, if it was reached at all. */
+/** The last authority consulted for an ask-tier call: the model layer, if it was reached at all.
+ *
+ *  The near-miss block rides with THIS rung and no other. This is the rung whose sentence reads "decided by:
+ *  classifier" while a row the user already gave sits in one of the stores, i.e. the only rung where the
+ *  reader's lever is not the model at all. A person's click, a `never` floor, a named forbid and the read-only
+ *  posture each name their own author, and appending "here is what you could have said" to any of them would
+ *  argue with a decision somebody already made — so those rungs return before this function is reached.
+ */
 function authorityChannelAuthor(r: GateResult, e: GateDenialEvidence): GateDenialContext {
+	const ctx = modelChannelAuthor(r, e)
+	// Only an ask is a question nobody answered. `never` was handled by `neverDenialAuthor` before this ran;
+	// the guard is here so a future caller cannot reach this path with an allow-tier result.
+	if (r.tier !== "ask") return ctx
+	const nearMiss = nearMissRows(r, e)
+	return nearMiss.length ? { ...ctx, nearMiss } : ctx
+}
+
+function modelChannelAuthor(r: GateResult, e: GateDenialEvidence): GateDenialContext {
 	const calls = r.modelCalls ?? []
 	// A call that failed is a transport fact, recorded whether the task was grant or effect: there is no
 	// verdict, and the gate failed closed. This is the rung a user most needs to see — and it carries the
@@ -1406,6 +1553,192 @@ function authorityChannelAuthor(r: GateResult, e: GateDenialEvidence): GateDenia
 	// window, so the authorisation call was skipped.
 	if (e.endpoint === true && (e.userMessages ?? 0) > 0) return { decidedBy: "classifier", classifierWhy: "window-too-small" }
 	return {}
+}
+
+/** How many near-miss rows one denial shows. Three is what a person reads at a glance; the cap is applied
+ *  AFTER ranking, so what is dropped is the weakest kind of near miss, not an arbitrary tail. */
+const NEAR_MISS_MAX = 3
+
+/** A row as it was held, tagged with its store and reduced to the two orderings that exist: `seq` orders rows
+ *  inside one transcript, `at` is the wall clock two stores share. A session row has no `seq` — it was never a
+ *  message — so it sorts by `at` alone, and a ledger row written before revocations existed has no `at` and
+ *  reads as the oldest thing present, which is how the rest of this code base reads a missing clock. */
+type HeldRow = {
+	store: "ledger" | "session"
+	category: string
+	value: string
+	quote?: string
+	seq: number
+	at: number
+}
+
+/** Both stores, read as-is. No revocation logic is re-run here on purpose: these are the rows the gate had in
+ *  hand when it decided, which is the exact set a denial is allowed to name. */
+function heldRows(e: GateDenialEvidence): HeldRow[] {
+	const ledger = (e.ledger?.grants ?? []).map((g) => ({
+		store: "ledger" as const,
+		category: g.category,
+		value: g.value,
+		quote: g.quote,
+		seq: g.seq,
+		at: g.at ?? 0,
+	}))
+	const session = (e.grants?.grants ?? []).map((g) => ({
+		store: "session" as const,
+		category: g.category,
+		value: g.value,
+		seq: 0,
+		at: g.at,
+	}))
+	return [...ledger, ...session]
+}
+
+/**
+ * Does a row's value reach this target under the STRING rule? Exactly the gate's two coverage rules and no third
+ * one: the whole-token component matcher `entityMatchesTarget` (`feature/x` ≠ `feature/x-prod`), and for a value
+ * stored as a scope — one ending in "/" — the prefix rule over the same canonical path space `session-grants`
+ * uses. A bare `*` is in neither, and this rule is not where it is answered: {@link valueReachesUnderGrammar}
+ * decides a blanket `*` row to reach every target BEFORE consulting this, because that is what the gate's own
+ * coverage predicate does with it (`valueCovers` in `auth-ledger.ts`), and a row the call was allowed on is
+ * skipped as covering rather than shown as nearly reaching. The `*` guard below only keeps a blanket value from
+ * being read here as a component match — the rule has nothing to say about a value that names no target.
+ *
+ * This is the fallback {@link valueReachesUnderGrammar} uses for a segment the target grammar has nothing to say
+ * about — never the whole answer, because the value the gate itself writes for "every branch on this remote"
+ * (`origin/*`) is dead under this rule and alive under the grammar.
+ */
+function valueReachesTarget(value: string, target: string, space: PathSpace): boolean {
+	const v = value.trim()
+	if (!v || v === "*") return false
+	if (v.endsWith("/")) {
+		const scope = canonicalPath(v, space).toLowerCase()
+		const entity = canonicalPath(target, space).toLowerCase()
+		if (scope.endsWith("/")) return entity.startsWith(scope) || `${entity}/` === scope
+	}
+	return entityMatchesTarget(target, v, space.home, space.project)
+}
+
+/**
+ * Does a row's value reach this one pending target, decided the way the gate decides coverage — with the
+ * gate's own predicates, never a matcher of its own?
+ *
+ * For each pending category segment the target grammar answers FIRST — the same `coversByGrammar` call
+ * `auth-ledger.valueCovers` and `session-grants.grantsCover` make — and the string rule answers only when the
+ * grammar returns `undefined` (no grammar for that segment, or a side it cannot parse). A `false` from the
+ * grammar is an ANSWER and never falls through: that is what keeps `origin/*` from "reaching" `origin/main`
+ * (the `remote/*` wildcard stops at protected branches) and one tag of an image from reaching another tag. A compound
+ * pending asks each of its segments and takes any true, which is how `ledgerCovers` reads one.
+ *
+ * Why this matters for a DENIAL and not just for a verdict: near-miss lines claim what a row did not cover, and
+ * a row the gate would have allowed the call on is not a near miss — it is the authority the reader already has.
+ */
+function valueReachesUnderGrammar(value: string, target: string, pending: string[], space: PathSpace): boolean {
+	// A blanket `*` row reaches every target, under every category, and that is the gate's own answer and not a
+	// display choice: `valueCovers` in `auth-ledger.ts` returns true for a `*` value after the grammar, so a row
+	// stored as `*` really did authorise the call (`allow-granted`), and `sharesKindGroup` already reads `*` as
+	// compatible with everything. Printing `value "*" does not cover "…"` about such a row tells the reader they
+	// are missing an authority they hold — the same defect class a grammar-true row was, for the same reason.
+	if (value.trim() === "*") return true
+	return pending.some((segment) => {
+		const viaGrammar = coversByGrammar(segment, value, target)
+		return viaGrammar === undefined ? valueReachesTarget(value, target, space) : viaGrammar
+	})
+}
+
+/** Does the row sit in a kind group one of the pending effects is in? `*` shares every group because the ledger
+ *  itself treats it as compatible with everything (`compatible()` in `auth-ledger.ts`), so calling a blanket row
+ *  "the wrong category" would contradict the matcher. */
+function sharesKindGroup(rowCategory: string, pendingSegments: string[]): boolean {
+	if (rowCategory === "*") return true
+	const groups = new Set(categorySegments(rowCategory).map((c) => kindGroup(c)))
+	return pendingSegments.some((s) => groups.has(kindGroup(s)))
+}
+
+/** Split a compound category into its segments, as the gate wrote them: `write_outside+perm_change` names two
+ *  effects, and a near miss has to say which one its row was about. */
+function categorySegments(category: string): string[] {
+	return [...new Set(category.split("+").map((s) => s.trim()).filter(Boolean))]
+}
+
+/**
+ * The words that make a row read as being ABOUT this call: the first word of each segment command (`git`,
+ * `docker` — the verb a person would repeat) and every `/`-component of every pending target (`origin`,
+ * `feature/ABC123`).
+ *
+ * Each is tested with `targetNamedByUser` — the gate's own "did the user actually write this word" predicate —
+ * run over the row's own text instead of the transcript. Whole-token, so `dev` does not light up on `dev-logs`.
+ */
+function nearMissWords(r: GateResult, targets: string[]): string[] {
+	const words = new Set<string>()
+	for (const seg of r.policy?.segments ?? []) {
+		const verb = (seg.command ?? "").trim().split(/\s+/)[0] ?? ""
+		if (verb.length >= 2) words.add(verb)
+	}
+	for (const t of targets) {
+		for (const part of t.split("/")) if (part.trim().length >= 2) words.add(part.trim())
+	}
+	return [...words]
+}
+
+/**
+ * The rows that sat near this target, ranked by how much they tell the reader (DISPLAY ONLY: these
+ * entries name what to talk about, never what is allowed, and every one of them is a row the store held).
+ *
+ * Why this exists: the live denial said `decided by: classifier` for a push whose branch had a `vcs_remote` row
+ * in `/grants`, and "the model said no" sent the user to a classifier setting. The truth was the second half —
+ * the row is filed under a value the matcher cannot read — and nothing printed it.
+ *
+ * The three ranks, and why that order:
+ *  (a) the value reaches a pending target but the row is a different kind of action → the user already spoke
+ *      about THIS object; only the kind of permission was wrong, which is the shortest sentence to fix;
+ *  (b) same kind group, value reaches nothing → the object is wrong, so the value is quoted back as the thing
+ *      to widen;
+ *  (c) neither, and the row's own words name this command or one of this target's components → the weakest
+ *      claim, printed last, and only because a row about `docker` sitting next to a `docker push` is the one
+ *      remaining hint that the right sentence was never said. A row that both shares the kind group and reaches
+ *      the target is none of these — it COVERS, and is skipped.
+ *
+ * One entry per row (its best rank), rank (a) first, and inside a rank the newest row first — `at`, then `seq` —
+ * because the most recent sentence is the one the user is most likely to still mean.
+ */
+function nearMissRows(r: GateResult, e: GateDenialEvidence): DenialNearMiss[] {
+	const targets = r.entities.filter((x) => x.kind === "target").map((x) => x.value)
+	const pending = categorySegments(r.category)
+	if (targets.length === 0 || pending.length === 0) return []
+	const space: PathSpace = { home: e.policy.home, project: policyProject(e.policy) }
+	const words = nearMissWords(r, targets)
+	const hits: Array<{ rank: number; row: HeldRow; why: string }> = []
+	for (const row of heldRows(e)) {
+		const value = row.value.trim()
+		if (!value) continue
+		const reaches = targets.some((t) => valueReachesUnderGrammar(value, t, pending, space))
+		const sameKind = sharesKindGroup(row.category, pending)
+		// Same kind group AND the value reaches: this row covers the pending target, so the denial happened for
+		// some other reason (a floor, a forbid, a model verdict about something else) and this row is not a near
+		// miss. Printing one of the three lines about it would claim the reader lacks an authority they hold.
+		if (reaches && sameKind) continue
+		if (reaches && !sameKind) {
+			hits.push({
+				rank: 0,
+				row,
+				why: `category differs: row is ${dataText(row.category)}, this action is ${dataText(r.category)}`,
+			})
+			continue
+		}
+		if (!reaches && sameKind) {
+			const uncovered = targets.find((t) => !valueReachesUnderGrammar(value, t, pending, space)) ?? targets[0]!
+			hits.push({ rank: 1, row, why: `value "${dataText(value)}" does not cover "${dataText(uncovered)}"` })
+			continue
+		}
+		// A session row stores no sentence, so its value is the only words it has.
+		const said = row.quote ?? value
+		const mentioned = words.find((w) => targetNamedByUser(w, [said]))
+		if (mentioned) hits.push({ rank: 2, row, why: `mentions "${dataText(mentioned)}" but names a different target` })
+	}
+	return hits
+		.sort((a, b) => a.rank - b.rank || b.row.at - a.row.at || b.row.seq - a.row.seq)
+		.slice(0, NEAR_MISS_MAX)
+		.map(({ row, why }) => ({ store: row.store, category: row.category, value: row.value, quote: row.quote, why }))
 }
 
 /**

@@ -34,6 +34,13 @@ for (const key of Object.keys(process.env)) {
 	}
 }
 
+// Two ambient variables layer 0 now reads through `PolicyOptions.env` (`pipInVenv`): with a
+// virtualenv or conda env active in the shell that runs the suite, `pip install x` is no longer
+// `package_system`, and any test of that verdict would pass or fail by where it was run from. Baseline
+// both to "no environment active"; a test that needs one sets it inline (`withEnv` / `env:`).
+delete process.env.VIRTUAL_ENV;
+delete process.env.CONDA_PREFIX;
+
 // Layer 0 parses with tree-sitter-bash, whose grammar is loaded once per process (index.ts does it
 // at load time). Without this every parse in the suite would be refused `parser-unavailable`.
 const { initBashParser } = await import("./bash-parser.ts");

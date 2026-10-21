@@ -71,6 +71,8 @@ export type PolicyOptions = {
 	project?: string
 	home?: string
 	env?: Record<string, string | undefined>
+	/** Current git branch of the session (pi's sessionManager.getGitBranch), so a bare `git push` names its target. */
+	gitBranch?: string
 	/** Filesystem probes (package.json scripts, node_modules/.bin) — disable in tests. */
 	fs?: boolean
 	/** Recursion guard. */

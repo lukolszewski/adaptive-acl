@@ -25,6 +25,8 @@
  */
 
 import type { Entity } from "./risk-policy.ts"
+import type { ImageRef } from "./target-grammar.ts"
+import { coversByGrammar, grammarFor, namedByUserStructurally, parseImageRef, parseVcsTarget } from "./target-grammar.ts"
 import {
 	BARE_VERB_CATEGORIES,
 	METHOD_VERB_REQUIRED,
@@ -65,6 +67,12 @@ export type LedgerEntry = {
 	/** Precedence/value the row had in its source session, kept for audit. */
 	sourceSeq?: number
 	sourceMessageId?: string
+	/** The category the model named, kept when it is NOT the one the row was stored under.
+	 *  The cross-check overrode it — the noun in the user's sentence outranked the verb the model
+	 *  generalised from — and this is the audit trail of that override, for `/grants` and for a future
+	 *  denial line. Nothing in the matcher reads it: a category the code overrode is by definition not
+	 *  authority, so a row must never gain reach because of what the model guessed. */
+	modelCategory?: string
 	lastMatchedAt?: number
 	/** Wall-clock ms of the moment this session last heard the sentence that earned
 	 *  the row. `seq` orders rows inside ONE transcript and means nothing across
@@ -118,6 +126,8 @@ export type ExtractedEvent = {
 	seq: number
 	/** See LedgerEntry.includesSecrets. */
 	includesSecrets?: boolean
+	/** See LedgerEntry.modelCategory. Set only when it differs from `category`. */
+	modelCategory?: string
 }
 
 /** A "user" message the transcript tool wrote on the user's behalf, not words the user typed.
@@ -159,8 +169,8 @@ export function readOnlyLiftedByGrant(
 		ledger.grants.some(
 			(g) =>
 				g.seq > roSeq &&
-				valueCovers(g, t, home, project) &&
-				grantMatchesPending(g, primary, t, home, project) &&
+				valueCovers(g, t, home, project, primary) &&
+				grantMatchesPending(g, primary, category, t, home, project) &&
 				(!needDeleteVerb || DELETE_VERB_RE.test(g.quote)),
 		)
 	)
@@ -203,23 +213,25 @@ const FS_WRITE_CATEGORIES = new Set(["write_outside", "write_project", "write_se
  *  one file is not permission for a whole tree. */
 function grantMatchesPending(
 	g: LedgerEntry,
-	primary: string,
+	segment: string,
+	/** The WHOLE pending category, needed to tell a publish compound from a plain send. */
+	pendingCategory: string,
 	target: string,
 	home?: string,
 	project?: string,
 ): boolean {
-	if (grantAuthorises(g, primary)) return true
+	if (grantAuthorises(g, segment, pendingCategory)) return true
 	if (
 		g.kind === "entity" &&
 		g.value !== "*" &&
 		FS_MUTATION_CATEGORIES.has(g.category) &&
-		FS_MUTATION_CATEGORIES.has(primary) &&
+		FS_MUTATION_CATEGORIES.has(segment) &&
 		// Privilege stays out of the naming-a-file widening. It exists to fix a group mismatch on
 		// CONTENT mutation ("write to /usr/bin/foo" extracting as write_outside while the write
 		// classifies as write_sensitive); it never meant "and you may chmod it".
 		!PRIVILEGE_CATEGORIES.has(g.category) &&
-		!PRIVILEGE_CATEGORIES.has(primary) &&
-		valueCovers(g, target, home, project)
+		!PRIVILEGE_CATEGORIES.has(segment) &&
+		valueCovers(g, target, home, project, segment)
 	)
 		return true
 	// WRITE IMPLIES READ. A file you may not open is not a file you may edit: "you can write
@@ -229,7 +241,7 @@ function grantMatchesPending(
 	// this list, and neither is anything delete-shaped: credentials stay behind their own
 	// gate no matter what was written into the folder. Pinning both refusals is the point of
 	// the matrix in directed-permissions.test.ts.
-	if (primary === "read_only" && FS_WRITE_CATEGORIES.has(g.category) && valueCovers(g, target, home, project)) {
+	if (segment === "read_only" && FS_WRITE_CATEGORIES.has(g.category) && valueCovers(g, target, home, project, segment)) {
 		return true
 	}
 	return false
@@ -270,6 +282,10 @@ export const extractionStats = {
 	 *  things: a grant that cannot come back is a permission the user took away, a forbid that
 	 *  cannot come back is a ban the user cancelled. Summed into one counter, neither is legible. */
 	forbidRevocationsBlocked: 0,
+	/** Answers the deterministic noun map overrode. Without this the override is invisible:
+	 *  the stored category looks like the model's own answer, and "the endpoint keeps calling a
+	 *  docker push a git push" is only visible as a grant that never fires. */
+	crossChecked: 0,
 }
 
 export function resetExtractionStats(): void {
@@ -282,6 +298,7 @@ export function resetExtractionStats(): void {
 	extractionStats.secretInclusions = 0
 	extractionStats.revocationBlocked = 0
 	extractionStats.forbidRevocationsBlocked = 0
+	extractionStats.crossChecked = 0
 }
 
 export function createLedger(): Ledger {
@@ -383,10 +400,14 @@ const PRIVILEGE_CATEGORIES = new Set([
  * of letting an unrelated category in through the same door. The coarse group is gone, so the
  * compound has to say so itself; that path is why the per-segment fix in session-grants.ts had to
  * land first.
+ *
+ * `pendingCategory` is the WHOLE pending category, not the segment being answered. One rule needs
+ * it — the publish bridge — and it needs it precisely because that rule turns on which COMPOUND the
+ * segment belongs to, which a segment alone cannot say.
  */
-function grantAuthorises(g: LedgerEntry, pendingCategory: string): boolean {
+function grantAuthorises(g: LedgerEntry, segment: string, pendingCategory: string): boolean {
 	if (g.category === "*") return true
-	const pending = kindGroup(pendingCategory)
+	const pending = kindGroup(segment)
 	const segments = new Set(g.category.split("+").map((s) => kindGroup(s)))
 	if (segments.has(pending)) return true
 	// One-way, by name: a delete grant over a folder already permits destroying every byte inside
@@ -397,10 +418,33 @@ function grantAuthorises(g: LedgerEntry, pendingCategory: string): boolean {
 	// ledgerCovers arms the same verb gate for every delete-shaped pending, so this only ever
 	// narrows relative to the old grouping.
 	if (pending === "fs-delete" && segments.has("fs-write") && DELETE_VERB_RE.test(g.quote)) return true
+	// One-way, by name: publishing an artifact IS a send — `docker push myrepo/app` cannot
+	// happen without uploading it — so an image/container row whose OWN words named the publish
+	// authorises the send half of the publish compound. That half was otherwise unreachable: layer 0
+	// files an artifact push as `container_mutation+network_send`, while the sentence that granted it
+	// can only ever name the artifact.
+	//
+	// Three bounds, and each of them carries weight: the pending must actually HAVE a
+	// container_mutation segment, so a plain `network_send https://x` is never reached — a push to a
+	// registry and a curl to a URL are different authorities, which is why the two groups were split
+	// and this must not undo that; the row must sit in the cluster group; and the row's own verified
+	// quote must carry the publish verb, not merely name an artifact.
+	if (
+		segment === "network_send" &&
+		categorySegments(pendingCategory).includes("container_mutation") &&
+		segments.has("cluster") &&
+		PUBLISH_VERB_RE.test(g.quote)
+	)
+		return true
 	return false
 }
 
 const DELETE_CATEGORIES = new Set(["delete_recursive", "delete_outside", "delete_data"])
+
+/** The verbs that make "this artifact leaves the machine" the thing the user agreed to. Matched
+ *  against the user's own verified words, like DELETE_VERB_RE: recognising "push" in a quote about
+ *  an image grants nothing nobody asked for, because the row's value still has to cover the entity. */
+const PUBLISH_VERB_RE = /\b(push|publish|upload|release)\b/i
 
 /** Categories whose pending action READS, and nothing else. Two uses, both about keeping a read
  *  from standing in for a mutation: a derived forbid that names only these must not bind an action
@@ -666,6 +710,9 @@ export function applyEvent(ledger: Ledger, ev: ExtractedEvent): void {
 				messageId: ev.messageId,
 				seq: ev.seq,
 				includesSecrets: ev.includesSecrets,
+				// Re-derived from a newer sentence, so the newer sentence's audit label wins — including
+				// when it has none, for the same reason `includesSecrets` is not inherited.
+				modelCategory: ev.modelCategory,
 				// Re-earned, so re-dated: `at` answers "when did this row last come from the
 				// user's own mouth", which is what a revocation is measured against.
 				at: Date.now(),
@@ -685,6 +732,7 @@ export function applyEvent(ledger: Ledger, ev: ExtractedEvent): void {
 		messageId: ev.messageId,
 		seq: ev.seq,
 		includesSecrets: ev.includesSecrets,
+		modelCategory: ev.modelCategory,
 		at: Date.now(),
 	})
 	enforceCaps(ledger)
@@ -717,7 +765,39 @@ function enforceCaps(ledger: Ledger): void {
 
 // ---------------------------------------------------------------- matching
 
-function valueCovers(entry: LedgerEntry, target: string, home?: string, project?: string): boolean {
+/** First segment of a possibly-compound category — the segment a grammar is picked from. */
+function primarySegment(category: string): string {
+	return category.split("+")[0]?.trim() ?? category
+}
+
+/**
+ * Does a stored row's value reach this pending target?
+ *
+ * Publish targets are answered by the grammar FIRST (docs/CLASSIFIER-SPEC.md §3), because the value the gate itself
+ * writes for "every branch on this remote" — `origin/*`, the scope entity from `risk-handlers.ts`
+ * — was dead under the string rule: it covered nothing, including the push that produced it. The
+ * grammar is chosen by CATEGORY (`target-grammar.ts`), never by what the string looks like, so a
+ * path `docs/x` cannot become a branch and prose cannot become whatever it resembles.
+ *
+ * `segment` is the pending category segment this row is being tested under, which is what lets one
+ * compound row (`container_mutation+network_send`) be read with the image grammar on both of its
+ * halves. Without it a row falls back to its own first segment, which is the same answer for every
+ * row written before compound rows existed.
+ *
+ * `undefined` from the grammar means "no grammar for this category" or "one side is not a target
+ * this grammar can read", and the row is then judged by exactly the rule it was judged by before —
+ * a trailing-`/` scope prefix, then the component-run matcher. That fallback is what keeps this a
+ * widening of publish targets only: fs, secret, privilege and system paths never reach it.
+ */
+function valueCovers(
+	entry: LedgerEntry,
+	target: string,
+	home?: string,
+	project?: string,
+	segment?: string,
+): boolean {
+	const viaGrammar = coversByGrammar(primarySegment(segment ?? entry.category), entry.value, target)
+	if (viaGrammar !== undefined) return viaGrammar
 	if (entry.value === "*") return true
 	if (entry.kind === "scope") {
 		// Canonicalise BOTH sides into ONE path space before comparing. Two renderings have to be
@@ -771,20 +851,65 @@ export function namedForbidCovers(
 	// exactly that — requirements that only ever add a check — and a caller that passes nothing keeps
 	// every ban.
 	const skipReadForbids = typeof pendingCategory === "string" && !compoundHas(pendingCategory, READ_CATEGORIES)
+	// The SAME value rule the ledger rung uses, per pending segment, so a ban written in the gate's
+	// own scope spelling (`origin/*`) binds every branch on origin. A compound is tested under each of
+	// its segments and binds if any reading reaches it: for a forbid, guessing wide costs one extra
+	// prompt, guessing narrow obeys a sentence the user actually said.
+	const segments = pendingCategory === undefined ? [] : categorySegments(pendingCategory)
+	const reaches = (row: LedgerEntry, value: string): boolean =>
+		segments.length === 0
+			? valueCovers(row, value, home, project)
+			: segments.some((seg) => valueCovers(row, value, home, project, seg))
 	const values = entities.filter((e) => e.kind === "target" || e.kind === "path").map((e) => e.value)
 	for (const v of values) {
 		let best: LedgerEntry | null = null
 		for (const f of ledger.forbids) {
 			if (f.value === "*") continue
 			if (skipReadForbids && READ_CATEGORIES.has(f.category)) continue
-			if (!valueCovers(f, v, home, project)) continue
+			if (!reaches(f, v)) continue
 			if (!best || f.seq > best.seq) best = f
 		}
 		if (!best) continue
-		const lifted = ledger.grants.some((g) => g.seq > best!.seq && valueCovers(g, v, home, project))
+		const lifted = ledger.grants.some((g) => g.seq > best!.seq && reaches(g, v))
 		if (!lifted) return { entity: v, entry: best }
 	}
 	return null
+}
+
+/** The distinct category segments of a possibly-compound category, in the order written. */
+function categorySegments(category: string): string[] {
+	return [...new Set(category.split("+").map((s) => s.trim()).filter(Boolean))]
+}
+
+/** The highest seq among the forbids that bind this target under this pending segment, or -1. */
+function forbidSeqFor(
+	ledger: Ledger,
+	segment: string,
+	target: string,
+	home?: string,
+	project?: string,
+): number {
+	return ledger.forbids
+		.filter((f) => forbidCompatible(f.category, segment) && valueCovers(f, target, home, project, segment))
+		.reduce((m, f) => Math.max(m, f.seq), -1)
+}
+
+/** Does the row fail the verb gate this lookup arms?
+ *
+ *  Two gates, both about the USER's own words rather than the model's:
+ *  - METHOD_VERB_REQUIRED belongs to the SEGMENT, because naming the entity is not approving the
+ *    method, and "install" is the verb for the install segment only.
+ *  - the delete gate belongs to the WHOLE pending (`compoundHas`, unchanged from before compound
+ *    matching): if any effect destroys, every row behind this decision has to be a sentence about
+ *    destroying. Answering the write half with a sentence that never mentioned destruction and the
+ *    delete half with one that did would be a different decision than the one the user made, and
+ *    stricter is the direction a verb gate exists to face.
+ */
+function verbGateMissing(segment: string, pendingCategory: string, g: LedgerEntry): boolean {
+	const needVerb = METHOD_VERB_REQUIRED.has(segment) ? BARE_VERB_CATEGORIES[segment] : undefined
+	if (needVerb && !needVerb.test(g.quote)) return true
+	if (compoundHas(pendingCategory, DELETE_CATEGORIES) && !DELETE_VERB_RE.test(g.quote)) return true
+	return false
 }
 
 export type LedgerVerdict = {
@@ -797,10 +922,25 @@ export type LedgerVerdict = {
 }
 
 /**
- * All target entities of the pending action must be covered by grant entries of
- * a compatible kind group, each with seq above any matching forbid. Verb gates:
- * METHOD_VERB_REQUIRED categories and (via kind-group widening) deletes require
- * the grant quote to carry the action verb.
+ * EVERY effect of the pending action needs its own row, over every target — the same rule
+ * `grantsCover` already applies to session grants, and for the same reason.
+ *
+ * Reading `category.split("+")[0]` as "the" category made a compound's second effect free:
+ * pending `vcs_local+vcs_remote` with a stored `vcs_remote feature/X` row reported "no matching
+ * ledger entry", so the push re-prompted forever in a reported session, while the same shortcut in
+ * the other direction once let a stored content grant stand in for a privilege change. Per
+ * segment, a compound can only be covered by authority for each of its halves; a single-segment
+ * pending takes exactly the path it always took.
+ *
+ * Per segment also means per-segment matching: each segment needs its own row, its own
+ * METHOD_VERB_REQUIRED verb, and its own grammar — `valueCovers` is handed the segment so one
+ * compound row is read with the same grammar on both of its halves. The delete-verb gate stays
+ * category-wide (`compoundHas`, as before): if any effect destroys, every row behind the decision
+ * has to be a sentence about destroying.
+ *
+ * Verb gates and seq precedence are unchanged: METHOD_VERB_REQUIRED categories and (via
+ * kind-group widening) deletes require the grant quote to carry the action verb, and a matching
+ * forbid with a higher seq outrules the grant.
  */
 export function ledgerCovers(
 	ledger: Ledger,
@@ -809,41 +949,115 @@ export function ledgerCovers(
 	home?: string,
 	project?: string,
 ): LedgerVerdict {
-	const primary = category.split("+")[0] ?? category
+	const segments = categorySegments(category)
 	const targets = entities.filter((e) => e.kind === "target").map((e) => e.value)
 	const no: LedgerVerdict = { covered: false, forbidden: false, by: [], reason: "no matching ledger entry" }
-	if (targets.length === 0) return no
-
-	const needVerb = METHOD_VERB_REQUIRED.has(primary) ? BARE_VERB_CATEGORIES[primary] : undefined
-	// ANY delete segment arms the verb gate. Order of `category` segments is
-	// composition order, so keying this off `primary` let `write_outside+delete_*`
-	// skip the delete requirement while `delete_*+write_outside` enforced it.
-	const needDeleteVerb = compoundHas(category, DELETE_CATEGORIES)
+	if (targets.length === 0 || segments.length === 0) return no
 
 	const by: LedgerVerdict["by"] = []
-	for (const t of targets) {
-		const forbidSeq = ledger.forbids
-			.filter((f) => forbidCompatible(f.category, primary) && valueCovers(f, t, home, project))
-			.reduce((m, f) => Math.max(m, f.seq), -1)
-		const grant = ledger.grants.find((g) =>
-			grantMatchesPending(g, primary, t, home, project) &&
-			valueCovers(g, t, home, project) &&
-			g.seq > forbidSeq &&
-			(!needVerb || needVerb.test(g.quote)) &&
-			(!needDeleteVerb || DELETE_VERB_RE.test(g.quote)),
-		)
-		if (!grant) {
-			if (forbidSeq >= 0) {
-				const f = ledger.forbids.find((x) => x.seq === forbidSeq && forbidCompatible(x.category, primary) && valueCovers(x, t, home))
-				return { covered: false, forbidden: true, by: [], reason: `user forbade "${t}" ("${(f?.quote ?? "").slice(0, 80)}")` }
+	for (const segment of segments) {
+		// Each gate belongs to the segment that arms it, so segment ORDER can no longer decide
+		// whether a check runs at all — the bug `compoundHas` was introduced to fix, now applied
+		// per segment instead of to the whole pending.
+		for (const t of targets) {
+			const forbidSeq = forbidSeqFor(ledger, segment, t, home, project)
+			const grant = ledger.grants.find((g) =>
+				grantMatchesPending(g, segment, category, t, home, project) &&
+				valueCovers(g, t, home, project, segment) &&
+				g.seq > forbidSeq &&
+				!verbGateMissing(segment, category, g),
+			)
+			if (!grant) {
+				if (forbidSeq >= 0) {
+					const f = ledger.forbids.find(
+						(x) => x.seq === forbidSeq && forbidCompatible(x.category, segment) && valueCovers(x, t, home, project, segment),
+					)
+					return { covered: false, forbidden: true, by: [], reason: `user forbade "${t}" ("${(f?.quote ?? "").slice(0, 80)}")` }
+				}
+				return no
 			}
-			return no
+			by.push({ entity: t, entry: grant })
 		}
-		by.push({ entity: t, entry: grant })
 	}
 	const now = Date.now()
 	for (const m of by) m.entry.lastMatchedAt = now
 	return { covered: true, forbidden: false, by, reason: `ledger: ${by.map((m) => `${m.entity}←"${m.entry.value}"`).join(", ")}` }
+}
+
+/**
+ * Why the ledger answered the way it did, one line per candidate row. Pure: unlike
+ * {@link ledgerCovers} it touches nothing (no `lastMatchedAt`, no promotion to a session grant), so
+ * it is safe to call from a read-only command on a ledger the gate is using.
+ *
+ * This exists because "decided by: classifier" was the only thing a user got for a grant that was
+ * sitting right there under a value that did not quite match. Every line is produced by the SAME
+ * predicates the gate uses — `grantAuthorises`, `valueCovers`, the per-segment verb gate, seq
+ * precedence — so the explanation cannot promise coverage the gate would not give: the verdicts here
+ * are computed from the row and the pending action, never asserted.
+ *
+ * A candidate is any grant row that is about this pending at all: same kind group under some segment,
+ * or a value that reaches some target under some segment. The second half of that test is what puts
+ * `vcs_remote docker` on the page for a `container_mutation+network_send` push, which is the row the
+ * user needs to see when they are told the push is not authorised.
+ *
+ * Reasons, in the order the gate reaches them: `group` (the row's category does not authorise any
+ * segment of this pending), `value` (it authorises a segment but does not reach this target), `verb`
+ * (it reaches, but the user's own words never named the method the segment requires), `forbid seq n`
+ * (a ban outranks it), and per segment `segment X uncovered` for the effects no row reached at all.
+ */
+export function explainLedgerCover(
+	ledger: Ledger,
+	category: string,
+	entities: Entity[],
+	home?: string,
+	project?: string,
+): string[] {
+	const segments = categorySegments(category)
+	const targets = entities.filter((e) => e.kind === "target").map((e) => e.value)
+	const lines = new Set<string>()
+	if (segments.length === 0 || targets.length === 0) return []
+
+	const label = (g: LedgerEntry): string => `row ${g.category} "${g.value}" seq ${g.seq}`
+	const candidates = ledger.grants.filter(
+		(g) =>
+			segments.some((seg) => grantAuthorises(g, seg, category)) ||
+			targets.some((t) => segments.some((seg) => valueCovers(g, t, home, project, seg))),
+	)
+
+	const covered = new Map<string, Set<string>>(segments.map((seg) => [seg, new Set<string>()]))
+	for (const target of targets) {
+		for (const g of candidates) {
+			const fitting = segments.filter((seg) => grantAuthorises(g, seg, category))
+			if (fitting.length === 0) {
+				lines.add(`${label(g)}: rejected: group`)
+				continue
+			}
+			const reaching = fitting.filter((seg) => valueCovers(g, target, home, project, seg))
+			if (reaching.length === 0) {
+				lines.add(`${label(g)}: rejected: value`)
+				continue
+			}
+			const spoken = reaching.filter((seg) => !verbGateMissing(seg, category, g))
+			if (spoken.length === 0) {
+				lines.add(`${label(g)}: rejected: verb`)
+				continue
+			}
+			const blockers = spoken.map((seg) => forbidSeqFor(ledger, seg, target, home, project))
+			const allowed = spoken.filter((_, i) => g.seq > blockers[i]!)
+			if (allowed.length === 0) {
+				lines.add(`${label(g)}: rejected: forbid seq ${Math.max(...blockers)}`)
+				continue
+			}
+			lines.add(`${label(g)}: covers ${target}`)
+			for (const seg of allowed) covered.get(seg)!.add(target)
+		}
+	}
+
+	for (const seg of segments) {
+		const missing = targets.filter((t) => !covered.get(seg)!.has(t))
+		if (missing.length > 0) lines.add(`segment ${seg} uncovered: ${missing.join(", ")}`)
+	}
+	return [...lines]
 }
 
 // ---------------------------------------------------------------- extraction → events
@@ -1011,6 +1225,183 @@ function singleRowShape(value: string): { value: string; kind: "entity" | "scope
 	return { value: `${bare}/`, kind: "scope" }
 }
 
+// ---------------------------------------------------------------- publish targets
+
+/**
+ * The first three `ACTION_MAP` rows: they match a NOUN — kubectl, docker, psql — the thing the
+ * sentence acted ON. The rows below them match VERBS, and a verb is exactly what a model generalises
+ * a category from when it has not read the object: measured, the answer to `docker push` came back
+ * `vcs_remote`, and the code accepted it, because a schema enum short-circuited the word list that
+ * held the right answer one row earlier.
+ *
+ * Derived from the table instead of written out, so reordering `ACTION_MAP` cannot silently change
+ * which rows count as nouns.
+ */
+const NOUN_MAP_CATEGORIES: ReadonlySet<string> = new Set(ACTION_MAP.slice(0, 3).map(([, cat]) => cat))
+
+/** Nouns that name a publishable artifact. Their publish sentence has TWO effects — a mutation and a
+ *  send — because pushing an image is a mutation of the artifact and a send off the machine at once. */
+const PUBLISHABLE_NOUNS = new Set(["container_mutation", "cluster_mutation"])
+
+/**
+ * Cross-check the model's category against the deterministic noun map.
+ *
+ * The noun wins the capability half: "docker push" is about a container whatever the enum said, and
+ * `vcs_remote` means a GIT remote — filing an image push there is what made the grant unreachable
+ * from any wording.
+ *
+ * The second half of the compound is the EFFECT the verb names, never the model's label, and that is
+ * a safety bound rather than taste: `container_mutation+vcs_remote` carrying the category-wide `*`
+ * would authorise every push to every remote off the back of a sentence about docker — the exact
+ * false allow the one-way bridge above exists to prevent. So a publish verb over a publishable noun becomes
+ * `+network_send`, which is the half layer 0 itself files the command under, and any other
+ * disagreement keeps the noun alone with the model's answer preserved on the row as `modelCategory`
+ * (audited now, never treated as authority).
+ */
+function crossCheckCategory(
+	fromSchema: string | undefined,
+	action: string,
+	evidence: string,
+): { category: string; modelCategory: string } | undefined {
+	if (!fromSchema) return undefined
+	const det = mapActionToCategory(action)
+	if (!det || !NOUN_MAP_CATEGORIES.has(det)) return undefined // a verb row: nothing to override the model with
+	if (kindGroup(det) === kindGroup(fromSchema)) return undefined // they agree, so there is nothing to record
+	const effect = PUBLISHABLE_NOUNS.has(det) && PUBLISH_VERB_RE.test(evidence) ? "network_send" : undefined
+	return { category: effect ? `${det}+${effect}` : det, modelCategory: fromSchema }
+}
+
+/** Split the verified quote into candidate target tokens. `:` and `@` survive: `HEAD:refs/heads/x` and
+ *  `myrepo/app:1.0@sha256:…` are each ONE token. */
+const TOKEN_SPLIT_RE = /[\s,;!?()\[\]{}<>"'`]+/
+
+/** `any branch`, `all the tags`, `every image` — a quantifier within three words of the kind-word. */
+const QUANTIFIER_RE = /\b(?:any|all|every)(?:\s+[\w'-]+){0,3}\s+(?:branch(?:es)?|tags?|images?)\b/i
+// Written as `branch(?:es)?`, not `branches?`: the latter reads as "branche" + optional "s" and
+// matches no plural in English. It silently matched nothing at all until a test said so — the regex
+// version of the dead row this task is about, and the reason the quantifier rules are tested with
+// the singular AND the plural kind-word.
+
+/** The tools a user names when they meant the command rather than a target. */
+const TOOL_NAME_WORDS = new Set(["docker", "podman", "nerdctl", "git", "gh", "helm", "kubectl", "pip", "npm"])
+
+/** Words that PARSE as a one-component ref without being names: verbs, kind-words, tools. Storing one
+ *  is the dead-row bug in a new costume (`vcs_remote push` covers nothing and hides the fact that the
+ *  sentence named no ref), so they are evidence for the rules below and never a value. */
+const NOT_A_TARGET_NAME = new Set([
+	...GENERIC_KIND_TARGETS,
+	...TOOL_NAME_WORDS,
+	// The vocabulary of this specific permission, which `GENERIC_KIND_TARGETS` predates: `tag` is not
+	// in that list (no one was granting tags yet), and a bare kind-word parses as a repo named "tag".
+	"tag", "tags", "ref", "refs", "branch", "branches", "remote", "repository", "registry",
+	"push", "publish", "upload", "release", "pull", "pr", "request", "head", "workflow", "job", "runner",
+])
+
+/**
+ * A token that names WHERE rather than WHAT: a conventional remote or a bare host.
+ *
+ * `target-grammar` can read `origin` as "every branch on origin" because it has the pending target's
+ * remote to compare against; here there is no pending, so a token of this shape is always the remote
+ * half of a value and never a branch called `origin`.
+ */
+function remoteOrHostLike(token: string): boolean {
+	if (token.includes("/")) return false
+	return /^(?:origin|upstream)$/i.test(token) || /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?::\d+)?$/i.test(token)
+}
+
+/** A URL is a real `network_send` target that the image grammar refuses on purpose (a URL is
+ *  neither a ref nor an image). Keeping the string is not a guess — it is what the fallback matcher
+ *  in `valueCovers` will be compared against anyway. */
+const URL_TOKEN_RE = /^[a-z][a-z0-9+.-]*:\/\/\S+$/i
+
+function quoteTokens(text: string): string[] {
+	return text
+		.split(TOKEN_SPLIT_RE)
+		.map((t) => t.replace(/^["'`]+/, "").replace(/[.,;:!?"'`]+$/g, ""))
+		.filter(Boolean)
+}
+
+function allToolNames(targets: string[]): boolean {
+	return targets.length > 0 && targets.every((t) => TOOL_NAME_WORDS.has(t.trim().toLowerCase()))
+}
+
+function imageSpelling(ref: ImageRef): string {
+	const name = [ref.registry, ref.repo].filter((p): p is string => p !== undefined && p !== "").join("/")
+	return `${name}${ref.tag ? `:${ref.tag}` : ""}${ref.digest ? `@${ref.digest}` : ""}`
+}
+
+/** Rule (i): one candidate token → the gate's own spelling, or nothing to store. */
+function targetFromToken(grammar: "vcs" | "image", token: string, tokens: string[]): string | undefined {
+	if (token.length < 2 || NOT_A_TARGET_NAME.has(token.toLowerCase())) return undefined
+	if (grammar === "vcs") {
+		if (remoteOrHostLike(token)) return undefined
+		const ref = parseVcsTarget(token)
+		if (!ref || ref.branch === undefined) return undefined
+		// A branch named in the same breath as its remote is stored the way the gate emits it
+		// (`remote/branch`), which is also the spelling that covers a `--mirror`-style target.
+		const remote = ref.remote ?? tokens.find((t) => t !== token && remoteOrHostLike(t))
+		return remote ? `${remote}/${ref.branch}` : ref.branch
+	}
+	if (URL_TOKEN_RE.test(token)) return token
+	const ref = parseImageRef(token)
+	// A registry alone (`ghcr.io`) names no artifact: that is rule (ii)'s answer, not this one.
+	if (!ref || ref.repo === undefined) return undefined
+	return imageSpelling(ref)
+}
+
+/**
+ * Turn the targets of one extraction into values the matcher can actually use, or into NO row.
+ *
+ * Tried in order, first answer wins:
+ *  (i)   a ref-shaped token in the verified quote → the parsed value, in the gate's own spelling;
+ *  (ii)  a quantifier ("any branch") together with a remote or registry named in the quote →
+ *        `origin/*` / `ghcr.io`, which is the value the prompt's broader-scope button writes;
+ *  (iii) a quantifier with no place attached, or targets that are only tool names, plus the publish
+ *        verb in the quote → the category-wide `*`: literally what "you may run docker push" says;
+ *  (iv)  nothing else. Prose ("the new branch", "any branch" as a bare object) is NEVER stored,
+ *        because a row that can never match anything is worse than no row — it shows up in `/grants`
+ *        as authority the gate does not have. The verified quote still reaches the grant-model
+ *        call unchanged, so the sentence is not lost, only not laundered into a matcher value.
+ *
+ * Every value must also pass `namedByUserStructurally` against the message, which replaces
+ * `targetNamedByUser` on this path: the anti-hallucination bound is unchanged (the user's own words
+ * must name every component the row names), but it is now structural, so `origin/*` can be stored
+ * from "any branch on origin" — under the whole-token rule that value could never be stored at all.
+ */
+function normaliseTargets(category: string, targets: string[], quote: string, messageText: string): string[] {
+	const segment = primarySegment(category)
+	const grammar = grammarFor(segment)
+	if (grammar === undefined) return []
+	const tokens = quoteTokens(quote)
+	const named = (value: string): boolean => namedByUserStructurally(segment, value, messageText) === true
+
+	// Candidates: the model's targets, plus anything in the verified quote shaped like a ref. Quote-only
+	// tokens are allowed because the quote has already been matched into the message word for word, and
+	// every value still has to pass the structural check below before it is stored.
+	const candidates = new Set<string>()
+	for (const t of targets) candidates.add(t.trim())
+	for (const t of tokens) if (t.includes("/") || t.includes(":")) candidates.add(t)
+
+	const specific: string[] = []
+	for (const token of candidates) {
+		const value = targetFromToken(grammar, token, tokens)
+		if (value !== undefined && named(value) && !specific.includes(value)) specific.push(value)
+	}
+	if (specific.length > 0) return specific
+
+	const quantified = QUANTIFIER_RE.test(quote)
+	const place = tokens.find(remoteOrHostLike)
+	if (quantified && place !== undefined) {
+		const value = grammar === "vcs" ? `${place}/*` : place
+		if (named(value)) return [value]
+	}
+	// `*` is the widest value a row can hold, so it needs the verb: "any branch" without a push is a
+	// noun phrase, not a permission, and tool names alone are only authority when the publish verb is
+	// the thing the user was talking about.
+	if (PUBLISH_VERB_RE.test(quote) && (quantified || allToolNames(targets))) return ["*"]
+	return []
+}
+
 /**
  * Convert one message's extraction into ledger events, dropping anything the
  * code cannot verify against the message text (fail-safe: a dropped event
@@ -1032,9 +1423,10 @@ export function eventsFromExtraction(
 		// Schema-first: the category comes from an enum the model had to satisfy, so no
 		// English vocabulary sits on this path. The word list is reached only when that value
 		// is missing or "other", i.e. the endpoint ignored the schema.
-		const modelCategory = String(g.category ?? "").trim().toLowerCase()
-		const fromSchema = isGrantCategory(modelCategory) && modelCategory !== "other" ? modelCategory : undefined
-		const mapped = fromSchema ?? mapActionToCategory(String(g.action ?? ""))
+		const modelAnswer = String(g.category ?? "").trim().toLowerCase()
+		const fromSchema = isGrantCategory(modelAnswer) && modelAnswer !== "other" ? modelAnswer : undefined
+		const action = String(g.action ?? "")
+		const mapped = fromSchema ?? mapActionToCategory(action)
 		if (fromSchema) {
 			extractionStats.fromSchema++
 			extractionStats.mapped++
@@ -1045,7 +1437,12 @@ export function eventsFromExtraction(
 			extractionStats.unmapped++
 			extractionStats.lastUnmapped = String(g.action ?? "").slice(0, 80)
 		}
-		const category = mapped ?? `*${String(g.action ?? "").slice(0, 60)}*`
+		// The enum answer is not taken on faith when the sentence names a NOUN the deterministic
+		// map reads differently. `cross` is the audit record of that override.
+		const cross = crossCheckCategory(fromSchema, action, `${action} ${quote}`)
+		if (cross) extractionStats.crossChecked++
+		const audit = cross ? { modelCategory: cross.modelCategory } : {}
+		const category = cross?.category ?? mapped ?? `*${String(g.action ?? "").slice(0, 60)}*`
 		// Structural fields, not phrases: the model says whether this is a location and
 		// whether the user's words included credentials. Absent means the narrow answer.
 		const wantsScope = String(g.kind ?? "") === "scope"
@@ -1061,7 +1458,18 @@ export function eventsFromExtraction(
 			if (!mapped) continue
 			const verbRe = BARE_VERB_CATEGORIES[mapped]
 			if (!verbRe || !verbRe.test(quote)) continue
-			out.push({ type: "grant", category, value: "*", kind: "scope", quote, messageId, seq })
+			out.push({ type: "grant", category, value: "*", kind: "scope", quote, messageId, seq, ...audit })
+			continue
+		}
+		// Publish targets are TYPED. Under a grammar category the model's target strings are never
+		// stored verbatim: they are normalised into the spelling the matcher reads, or the sentence
+		// produces no row at all. `kind: "scope"` means nothing here either — the scope of a
+		// git ref is `remote/*`, which rule (ii) derives from the user's own quantifier rather than from
+		// a flag the endpoint may or may not set.
+		if (grammarFor(primarySegment(category)) !== undefined) {
+			for (const value of normaliseTargets(category, targets, quote, messageText)) {
+				out.push({ type: "grant", category, value, kind: "entity", quote, messageId, seq, ...audit })
+			}
 			continue
 		}
 		// A LOCATION permission grants the directory, not one file. "you can work in
@@ -1096,7 +1504,7 @@ export function eventsFromExtraction(
 		) {
 			if (targetNamedByUser(locRaw, [messageText])) {
 				const scopeValue = locRaw.endsWith("/") ? locRaw : `${locRaw}/`
-				out.push({ type: "grant", category, value: scopeValue, kind: "scope", quote, messageId, seq })
+				out.push({ type: "grant", category, value: scopeValue, kind: "scope", quote, messageId, seq, ...audit })
 			}
 		}
 		for (const t of targets) {
@@ -1115,6 +1523,7 @@ export function eventsFromExtraction(
 					quote,
 					messageId,
 					seq,
+					...audit,
 					...(includesSecrets ? { includesSecrets: true } : {}),
 				})
 				// A scope the user said includes secrets gets its own row. read_only cannot
@@ -1127,7 +1536,7 @@ export function eventsFromExtraction(
 				}
 				continue
 			}
-			out.push({ type: "grant", category, value: t, kind: targetKind(t), quote, messageId, seq })
+			out.push({ type: "grant", category, value: t, kind: targetKind(t), quote, messageId, seq, ...audit })
 			// A compound permission names more than one capability: "I give you
 			// permission to use sudo to write to that file" authorises the elevation
 			// AS WELL AS the write. Without this the same sentence leaves no privilege

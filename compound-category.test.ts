@@ -124,6 +124,64 @@ describe("delete-verb gate no longer depends on segment order", () => {
 		const b = ledgerCovers(build(), "delete_outside+write_outside", entities).covered;
 		expect(a).toBe(b);
 	});
+
+	it("the delete-verb gate is still category-wide now that segments are matched separately", () => {
+		// Per-segment matching means each half CAN be answered by its own row. That is not the same as
+		// each half getting its own verb gate: the delete gate is computed over the whole pending
+		// (`compoundHas`, unchanged), so a row whose sentence never mentioned destruction cannot answer
+		// any segment of a pending that destroys.
+		const rows = (rowsIn: Array<{ category: string; quote: string }>) => {
+			const ledger = createLedger();
+			rowsIn.forEach((r, i) => {
+				ledger.grants.push({
+					category: r.category,
+					value: "/x/x/a",
+					kind: "entity",
+					quote: r.quote,
+					messageId: `m${i + 1}`,
+					seq: i + 1,
+				} as never);
+			});
+			return ledger;
+		};
+		const oneTarget = [{ kind: "target", value: "/x/x/a" }] as never;
+
+		// The isolation: only the `perm_change` row can answer the chmod half (privilege is never
+		// reached from another group), and its sentence carries no destructive verb. Under a
+		// per-segment gate this compound would be covered; category-wide, it is not.
+		expect(
+			ledgerCovers(
+				rows([
+					{ category: "perm_change", quote: "chmod the file /x/x/a whenever you like" },
+					{ category: "delete_outside", quote: "rm /x/x/a whenever you like" },
+				]),
+				"perm_change+delete_outside",
+				oneTarget,
+			).covered,
+		).toBe(false);
+
+		// A single destructive row is not enough either: the chmod half still needs a row that answers
+		// the privilege group, and only a sentence naming the destruction is allowed to answer anything
+		// under this pending.
+		expect(
+			ledgerCovers(
+				rows([{ category: "delete_outside", quote: "rm /x/x/a whenever you like" }]),
+				"perm_change+delete_outside",
+				oneTarget,
+			).covered,
+		).toBe(false);
+		// Both halves present, each row's own sentence naming the destruction: covered.
+		expect(
+			ledgerCovers(
+				rows([
+					{ category: "perm_change", quote: "chmod and then rm /x/x/a whenever you like" },
+					{ category: "delete_outside", quote: "rm /x/x/a whenever you like" },
+				]),
+				"perm_change+delete_outside",
+				oneTarget,
+			).covered,
+		).toBe(true);
+	});
 });
 
 describe("compound commands behave identically regardless of clause order", () => {

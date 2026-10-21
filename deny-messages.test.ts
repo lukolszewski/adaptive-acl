@@ -172,6 +172,27 @@ describe("buildPreciseDenial", () => {
 		// The same fallback backs the mechanism line for an unknown category.
 		expect(msg).toMatch(/could not establish that this is safe/i)
 	})
+
+	it("sends a system-package install at a venv by name, and admits the route a rewrite cannot take", () => {
+		const msg = buildPreciseDenial({
+			head: "Not auto-approved: pip install requests",
+			segments: [{ command: "pip install requests", category: "package_system", targets: [] }],
+			futility: "only-after-rewrite",
+		})
+		expect(msg).toContain("this installs system packages")
+		// Byte-exact, because the sentence has two halves and the old one ("prefer a project-local install")
+		// named neither the shape nor the case a rewrite cannot reach: if pi was started from a shell without
+		// the venv activated, no rewrite of the command finds it, so the agent needs to be told to restart.
+		expect(msg).toContain(
+			"FIX: prefer a project-local install — `.venv/bin/pip install …`, or start pi from the shell that has the virtualenv activated — and ask before touching the system.",
+		)
+		// Named separately too, so a re-wording that drops one half fails loudly rather than quietly.
+		expect(msg).toContain("`.venv/bin/pip install …`")
+		expect(msg).toMatch(/start pi from the shell that has the virtualenv activated/)
+		expect(msg).toMatch(/ask before touching the system/)
+		// The guidance may only point at a LESS powerful action: it must not sketch a way past the gate.
+		expect(msg).not.toMatch(/sudo|--user|break-system-packages/)
+	})
 })
 
 describe("wall type", () => {

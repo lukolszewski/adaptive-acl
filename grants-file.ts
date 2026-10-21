@@ -52,6 +52,13 @@
  * as union-without-tombstones, so the window is worth closing after an upgrade, not
  * paid for by disabling the journal for everyone else.
  *
+ * What the SAME reasoning covers, for the category-aware prune (no
+ * `GRANTS_FILE_V` bump either): it accepts rows the path-only rule would have dropped
+ * (`origin`, `origin/*`, `myrepo/app`, `httpx`). Those rows are ADDITIVE — an older
+ * build still reads the file, and it prunes them on its own rewrite, losing only what
+ * it could never have persisted in the first place. Bumping the version to protect
+ * rows that never existed would instead disable every journal that does.
+ *
  * Two properties callers must know before wiring this up:
  * - A merge adds rows and honours revocations; it does not DELETE on its own. So
  *   `/grants revoke` must record a tombstone (see `revokeRows` / `revokeLedgerGrants`)
@@ -66,7 +73,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 
-import { MAX_FORBIDS, MAX_GRANTS } from "./auth-ledger.ts"
+import { kindGroup, MAX_FORBIDS, MAX_GRANTS } from "./auth-ledger.ts"
 import {
 	asGrantRow,
 	foldRevocations,
@@ -131,24 +138,85 @@ const UNMATCHABLE_MARKERS = [
 	"\n",
 ]
 
-export function isUnmatchableValue(value: unknown): boolean {
+/**
+ * The kind groups whose target is a NAME rather than a place: a remote, a branch, an
+ * image, a package, a cluster, a port. Screening them by path shape is what made every
+ * git / forge / container / package grant look like junk, so "Allow always" on a push
+ * recorded nothing durable and said nothing while doing it.
+ *
+ * Deliberately NOT here: the fs groups (`fs-write` / `fs-delete` / `fs-perm`), the two
+ * secret groups, and any category this table does not know. Those targets are places,
+ * and a place whose value is not path-shaped is a bad extraction, not a short name — it
+ * keeps the path rule and the prompt it costs.
+ */
+const NON_PATH_GROUPS: ReadonlySet<string> = new Set([
+	"vcs-remote",
+	"vcs-discard",
+	"cluster",
+	"db",
+	"net-send",
+	"pkg",
+	"exec",
+	"listen",
+	"proc",
+	"sysconf",
+	"priv",
+	"editor",
+])
+
+/** A target is a name; past this it is a dump, and a dump matches nothing. */
+const MAX_TARGET_CHARS = 200
+
+/** Six whitespace-separated words is a sentence, and a sentence is not a target. */
+const MAX_TARGET_WORDS = 5
+
+/**
+ * Does this category name its target, or point at it? A compound (`a+b`) names its
+ * target only when EVERY effect does: as soon as one segment is an fs / secret effect,
+ * the value has to be the place that gets written, so the path rule still applies.
+ * `kindGroup` maps a category onto the group its rows match in, so a new alias needs no
+ * change here — only a group that is genuinely not a path.
+ */
+function targetIsNamed(category: string): boolean {
+	for (const segment of category.split("+")) {
+		if (!NON_PATH_GROUPS.has(kindGroup(segment))) return false
+	}
+	return true
+}
+
+/** A name that is really a paragraph or a sentence in disguise. `value` is trimmed. */
+function isTargetJunk(value: string): boolean {
+	if (value.length > MAX_TARGET_CHARS) return true
+	return value.split(/\s+/).length > MAX_TARGET_WORDS
+}
+
+/**
+ * Can this value ever match a real target?
+ *
+ * With no `category` this is exactly the historical rule — every caller that does not
+ * say what the row targets keeps getting the conservative answer (`"origin"` is not a
+ * path, so it is unmatchable until something tells us it is a remote).
+ */
+export function isUnmatchableValue(value: unknown, category?: string): boolean {
 	const v = typeof value === "string" ? value.trim() : ""
 	if (!v) return true
 	// "*" is a real bare-verb/all grant, not junk.
 	if (v === "*") return false
 	for (const m of UNMATCHABLE_MARKERS) if (v.includes(m)) return true
-	// A matchable target is always path-shaped (or "*" handled above). Anything
-	// else — `select(.type!=null) | .type`, `their verb tables` — cannot match.
+	// A named target only has to be a name: no shell fragments, short, few words.
+	if (category !== undefined && targetIsNamed(category)) return isTargetJunk(v)
+	// A place-shaped target must look like a place. Anything else — `select(.type!=null)
+	// | .type`, `their verb tables` — cannot match, category notwithstanding.
 	return !/^[/~.]/.test(v)
 }
 
-export function pruneRows<T extends { value: string }>(
+export function pruneRows<T extends { value: string; category?: string }>(
 	rows: T[] | undefined | null,
 ): { kept: T[]; dropped: T[] } {
 	const kept: T[] = []
 	const dropped: T[] = []
 	for (const row of Array.isArray(rows) ? rows : []) {
-		if (isUnmatchableValue(row?.value)) dropped.push(row)
+		if (isUnmatchableValue(row?.value, row?.category)) dropped.push(row)
 		else kept.push(row)
 	}
 	return { kept, dropped }
@@ -580,6 +648,6 @@ export function mergeIntoGrantsFile(
  */
 export function selectDurableGrants(store: GrantStore): SessionGrant[] {
 	return store.grants.filter(
-		(g) => g.durable === true && g.origin !== "imported" && !isUnmatchableValue(g.value),
+		(g) => g.durable === true && g.origin !== "imported" && !isUnmatchableValue(g.value, g.category),
 	)
 }

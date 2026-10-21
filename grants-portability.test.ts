@@ -19,10 +19,11 @@ import {
 	deserializeLedger,
 	type ExtractedEvent,
 } from "./auth-ledger.ts"
-import { createGrantStore, importSessionGrants } from "./session-grants.ts"
+import { createGrantStore, importSessionGrants, type SessionGrant } from "./session-grants.ts"
 import {
 	buildGrantsFile,
 	isUnmatchableValue,
+	mergeIntoGrantsFile,
 	pruneRows,
 	readGrantsFile,
 	summarizeGrantsFile,
@@ -95,6 +96,82 @@ describe("grants-file value pruning", () => {
 	})
 })
 
+describe("grants-file value pruning with a category", () => {
+	// Back-compat: a caller that names no category gets exactly the old rule, so every
+	// non-path-shaped value stays unmatchable for it. `origin` is the value this whole
+	// change is about, and it must STILL be dropped when nobody said what it targets.
+	it("is the old path rule when no category is given", () => {
+		for (const value of ["origin", "origin/*", "origin/feature/X", "gh workflow run", "myrepo/app:1.0", "httpx"]) {
+			expect(isUnmatchableValue(value)).toBe(true)
+		}
+		expect(isUnmatchableValue("/data/x", "vcs_remote")).toBe(false)
+		expect(isUnmatchableValue("~/x", "write_outside")).toBe(false)
+		expect(isUnmatchableValue(undefined, "vcs_remote")).toBe(true)
+		expect(isUnmatchableValue("", "vcs_remote")).toBe(true)
+	})
+
+	it("accepts a name when every category segment targets something that has no path", () => {
+		for (const [category, value] of [
+			["vcs_remote", "origin"],
+			["vcs_remote", "origin/*"],
+			["vcs_remote", "origin/feature/X"],
+			["vcs_remote", "gh workflow run"],
+			["vcs_discard", "feature/X"],
+			["container_mutation+network_send", "myrepo/app"],
+			["package_system", "httpx"],
+			["cluster_mutation", "prod/us-east"],
+			["db_mutation", "orders"],
+			["network_send", "api.example.com"],
+			["remote_exec", "build-host"],
+			["network_listen", "8080"],
+			["process_control", "worker"],
+			["system_config", "nginx"],
+			["privilege", "sudo"],
+			["interactive_editor", "vim"],
+		] as const) {
+			expect(isUnmatchableValue(value, category)).toBe(false)
+		}
+	})
+
+	it("keeps the path rule for any fs / secret / perm segment, compound included", () => {
+		for (const [category, value] of [
+			["write_outside", "origin"],
+			["delete_recursive", "their verb tables"],
+			["read_secret", "prod"],
+			["write_sensitive", "origin"],
+			["perm_change", "origin"],
+			// One fs segment in a compound is enough: the fs half of the effect needs a path.
+			["vcs_remote+write_outside", "origin"],
+		] as const) {
+			expect(isUnmatchableValue(value, category)).toBe(true)
+		}
+	})
+
+	it("still calls junk junk in a non-path category", () => {
+		// Shell fragments, a sentence instead of a name, and an over-long dump.
+		expect(isUnmatchableValue("select(.type!=null) | .type", "vcs_remote")).toBe(true)
+		expect(isUnmatchableValue("$(git remote get-url origin)", "vcs_remote")).toBe(true)
+		expect(isUnmatchableValue("origin ${BRANCH}", "vcs_remote")).toBe(true)
+		expect(isUnmatchableValue("please push this branch to the remote now", "vcs_remote")).toBe(true)
+		expect(isUnmatchableValue("x".repeat(201), "vcs_remote")).toBe(true)
+		expect(isUnmatchableValue("x".repeat(200), "vcs_remote")).toBe(false)
+		// "*" is the bare-verb/all grant, whatever the category.
+		expect(isUnmatchableValue("*", "vcs_remote")).toBe(false)
+		// Unknown category → the path rule, not a free pass.
+		expect(isUnmatchableValue("origin", "something_new")).toBe(true)
+	})
+
+	it("pruneRows passes each row's own category through", () => {
+		const r = pruneRows([
+			{ value: "origin", category: "vcs_remote" },
+			{ value: "origin", category: "write_outside" },
+			{ value: "origin" },
+		])
+		expect(r.kept.map((k) => [k.value, k.category])).toEqual([["origin", "vcs_remote"]])
+		expect(r.dropped.map((d) => d.category)).toEqual(["write_outside", undefined])
+	})
+})
+
 describe("grants-file IO", () => {
 	const tmp = mkdtempSync(join(tmpdir(), "pm-gf-"))
 
@@ -154,6 +231,60 @@ describe("grants-file IO", () => {
 		// sessions/400 is a numeric directory blamed as a path; the real one stays.
 		expect(dropped + file.grants.length).toBe(2)
 		expect(file.grants.some((g) => g.value === "/real/path")).toBe(true)
+	})
+
+	it("keeps every git / forge / container / package grant across export → import", () => {
+		// The finding: "Allow always" on a push recorded NOTHING durable, because every
+		// non-path-shaped value was called unmatchable and pruned on the way out.
+		const rows: SessionGrant[] = [
+			{ category: "vcs_remote", value: "origin", kind: "entity", at: 1, durable: true },
+			{ category: "vcs_remote", value: "origin/*", kind: "entity", at: 1, durable: true },
+			{ category: "vcs_remote", value: "origin/feature/X", kind: "entity", at: 1, durable: true },
+			{ category: "vcs_remote", value: "gh workflow run", kind: "entity", at: 1, durable: true },
+			{ category: "container_mutation+network_send", value: "myrepo/app", kind: "entity", at: 1, durable: true },
+			{ category: "package_system", value: "httpx", kind: "entity", at: 1, durable: true },
+			// ...and these are still junk, category or no category.
+			{ category: "vcs_remote", value: "select(.type!=null) | .type", kind: "entity", at: 1, durable: true },
+			{ category: "write_outside", value: "their verb tables", kind: "entity", at: 1, durable: true },
+			{ category: "vcs_remote", value: "please push this branch to the remote now", kind: "entity", at: 1, durable: true },
+		]
+		const { file, dropped } = buildGrantsFile({
+			ledger: serializeLedger(createLedger()),
+			grants: rows,
+			sourceCwd: "/c",
+		})
+		expect(dropped).toBe(3)
+
+		const p = join(tmp, "non-path.json")
+		expect(writeGrantsFile(p, file)).toBe(true)
+		const back = readGrantsFile(p)
+		if (!back.ok) throw new Error(back.error)
+		const reader = createGrantStore()
+		importSessionGrants(reader, back.file.grants)
+		expect(reader.grants.map((g) => g.value).sort()).toEqual(
+			["gh workflow run", "httpx", "myrepo/app", "origin", "origin/*", "origin/feature/X"].sort(),
+		)
+		// The durable flag is what makes these rows worth persisting at all.
+		expect(back.file.grants.every((g) => g.durable === true)).toBe(true)
+	})
+
+	it("keeps them through the merge path too, which prunes on the way in", () => {
+		const p = join(tmp, "non-path-merge.json")
+		const r = mergeIntoGrantsFile(
+			p,
+			{ v: 1, grants: [], forbids: [], seen: [] },
+			[
+				{ category: "vcs_remote", value: "origin/*", kind: "entity", at: 1, durable: true },
+				{ category: "vcs_remote", value: "push this branch to the remote before review", kind: "entity", at: 1, durable: true },
+			],
+			{ sourceCwd: "/c" },
+		)
+		expect(r.ok).toBe(true)
+		expect(r.dropped).toBe(1)
+		expect(r.written).toBe(1)
+		const back = readGrantsFile(p)
+		if (!back.ok) throw new Error(back.error)
+		expect(back.file.grants.map((g) => g.value)).toEqual(["origin/*"])
 	})
 
 	afterAll(() => rmSync(tmp, { recursive: true, force: true }))

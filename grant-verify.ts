@@ -10,6 +10,7 @@
  */
 
 import type { Entity } from "./risk-policy.ts"
+import { coversByGrammar, grammarFor, parseVcsTarget } from "./target-grammar.ts"
 
 export type GrantExtraction = {
 	authorized: "yes" | "no"
@@ -218,6 +219,90 @@ export function entityMatchesTarget(
 	return ec.includes(tc[0]!)
 }
 
+/**
+ * Which allowed target, if any, covers this pending entity — asked of every effect of a compound category.
+ *
+ * The grammar of the segment comes first (docs/CLASSIFIER-SPEC.md §3). A `vcs_remote` target `origin/*` is the scope spelling the
+ * gate itself emits for a push, and it means "every branch on that remote except the protected names"; as
+ * components it is a `*` that would have to equal a branch name, so the string rule answered "nothing" and a
+ * user who answered "always" on a push was asked again next push. Only a segment with no grammar, or a pair
+ * the grammar cannot read, falls through to `entityMatchesTarget` — a `false` from the grammar is an answer
+ * and does not buy the old rule back, so this widens the two categories the grammar types and loosens no near-name.
+ */
+function allowedTargetFor(
+	segments: string[],
+	entity: string,
+	allowed: string[],
+	space?: PathSpace,
+): string | undefined {
+	let stringHit: string | undefined
+	for (const seg of segments) {
+		for (const target of allowed) {
+			const verdict = coversByGrammar(seg, target, entity)
+			if (verdict === true) return target
+			if (
+				verdict === undefined &&
+				stringHit === undefined &&
+				entityMatchesTarget(entity, target, space?.home, space?.project)
+			) {
+				stringHit = target
+			}
+		}
+	}
+	return stringHit
+}
+
+/**
+ * Does a user-forbidden target reach this pending entity?
+ *
+ * A veto takes the UNION of the two readings, and the asymmetry against `allowedTargetFor` is deliberate. The
+ * grammar's `false` on an all-branches row is a limit on AUTHORITY — "all branches on origin" is not a
+ * licence for `main` — and a forbid is not authority: it is the one sentence whose job is to stop things, so
+ * narrowing it is the failure mode (a coarse forbid must keep dominating everything the words could cover).
+ * Hence: veto if the old string rule said yes, or the grammar says yes, or the grammar held back ONLY on the
+ * protected-name limit while the row's scope does contain this branch.
+ */
+function forbiddenTargetFor(
+	segments: string[],
+	entity: string,
+	forbidden: string[],
+	space?: PathSpace,
+): string | undefined {
+	for (const seg of segments) {
+		for (const target of forbidden) {
+			if (entityMatchesTarget(entity, target, space?.home, space?.project)) return target
+			if (coversByGrammar(seg, target, entity) === true) return target
+			if (wildcardForbidReaches(seg, target, entity)) return target
+		}
+	}
+	return undefined
+}
+
+/**
+ * The one `false` a forbid may not accept: the protected-name limit on a row that sweeps a whole scope.
+ *
+ * "never push to origin" must still veto `origin/main`, or the typed grammar would weaken the sentence the
+ * user wrote to stop exactly that. Only the protected-name reason is overridden — a row naming one branch
+ * (`origin/main` vs `origin/dev`) and a row on a different remote keep their `false`, and only git refs get
+ * here at all, because that limit exists only in the vcs grammar.
+ */
+function wildcardForbidReaches(segment: string, forbidden: string, entity: string): boolean {
+	if (grammarFor(segment) !== "vcs") return false
+	if (coversByGrammar(segment, forbidden, entity) !== false) return false
+	const row = parseVcsTarget(forbidden)
+	if (!row) return false
+	const sweepsAll = row.anyRemote === true || row.anyBranch === true
+	if (!sweepsAll && row.branchGlob === undefined) return false
+	const pending = parseVcsTarget(entity)
+	if (!pending) return false
+	if (row.remote !== undefined && pending.remote !== undefined && row.remote !== pending.remote) return false
+	// A pending whose branch the gate could not resolve is reached by an all-branches row (a glob cannot be
+	// placed inside it, so a glob row keeps its `false` rather than guessing).
+	if (pending.branch === undefined) return sweepsAll
+	if (row.branchGlob !== undefined) return pending.branch.startsWith(row.branchGlob)
+	return sweepsAll
+}
+
 export function verifyGrant(opts: {
 	extraction: GrantExtraction
 	category: string
@@ -252,13 +337,14 @@ export function verifyGrant(opts: {
 	else return no("quote not found verbatim in any user message")
 
 	// 2. Forbidden targets veto everything they match.
+	const segments = category.split("+").filter((s) => norm(s))
 	const pending = entities.filter((e) => e.kind === "target").map((e) => e.value)
 	const checked = pending.length ? pending : entities.map((e) => e.value)
-	for (const ent of checked) {
-		for (const f of extraction.forbidden_targets ?? []) {
-			if (entityMatchesTarget(ent, f, space?.home, space?.project)) {
-				return no(`target "${ent}" matches user-forbidden "${f}"`)
-			}
+	const forbidden = (extraction.forbidden_targets ?? []).filter((t) => norm(t))
+	if (forbidden.length > 0) {
+		for (const ent of checked) {
+			const hit = forbiddenTargetFor(segments, ent, forbidden, space)
+			if (hit) return no(`target "${ent}" matches user-forbidden "${hit}"`)
 		}
 	}
 
@@ -271,12 +357,11 @@ export function verifyGrant(opts: {
 	// in that sample: 317 compound actions reach this function, 19 skip a required
 	// method verb (12 of them `privilege`), 44 take a bare-verb accept the later segment has not
 	// earned. Monotone by construction: this can only refuse more, never less.
-	const segments = category.split("+").filter((s) => norm(s))
 	const allowed = (extraction.allowed_targets ?? []).filter((t) => norm(t))
 	if (checked.length > 0 && allowed.length > 0) {
 		const matches: Array<{ entity: string; target: string }> = []
 		for (const ent of checked) {
-			const hit = allowed.find((t) => entityMatchesTarget(ent, t, space?.home, space?.project))
+			const hit = allowedTargetFor(segments, ent, allowed, space)
 			if (!hit) return no(`target "${ent}" not named by the user (allowed: ${allowed.join(", ") || "none"})`)
 			matches.push({ entity: ent, target: hit })
 		}

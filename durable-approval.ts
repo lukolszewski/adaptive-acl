@@ -21,6 +21,7 @@ import path from "node:path";
 import { homedir } from "node:os";
 import { evaluateBash } from "./risk-policy.ts";
 import { canonicalPath } from "./grant-verify.ts";
+import { coversByGrammar } from "./target-grammar.ts";
 import type { SessionGrant } from "./session-grants.ts";
 
 export type DurableRow = { category: string; value: string; kind: "entity" | "scope" };
@@ -104,6 +105,26 @@ export function durableRowsForApproval(opts: {
 }
 
 /**
+ * The category's grammar, if this row's category has one, read over every effect a compound row names.
+ *
+ * `true` revokes, `false` leaves the row alone, `undefined` means "no answer here" and the caller keeps the
+ * path rule — so a row of a category the grammar does not cover is matched exactly as it was before, and a
+ * compound row like `container_mutation+network_send` is read by the grammar its publish categories share.
+ */
+function grammarVerdict(rowCategory: string, rowValue: string, target: string): boolean | undefined {
+	let answer: boolean | undefined
+	for (const seg of rowCategory.split("+").map((s) => s.trim()).filter(Boolean)) {
+		const verdict = coversByGrammar(seg, rowValue, target)
+		if (verdict === true) return true
+		// A segment with no grammar leaves the question as it found it; a segment that read the pair and
+		// said no is kept as the answer — while a sibling may still say yes, and for a revocation the cost
+		// of revoking one row too many is a prompt, the cost of too few is a deny that does not stick.
+		if (verdict !== undefined) answer = false
+	}
+	return answer
+}
+
+/**
  * Matcher for a deny-always click: every remembered allowance that would have covered these targets.
  *
  * Deny-always is implemented as **revocation**, not as a new row type. A durable forbid row would need its own
@@ -112,6 +133,12 @@ export function durableRowsForApproval(opts: {
  * happened once when a test suite deleted a project's deny rules. Revocation uses plumbing that is proven
  * (tombstones survive import — `tombstones.test.ts` pins it), and if it ever fails the system re-prompts rather than
  * silently allowing: failing safe in the direction that costs the user a keystroke, not a secret.
+ *
+ * The match itself asks the category's grammar first, because for a publish target the path rule cannot say
+ * what "would have covered" means: a `vcs_remote origin/*` row is the allowance that covered the push being
+ * denied, and as characters it is a `*` that no branch equals. Leaving that unread made "Deny always" on a
+ * push revoke nothing at all, which is the one case where failing safe is the wrong way round — the user
+ * clicked "deny" and the next push still runs on the row they just refused.
  */
 export function rowCoversTargets(
 	targets: string[],
@@ -119,8 +146,15 @@ export function rowCoversTargets(
 ): (row: SessionGrant) => boolean {
 	const want = targets.map((t) => canonicalPath(t, space).toLowerCase())
 	return (row: SessionGrant): boolean => {
-		const v = canonicalPath(row.value, space).toLowerCase()
-		if (row.kind === "scope") return want.some((t) => t.startsWith(v) || t + path.sep === v)
-		return want.includes(v)
+		const rowValue = canonicalPath(row.value, space).toLowerCase()
+		for (let i = 0; i < targets.length; i++) {
+			const byGrammar = grammarVerdict(row.category, row.value, targets[i]!)
+			if (byGrammar === true) return true
+			if (byGrammar === false) continue
+			const t = want[i]!
+			if (row.kind === "scope" && (t.startsWith(rowValue) || t + path.sep === rowValue)) return true
+			if (row.kind === "entity" && t === rowValue) return true
+		}
+		return false
 	}
 }

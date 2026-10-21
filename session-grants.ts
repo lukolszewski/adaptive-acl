@@ -13,6 +13,7 @@
 
 import type { Entity } from "./risk-policy.ts"
 import { canonicalPath, entityMatchesTarget, expandHome } from "./grant-verify.ts"
+import { coversByGrammar } from "./target-grammar.ts"
 
 export type SessionGrant = {
 	category: string
@@ -351,7 +352,30 @@ export function addGrant(
 	}
 }
 
-function scopeCovers(scopeValue: string, entity: string, home?: string, project?: string): boolean {
+/**
+ * Does one stored row cover one pending target?
+ *
+ * The grammar comes first (docs/CLASSIFIER-SPEC.md §3), and only for a category that has one: `vcs_remote origin/*` is the
+ * value the gate itself writes when the user answers "Allow for session (scope)", and to a run of
+ * `/`-components it is a component that must equal `*`, so the button covered nothing. A category with
+ * no grammar — or a pair the grammar cannot read — is judged by exactly the rules that judged it before,
+ * which is why this is a widening of publish targets only and never a change to path matching.
+ */
+function rowCoversTarget(seg: string, row: SessionGrant, target: string, home?: string, project?: string): boolean {
+	const byGrammar = coversByGrammar(seg, row.value, target)
+	if (byGrammar !== undefined) return byGrammar
+	if (row.kind === "scope") return scopeCovers(seg, row.value, target, home, project)
+	return (
+		entityMatchesTarget(target, row.value, home, project) ||
+		canonicalPath(row.value, { home, project }) === canonicalPath(target, { home, project })
+	)
+}
+
+function scopeCovers(category: string, scopeValue: string, entity: string, home?: string, project?: string): boolean {
+	// A scope of a grammared category is read by that grammar: its own wildcards (`origin/*`, `myrepo/app`)
+	// mean something a prefix of characters cannot express.
+	const byGrammar = coversByGrammar(category, scopeValue, entity)
+	if (byGrammar !== undefined) return byGrammar
 	// Canonicalise both sides into one path space. `~` ↔ home was handled here first; the project-
 	// relative half (`./x`, emitted by displayPath for every in-project target) needs `project`, or a
 	// folder grant can never cover a file inside the project. See `canonicalPath`.
@@ -384,17 +408,59 @@ export function grantsCover(
 		const relevant = store.grants.filter((g) => g.category === seg)
 		if (relevant.length === 0) return { covered: false, by: [] }
 		for (const t of targets) {
-			const hit = relevant.find((g) =>
-				g.kind === "entity"
-					? entityMatchesTarget(t, g.value, home, project) ||
-						canonicalPath(g.value, { home, project }) === canonicalPath(t, { home, project })
-					: scopeCovers(g.value, t, home, project),
-			)
+			const hit = relevant.find((g) => rowCoversTarget(seg, g, t, home, project))
 			if (!hit) return { covered: false, by: [] }
 			by.push(hit.value)
 		}
 	}
 	return { covered: true, by }
+}
+
+/**
+ * Why this store does (or does not) cover this action, one line per row the segment holds.
+ *
+ * `grantsCover` answers a boolean and stops at the first miss, which is right for a gate and useless for
+ * the question a user asks after being refused: "I said yes to that, why did it ask again?" This walks the
+ * same rows with the same predicate (`rowCoversTarget`) and reports each verdict instead of the first one,
+ * so a near miss is visible instead of inferred. Pure — it reads the store and returns strings, and writes
+ * nothing anywhere — this function only renders the lines, and the `/grants explain` command in index.ts prints them.
+ *
+ * Lines, in order:
+ *  - `row <category> "<value>" (<kind>): covers <target>[, <target>…]` for a row that covers at least one
+ *    pending target;
+ *  - `rejected: <category> "<value>" (<kind>) — covers none of: <target>…` for a row that covers none;
+ *  - `segment <category> has no rows` for an effect of a compound nothing in this store speaks for.
+ */
+export function explainGrantsCover(
+	store: GrantStore,
+	category: string,
+	entities: Entity[],
+	home?: string,
+	project?: string,
+): string[] {
+	const targets = entities.filter((e) => e.kind === "target").map((e) => e.value)
+	const segments = categoryOf(category)
+	if (segments.length === 0) return [`no category to explain`]
+	if (targets.length === 0) return [`nothing to match: the action names no target`]
+	const lines: string[] = []
+	for (const seg of segments) {
+		const rows = store.grants.filter((g) => g.category === seg)
+		if (rows.length === 0) {
+			lines.push(`segment ${seg} has no rows`)
+			continue
+		}
+		for (const row of rows) {
+			const covers: string[] = []
+			const misses: string[] = []
+			for (const t of targets) (rowCoversTarget(seg, row, t, home, project) ? covers : misses).push(t)
+			if (covers.length > 0) {
+				lines.push(`row ${seg} "${row.value}" (${row.kind}): covers ${covers.join(", ")}`)
+			} else {
+				lines.push(`rejected: ${seg} "${row.value}" (${row.kind}) — covers none of: ${misses.join(", ")}`)
+			}
+		}
+	}
+	return lines
 }
 
 /** Session grants are bounded too: an import must not push out live grants. */

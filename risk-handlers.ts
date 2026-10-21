@@ -12,6 +12,7 @@
  */
 
 import path from "node:path"
+import { existsSync } from "node:fs"
 import type { PathClass, PathContext } from "./risk-paths.ts"
 import type { SimpleCommand } from "./shell-lexer.ts"
 import {
@@ -257,6 +258,7 @@ function dispatch(argv: string[], h: HandlerContext): SegmentDecision[] {
 		case "git": return gitHandler(argv, h)
 		case "gh": case "glab": case "hub": return ghHandler(argv, h)
 		case "docker": case "podman": case "nerdctl": return dockerHandler(argv, h)
+		case "oras": return orasHandler(argv, h)
 		case "docker-compose": return dockerComposeHandler(argv.slice(0), h, 0)
 		case "kubectl": case "oc": case "k9s": return kubectlHandler(argv, h)
 		case "helm": return helmHandler(argv, h)
@@ -543,7 +545,42 @@ function chmodHandler(argv: string[], h: HandlerContext, v: string): SegmentDeci
 
 const GIT_READ = new Set(["status", "log", "diff", "show", "branch", "remote", "ls-files", "ls-remote", "ls-tree", "cat-file", "rev-parse", "rev-list", "describe", "blame", "shortlog", "reflog", "config", "var", "grep", "help", "version", "count-objects", "cherry", "whatchanged", "show-ref", "symbolic-ref", "name-rev", "merge-base", "diff-tree", "diff-index", "fsck", "bisect", "worktree", "notes", "stash"])
 const GIT_LOCAL_WRITE = new Set(["add", "commit", "checkout", "switch", "merge", "rebase", "cherry-pick", "revert", "tag", "init", "mv", "rm", "restore", "apply", "am", "format-patch", "fetch", "pull", "submodule", "clone", "gc", "prune", "pack-refs", "maintenance", "sparse-checkout", "update-index", "commit-tree", "read-tree", "write-tree", "mktree", "checkout-index"])
-const PROTECTED_BRANCH_RE = /^(main|master|trunk|develop|dev|release[\/-].*|production|prod|stable)$/i
+/**
+ * Branches a force-push or a delete may not touch on the word of an unnamed target.
+ *
+ * Exported because the grant grammar in `target-grammar.ts` mirrors this table: a user who writes "never
+ * force-push to main" has to land on the same set of names the prompt denied, and a second copy of the
+ * regex would drift into "the prompt asked, the ledger said no".
+ */
+export const PROTECTED_BRANCH_RE = /^(main|master|trunk|develop|dev|release[\/-].*|production|prod|stable)$/i
+
+/**
+ * The branch a `git push` writes on the far side, from the refspec git was given.
+ *
+ * The name that matters is the remote side: after the colon when there is one (`HEAD:feat/x`,
+ * `local:feat/x`), without the leading `+` that only means "overwrite" and without the `refs/heads/`
+ * prefix git also accepts. `feat/x:` (left side only) deletes that remote branch, so when the right side
+ * is empty the name is the left one.
+ */
+function remoteSideOf(refspec: string): string {
+	const at = refspec.indexOf(":")
+	const clean = (w: string) => w.replace(/^\+/, "").replace(/^refs\/heads\//, "")
+	return clean(at >= 0 ? refspec.slice(at + 1) : refspec) || (at >= 0 ? clean(refspec.slice(0, at)) : "")
+}
+
+/**
+ * Which branch a push writes.
+ *
+ * A refspec says so directly. With none, git pushes the *current* branch, and layer 0 has no shell state
+ * to read — the session's own branch (`PolicyOptions.gitBranch`, from pi's git info) is the only value
+ * that exists here, and `(current branch)` is what we admit we do not know. Naming it matters: the target
+ * is what a stored grant is compared against, and `origin/(current branch)` is covered by nothing a user
+ * could have written.
+ */
+function pushTargetBranch(refspec: string | undefined, sessionBranch: string | undefined): string {
+	if (refspec !== undefined) return remoteSideOf(refspec)
+	return typeof sessionBranch === "string" ? sessionBranch.trim() : ""
+}
 
 function gitHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
@@ -568,14 +605,17 @@ function gitHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 		const mirror = hasFlag(rest, "--mirror", "--all", "--tags")
 		const pos = rest.filter((a) => !a.startsWith("-"))
 		const remote = pos[0] ?? "origin"
-		const refspec = pos[1] ?? "(current branch)"
-		const branch = refspec.includes(":") ? refspec.split(":")[1]! : refspec
+		const refspec = pos[1]
+		const branch = pushTargetBranch(refspec, h.opts.gitBranch)
+		// How the prompt names it: the refspec the user typed, the branch it resolves to, or the admission.
+		const shown = refspec ?? (branch ? `(current branch ${branch})` : "(current branch)")
+		const named = branch || "(current branch)"
 		if ((force || del) && PROTECTED_BRANCH_RE.test(branch)) {
 			return [seg("never", "vcs_force_protected", `git push ${force ? "--force " : ""}${del ? "--delete " : ""}to protected branch ${branch} on ${remote}`, raw, [target(`${remote}/${branch}`)])]
 		}
 		if (mirror && hasFlag(rest, "--mirror")) return [seg("never", "vcs_force_protected", `git push --mirror to ${remote}`, raw, [target(remote)])]
 		const kind = force ? "force-push" : del ? "delete remote branch" : "push"
-		return [seg("ask", "vcs_remote", `git ${kind} ${refspec} to ${remote}`, raw, [target(`${remote}/${branch}`), scope(`${remote}/*`)])]
+		return [seg("ask", "vcs_remote", `git ${kind} ${shown} to ${remote}`, raw, [target(`${remote}/${named}`), scope(`${remote}/*`)])]
 	}
 	if (sub === "reset") {
 		if (hasFlag(rest, "--hard")) return [seg("ask", "vcs_discard", `git reset --hard ${rest.filter((a) => !a.startsWith("-")).join(" ") || "HEAD"}`, raw, [target("worktree changes")])]
@@ -638,6 +678,47 @@ function ghHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	return [seg("unknown", "unknown_command", `gh ${argv.slice(1).join(" ").slice(0, 120)}`, raw)]
 }
 
+// ---------------------------------------------------------------- artifact publishes
+
+/**
+ * The repository part of an artifact ref — everything up to the tag or digest.
+ *
+ * A tag is one artifact; the repository is the thing a user means by "that image". It is the widest scope
+ * this can state: the registry, the namespace and the name all stay in the value, so a scope answer widens
+ * over tags of one repo and never over a second repo. A `:` before the last `/` is the registry's port, not
+ * a tag separator, which is why the search starts after it.
+ */
+function artifactRepoOf(ref: string): string {
+	const at = ref.indexOf("@")
+	const noDigest = at >= 0 ? ref.slice(0, at) : ref
+	const slash = noDigest.lastIndexOf("/")
+	const colon = noDigest.indexOf(":", slash + 1)
+	return colon >= 0 ? noDigest.slice(0, colon) : noDigest
+}
+
+/**
+ * One publish, as two rows: what it does to the artifact store, and what it sends over the wire.
+ *
+ * `docker push` was one `network_send` row, and the intent behind it is not one thing. The ledger's action
+ * table reads "push the image" as `container_mutation`; a user who read the same push as an upload writes a
+ * `network_send` row. With one category, neither of those covers the other and the only value that would is
+ * `*` — so the pending row becomes the compound `container_mutation+network_send` and a grant has to speak
+ * for the publish as a whole. Both rows carry the same entities, so the compound names one target.
+ *
+ * The tier is unchanged (`ask` on both halves): splitting the intent widens what a sentence can name, never
+ * what the gate waves through.
+ */
+function artifactPushRows(raw: string, label: string, ref: string): SegmentDecision[] {
+	if (!ref) {
+		return [seg("ask", "container_mutation", `${label} — no artifact ref given`, raw), seg("ask", "network_send", `${label} — no artifact ref given`, raw)]
+	}
+	const ents = [target(ref), scope(artifactRepoOf(ref))]
+	return [
+		seg("ask", "container_mutation", `${label} ${ref} — publishes this artifact`, raw, ents),
+		seg("ask", "network_send", `${label} ${ref} — uploads it to a registry`, raw, ents),
+	]
+}
+
 // ---------------------------------------------------------------- docker & compose
 
 const DOCKER_READ = new Set(["ps", "images", "logs", "inspect", "stats", "top", "port", "diff", "history", "version", "info", "events", "search", "manifest", "context"])
@@ -652,7 +733,9 @@ function dockerHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	if (DOCKER_READ.has(sub)) return [seg("allow", "read_only", `docker ${sub}`, raw)]
 	if (sub === "build" || sub === "buildx") return [seg("allow", "run_project_code", `docker ${sub}`, raw)]
 	if (sub === "pull") return [seg("allow", "read_only", "docker pull", raw)]
-	if (sub === "push") return [seg("ask", "network_send", `docker push ${rest.filter((a) => !a.startsWith("-"))[0] ?? ""}`, raw, targetsOf(argv.slice(i), h))]
+	// `positionals` skips the program word, and `rest` starts *after* the subcommand — so the subcommand is
+	// put back in front of it rather than re-implementing the flag/`--` rules a second time.
+	if (sub === "push") return artifactPushRows(raw, `${base(argv[0]!)} push`, positionals([sub, ...rest])[0] ?? "")
 	if (sub === "system" && rest[0] === "prune") {
 		if (hasFlag(rest, "-a", "--all") && hasFlag(rest, "--volumes")) return [seg("never", "container_wipe", "docker system prune -a --volumes — deletes ALL images and volumes", raw)]
 		return [seg("ask", "container_mutation", `docker system prune${hasFlag(rest, "-a", "--all") ? " -a" : ""}`, raw, [target("unused docker data")])]
@@ -691,6 +774,20 @@ function dockerHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	}
 	if (sub === "login") return [seg("ask", "network_send", "docker login", raw)]
 	return [seg("unknown", "unknown_command", `docker ${sub}`, raw)]
+}
+
+/**
+ * `oras` — the OCI registry CLI (artifacts that are not container images).
+ *
+ * Only `push` is named here: it is the publish, and it gets the same two rows every other artifact push
+ * gets. Everything else stays `unknown_command` exactly as it was while `oras` had no case at all — this
+ * handler exists to name a target, not to authorise a grammar it has not been measured against.
+ */
+function orasHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
+	const raw = rawOf(h.cmd)
+	const pos = positionals(argv)
+	if (pos[0] === "push") return artifactPushRows(raw, "oras push", pos[1] ?? "")
+	return [seg("unknown", "unknown_command", `oras ${pos[0] ?? ""}`.trim(), raw)]
 }
 
 function dockerComposeHandler(argv: string[], h: HandlerContext, i: number): SegmentDecision[] {
@@ -774,12 +871,18 @@ function helmHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 		return [seg("allow", "read_only", `helm ${sub ?? ""}`, raw)]
 	}
 	const ns = flagValue(argv, "-n", "--namespace") ?? "default"
+	if (sub === "push") {
+		// `helm push <chart> <oci://…>` publishes a chart into an OCI registry — the same act as `docker push`,
+		// and it is the destination (not the chart file) a grant has to name. The scheme is transport only.
+		const dest = (pos[2] ?? "").replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")
+		return artifactPushRows(raw, "helm push", dest)
+	}
 	if (sub === "uninstall" || sub === "delete") {
 		const releases = pos.slice(1)
 		if (releases.length === 0) return [seg("never", "cluster_wide_destroy", "helm uninstall with no release named", raw)]
 		return [seg("ask", "cluster_mutation", `helm uninstall ${releases.join(" ")} -n ${ns}`, raw, releases.map((r) => target(`${r}@${ns}`)))]
 	}
-	if (["install", "upgrade", "rollback", "push", "test"].includes(sub)) {
+	if (["install", "upgrade", "rollback", "test"].includes(sub)) {
 		if (hasFlag(argv, "--dry-run")) return [seg("allow", "read_only", `helm ${sub} --dry-run`, raw)]
 		return [seg("ask", "cluster_mutation", `helm ${sub} ${pos.slice(1, 3).join(" ")} -n ${ns}`, raw, [target(`${pos[1] ?? sub}@${ns}`), scope(ns)])]
 	}
@@ -942,7 +1045,50 @@ function npxHandler(argv: string[], h: HandlerContext, v: string): SegmentDecisi
 	return [seg("ask", "remote_exec", `${v} ${bare} — downloads and runs a package`, raw, [target(bare)])]
 }
 
-function pipHandler(argv: string[], h: HandlerContext, v: string): SegmentDecision[] {
+/** How a `pip` handler was reached, because the program word is the evidence (see {@link pipInVenv}). */
+type PipInvocation = {
+	/** argv[0] as the user typed it: `.venv/bin/pip`, `.venv/bin/python`, `uv`, `python`. */
+	program: string
+	/** Reached through `uv pip`, which provisions and uses a project env by itself. */
+	uv?: boolean
+}
+
+const VENV_PROGRAM_RE = /(?:^|\/)bin\/(?:pip|python)[\w.-]*$/
+
+/**
+ * Does this pip run inside a project env — the difference between writing into this repo's env and writing
+ * into whatever python the machine runs on?
+ *
+ * Three ways to know, and no guessing past them:
+ *   - the environment says so: `VIRTUAL_ENV`, or `CONDA_PREFIX` (same shape — an env that is not the system
+ *     one). This is the channel the gate has when the user activated the env outside the tool call; note it
+ *     is only `CONDA_PREFIX` that means an env is active — `CONDA_EXE`/`CONDA_SHLVL` are set by an install
+ *     that has never been activated, and reading those would make every conda machine look like a venv;
+ *   - the program lives in one: `<root>/bin/{pip,python}*` with a `pyvenv.cfg` two levels above it. The
+ *     path resolves against the leg's own cwd, so the relative spelling people actually type
+ *     (`.venv/bin/pip install …`) works, and the probe is skipped when `opts.fs === false` — the same rule
+ *     `hasLocalBin` follows, so a test that switches probes off gets one answer everywhere;
+ *   - `uv pip` (handled by the caller): uv creates the project env by default, and `--system` is how the
+ *     user says it should not.
+ *
+ * A `bin/` with no `pyvenv.cfg` is not a venv. A directory called `.venv` proves nothing about the
+ * interpreter inside it, and an `allow` here is a write into whatever that interpreter is.
+ */
+export function pipInVenv(argv0: string, h: HandlerContext): boolean {
+	const env = h.opts.env
+	if (env?.VIRTUAL_ENV?.trim() || env?.CONDA_PREFIX?.trim()) return true
+	if (!VENV_PROGRAM_RE.test(argv0)) return false
+	if (h.opts.fs === false) return false
+	const typed = argv0.startsWith("~/") ? path.join(h.ctx.home, argv0.slice(2)) : argv0
+	const root = path.resolve(h.ctx.cwd, path.dirname(path.dirname(typed)))
+	try {
+		return existsSync(path.join(root, "pyvenv.cfg"))
+	} catch {
+		return false
+	}
+}
+
+function pipHandler(argv: string[], h: HandlerContext, v: string, call: PipInvocation = { program: argv[0] ?? "" }): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
 	const pos = positionals(argv)
 	const sub = pos[0] ?? ""
@@ -951,17 +1097,37 @@ function pipHandler(argv: string[], h: HandlerContext, v: string): SegmentDecisi
 		const pkgs = pos.slice(1)
 		const vcsOrUrl = pkgs.find((p) => /^(git\+|https?:\/\/|ssh:\/\/)/.test(p))
 		if (vcsOrUrl) return [seg("ask", "remote_exec", `pip install from URL/VCS: ${vcsOrUrl}`, raw, [target(vcsOrUrl)])]
-		const inVenv = Boolean(h.opts.env?.VIRTUAL_ENV) || argv[0]!.includes("/.venv/") || argv[0]!.includes("/venv/")
 		const editable = hasFlag(argv, "-e", "--editable")
 		const reqFile = flagValue(argv, "-r", "--requirement")
 		const userOrSystem = hasFlag(argv, "--user", "--system", "--break-system-packages")
-		if (userOrSystem) return [seg("ask", "package_system", `pip install ${hasFlag(argv, "--user") ? "--user" : "--system"}: ${pkgs.join(" ")}`, raw, pkgs.map(target))]
-		if (inVenv || editable || reqFile) return [seg("allow", "run_project_code", `pip install (project env)`, raw)]
-		// bare pip install with no venv — could be system python
+		// `--target` outside the project is a write where the env is not; inside it, the packages land in the
+		// repo and the question stays the one the env answers.
+		const destArg = flagValue(argv, "-t", "--target")
+		const dest = destArg === undefined ? undefined : h.classify(destArg)
+		if (userOrSystem || (dest !== undefined && !dest.insideProject)) {
+			const why = hasFlag(argv, "--user") ? "--user" : hasFlag(argv, "--system") ? "--system" : hasFlag(argv, "--break-system-packages") ? "--break-system-packages" : `--target ${dest ? h.display(dest) : destArg}`
+			return [seg("ask", "package_system", `pip install ${why}: ${pkgs.join(" ")}`, raw, pkgs.map(target))]
+		}
+		if (pipInVenv(call.program, h) || call.uv || editable || reqFile) return [seg("allow", "run_project_code", `pip install (project env)`, raw)]
+		// bare pip with nothing saying which env: could be the system python
 		return [seg("ask", "package_system", `pip install outside a virtualenv: ${pkgs.join(" ") || "(requirements)"}`, raw, pkgs.map(target))]
 	}
 	if (sub === "uninstall") return [seg("ask", "package_system", `pip uninstall ${pos.slice(1).join(" ")}`, raw, pos.slice(1).map(target))]
 	return [seg("unknown", "unknown_command", `${v} ${sub}`, raw)]
+}
+
+/**
+ * `uv pip <args…>` spoken to `pip`: drop the program word and the `pip` operand, **keep every flag**.
+ *
+ * The operand list is not usable here — `positionals` drops option words, and `--system` / `--target` are
+ * exactly the flags that decide whether the install stays inside the project env. Rebuilding argv from the
+ * words the user typed is the whole point.
+ */
+function asPipArgv(argv: string[]): string[] {
+	const out = argv.slice(1)
+	const at = out.indexOf("pip")
+	if (at >= 0) out.splice(at, 1)
+	return ["pip", ...out]
 }
 
 function pyEnvHandler(argv: string[], h: HandlerContext, v: string): SegmentDecision[] {
@@ -978,7 +1144,7 @@ function pyEnvHandler(argv: string[], h: HandlerContext, v: string): SegmentDeci
 		if (v === "conda" && ["install", "remove", "update"].includes(sub) && !flagValue(argv, "-n", "--name", "-p", "--prefix")) {
 			return [seg("ask", "package_system", `conda ${sub} into base env`, raw, pos.slice(1).map(target))]
 		}
-		if (v === "uv" && sub === "pip") return pipHandler(["pip", ...pos.slice(1)], h, "uv pip")
+		if (v === "uv" && sub === "pip") return pipHandler(asPipArgv(argv), h, "uv pip", { program: argv[0]!, uv: true })
 		return [seg("allow", "run_project_code", `${v} ${sub} (project env)`, raw)]
 	}
 	if (sub === "publish") return [seg("ask", "network_send", `${v} publish`, raw)]
@@ -1390,7 +1556,7 @@ function interpreterHandler(argv: string[], h: HandlerContext, v: string): Segme
 			const mod = argv[mIdx + 1] ?? ""
 			if (["http.server", "SimpleHTTPServer"].includes(mod)) return [seg("ask", "network_listen", `python -m http.server`, raw, [target(argv[mIdx + 2] ?? "8000")])]
 			if (["pytest", "unittest", "mypy", "ruff", "black", "flake8", "pylint", "coverage", "tox", "build", "venv", "json.tool", "pip"].includes(mod)) {
-				if (mod === "pip") return pipHandler(["pip", ...argv.slice(mIdx + 2)], h, "pip")
+				if (mod === "pip") return pipHandler(["pip", ...argv.slice(mIdx + 2)], h, "pip", { program: argv[0]! })
 				return [seg("allow", "run_project_code", `python -m ${mod}`, raw)]
 			}
 			return [seg("unknown", "interpreter_unknown", `python -m ${mod}`, raw)]
