@@ -110,16 +110,16 @@ back `unknown` and goes to §2.4.
 | `write_sensitive` | shell profiles (`.bashrc .zshrc .profile`), `~/.ssh/*`, `~/.gitconfig`, crontab, `/etc/*`, **live** systemd units (`/etc/systemd`, `~/.config/systemd`), `.env*` — always a location where the file takes effect, never a filename seen inside the project (§2.6) | paths (+ directory scope offered) |
 | `read_secret` | `cat ~/.ssh/id_ed25519`, `read ~/.aws/credentials`, `.env` | paths |
 | `privilege` | `sudo <cmd>`, `su`, `doas`, `pkexec` — inner command re-classified; sudo of NEVER is NEVER | inner command |
-| `package_system` | `apt|apt-get|dnf|yum|pacman|zypper|brew|snap|flatpak install|remove|upgrade`, `pip install --user/--system` (no venv), `npm i -g`, `cargo install`, `gem install`, `pipx install` | package names |
-| `vcs_remote` | `git push` (any), `git remote add|set-url`, `gh pr create|merge`, `gh release create`, `git push --tags` | remote, branch |
+| `package_system` | `apt|apt-get|dnf|yum|pacman|zypper|brew|snap|flatpak install|remove|upgrade`, `pip install --user/--system` outside a virtualenv (inside one — `VIRTUAL_ENV`/`CONDA_PREFIX` set, `.venv/bin/pip`, `uv pip` into a venv — it is project-local; `source .venv/bin/activate` is classified on its own), `npm i -g`, `cargo install`, `gem install`, `pipx install` | package names |
+| `vcs_remote` | `git push` (any), `git remote add|set-url`, `gh pr create|merge`, `gh release create`, `git push --tags` | `remote/branch` as the gate spells it — a bare `git push` names the session's own branch, never a guess; scope `remote/*` |
 | `vcs_discard` | `git reset --hard`, `git clean -f*`, `git checkout -- .`/`git restore .`, `git branch -D`, `git stash drop|clear`, `git push --force*`, `git rebase` onto pushed history is still ALLOW (recoverable via reflog) | branch/paths |
 | `network_listen` | `python -m http.server`, `nc -l`, `ssh -R|-L|-D`, `ngrok`, `--host 0.0.0.0`, `docker run -p`, `kubectl port-forward` | port |
-| `network_send` | `curl -d|-F|-T|-X POST…`, `scp`/`rsync` to `host:`, `ssh host cmd`, `aws s3 cp` to remote, `gh api -X POST`, `git push` (covered above) | host / URL |
+| `network_send` | `curl -d|-F|-T|-X POST…`, `scp`/`rsync` to `host:`, `ssh host cmd`, `aws s3 cp` to remote, `gh api -X POST`, `git push` (covered above); `docker|podman|nerdctl|helm|oras push <ref>` is the compound `container_mutation+network_send` — one row per effect, both named in the prompt | host / URL; for an artifact push the image/chart ref, scope `registry/repo` (any tag) |
 | `remote_exec` | `curl … \| sh`, `wget -O- … \| bash`, `bash <(curl …)`, `npx <unknown pkg>`, `pip install git+https://…` | URL / package |
 | `process_control` | `kill`, `pkill`, `killall`, `systemctl --user stop|restart`, `docker stop|restart` | pid / name |
 | `system_config` | `systemctl start|stop|restart|enable|disable`, `service`, `ufw allow`, `iptables -A`, `sysctl -w`, `modprobe`, `mount`, `hostnamectl`, `timedatectl` | unit / rule |
-| `container_mutation` | `docker rm|rmi|volume rm|network rm|container prune|image prune`, `docker compose down` (`-v` → entities include "volumes"), `docker run`/`exec` (host mounts or `--privileged`) | names |
-| `cluster_mutation` | `kubectl delete|apply|patch|scale|rollout|drain|cordon|exec`, `helm install|upgrade|uninstall|rollback`, `terraform apply`, `aws|gcloud|az` mutating verbs (`create|delete|put|update|terminate|rm|mb|rb|sync`) | resource, namespace, bucket |
+| `container_mutation` | `docker rm|rmi|volume rm|network rm|container prune|image prune`, `docker compose down` (`-v` → entities include "volumes"), `docker run`/`exec` (host mounts or `--privileged`); `docker|podman|nerdctl|helm|oras push` as the first half of the publish compound | names; image ref for a push |
+| `cluster_mutation` | `kubectl delete|apply|patch|scale|rollout|drain|cordon|exec`, `helm install|upgrade|uninstall|rollback` (`helm push` is the publish compound above, not this row), `terraform apply`, `aws|gcloud|az` mutating verbs (`create|delete|put|update|terminate|rm|mb|rb|sync`) | resource, namespace, bucket |
 | `db_mutation` | `psql|mysql|sqlite3|mongosh|redis-cli` with `DROP|TRUNCATE|DELETE|ALTER|FLUSHALL` or `-c` non-SELECT | table / db |
 | `perm_change` | `chmod`/`chown` outside project, `chmod 777`, `o+w`, `chmod -R` outside project | paths |
 | `interpreter_unknown` | inline code the model could not classify as read-only/project-scoped | — |
@@ -410,6 +410,31 @@ this section is reached at all). The ledger of item 3 and the posture of item 2b
    Grants are revocable by value (`/grants revoke <value>`), never by list index: the
    listing merges two stores and re-orders as grants are promoted, so an index-based
    revoke is one stale listing away from deleting the wrong entry.
+ 3b. **Publish targets are matched by grammar, not by string** (items 2 and 3 alike).
+    Targets stay strings, but for the categories whose targets have a shape —
+    `vcs_remote` / `vcs_force_protected` (git refs) and `container_mutation` /
+    `network_send` (image and chart refs) — `target-grammar.ts` is asked first and the
+    string rule only runs where the grammar has no answer. Git refs form a lattice:
+    `*` ⊃ `origin` = `origin/*` ⊃ `origin/feature/*` ⊃ `origin/feature/x`, with refspec spellings
+    (`HEAD:x`, `+x`) read on the remote side.
+    A wildcard row (`origin/*`, `origin`) never reaches a **protected branch** (`main`,
+    `master`, `trunk`, `develop`, `dev`, `release/*`, `production`, `prod`, `stable`): pushing
+    one needs a sentence that names it. Image refs match by registry, repository
+    and tag: a row without a tag covers every tag of that repository, a tagged row covers
+    that tag only, and a different registry never matches. Matching is applied to **every
+    segment** of a compound category, so `container_mutation+network_send` needs a row
+    that covers the image under each effect; one named one-way rule lets a
+    `container_mutation` row satisfy the compound's `network_send` half, because "push
+    the image" is one act. Extraction stores no prose for these categories — a
+    value the grammar cannot read is dropped at extraction and pruned on import — and
+    keeps the model's own category beside the deterministic one (`modelCategory`) so the
+    listing can say what the model thought. The grammar only ever **widens inside these
+    four categories**; fs, secret, privilege and system-config matching is untouched.
+    Forbids are never narrowed by it: a revocation fires when the string rule, the
+    grammar, or the wildcard's plain scope reaches the target, so "never push to origin"
+    still vetoes `origin/main`. A denial that found a row of the right kind but the wrong
+    target names it as a *near miss* with the sentence that would have covered it,
+    and `/grants explain <command>` prints the same per-row verdicts on demand.
 4. **Transcript grant (recent-window fallback)** — the model is asked one narrow question over **user messages
    only** (assistant text and tool results are never shown): *did the user explicitly ask
    for or approve this specific action on these specific targets, and has that not been
