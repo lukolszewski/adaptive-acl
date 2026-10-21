@@ -22,6 +22,7 @@ import {
 	formatCount,
 	getPlanFilePath,
 	getProjectId,
+	writeProjectIdMarker,
 	getProjectTmpDir,
 	hashPath,
 	hashPlan,
@@ -604,38 +605,25 @@ describe("getProjectId", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it("returns existing hash from .pi/permission-modes-*.md", () => {
-		mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-		writeFileSync(
-			join(tmpDir, ".pi", "permission-modes-45ea0551.md"),
-			"# project marker",
-		);
-		expect(getProjectId(tmpDir)).toBe("45ea0551");
-	});
-
-	it("falls back to cwd hash when no marker exists", () => {
+	it("falls back to the cwd hash when nothing is stamped", () => {
 		const id = getProjectId(tmpDir);
 		expect(id).toMatch(/^[a-f0-9]{8}$/);
 		expect(id).toBe(getProjectId(tmpDir)); // deterministic
 	});
 
-	it("falls back when .pi/ exists but no permission-modes-*.md", () => {
+	it("falls back when .pi/ exists but nothing is stamped", () => {
 		mkdirSync(join(tmpDir, ".pi"), { recursive: true });
 		writeFileSync(join(tmpDir, ".pi", "other.md"), "");
 		const id = getProjectId(tmpDir);
 		expect(id).toMatch(/^[a-f0-9]{8}$/);
 	})
 
-	it("switches from hash fallback to marker id when the marker appears mid-session", () => {
-		// Positive-only caching: a marker created after the first
-		// hash-fallback call must win on the next call.
+	it("switches from hash fallback to the stamped id when the stamp appears mid-session", () => {
+		// Positive-only caching: an id written after the first hash-fallback call
+		// must win on the next call. Written through the real writer, not a fixture.
 		const before = getProjectId(tmpDir);
 		expect(before).toMatch(/^[a-f0-9]{8}$/);
-		mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-		writeFileSync(
-			join(tmpDir, ".pi", "permission-modes-deadbeef.md"),
-			"# project marker",
-		);
+		expect(writeProjectIdMarker(tmpDir, "deadbeef")).toBe(true);
 		expect(getProjectId(tmpDir)).toBe("deadbeef");
 	})
 });
@@ -674,12 +662,9 @@ describe("getProjectTmpDir", () => {
 		expect(result.startsWith(tmpDir)).toBe(true);
 	});
 
-	it("uses existing project hash when present", () => {
+	it("uses the stamped project id when present", () => {
 		mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-		writeFileSync(
-			join(tmpDir, ".pi", "permission-modes-deadbeef.md"),
-			"",
-		);
+		expect(writeProjectIdMarker(tmpDir, "deadbeef")).toBe(true);
 		expect(getProjectTmpDir(tmpDir)).toContain("/deadbeef/");
 	});
 

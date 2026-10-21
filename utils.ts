@@ -695,14 +695,16 @@ export function findProjectRoot(cwd: string): string | null {
  * most portable first:
  *
  *   1. `<cwd>/.pi/project.json` → `{ "projectId": "…" }`. Lives inside the
- *      checkout, so it is the only source that survives a move;
- *   2. `<cwd>/.pi/permission-modes-<id>.md`, if such a file exists — read here, never
- *      written here. Checked 2026-10-21 rather than assumed: nothing in pi's `dist/`
- *      mentions this name and nothing in this package creates it, so today this tier
- *      resolves nothing. It stays because reading an extra candidate is free and a
- *      marker by that name would be honoured if some tool ever wrote one — but it is
- *      not a contract anyone offers, and no behaviour may depend on it;
- *   3. `hashPath(cwd)` — correct while the tree stays where it was.
+ *      checkout, so it is the only source that survives a move. `writeProjectIdMarker()`
+ *      is its only writer and no shipped code calls it — the adopt flow reads the id,
+ *      never stamps it — so a tree is stamped by hand or not at all;
+ *   2. `hashPath(cwd)` — correct while the tree stays where it was, and in practice
+ *      the source that always runs, because nothing stamps #1 automatically.
+ *
+ * A third source used to sit between these: `.pi/permission-modes-<id>.md`, read if
+ * present. Nothing wrote it — not this package, not pi (its `dist/` never mentions the
+ * name) — so it resolved nothing, and its tests created the file themselves. Removed
+ * 2026-10-21; the fork's history carries the discussion.
  *
  * Resolution reads the filesystem and says nothing: no logging, no `process.env`,
  * nothing that would make a verdict depend on the session it was asked in.
@@ -711,8 +713,6 @@ export function findProjectRoot(cwd: string): string | null {
 /** The id becomes one path segment, hence: lowercase alnum, then up to 31 of `-`/`_`. */
 const PROJECT_ID_SHAPE = /^[a-z0-9][a-z0-9_-]{0,31}$/
 const PROJECT_ID_FILE = path.join(".pi", "project.json")
-/** pi generates this name from a hash, so it is hex-only. */
-const PI_MARKER_NAME = /^permission-modes-([a-f0-9]+)\.md$/
 
 type CarriedId =
 	/** No file, or a file with no content and no other keys — free to be stamped. */
@@ -750,21 +750,6 @@ function readCarriedId(cwd: string): CarriedId {
 	return { state: "unidentified", doc: kept }
 }
 
-/** pi's marker, if this tree has one — read off the filename, contents are pi's. */
-function readPiMarkerId(cwd: string): string | null {
-	const piDir = path.join(cwd, ".pi")
-	try {
-		if (!existsSync(piDir)) return null
-		for (const name of readdirSync(piDir)) {
-			const hit = PI_MARKER_NAME.exec(name)
-			if (hit) return hit[1]
-		}
-	} catch {
-		/* unreadable .pi/ is "no marker", not an error — resolution continues */
-	}
-	return null
-}
-
 // Positive-result cache only: an id that came from a marker is stable for this
 // cwd. The hash fallback stays uncached, so a marker created mid-session takes
 // over on the next call (and `writeProjectIdMarker` drops the entry it invalidates).
@@ -797,9 +782,9 @@ export function writeProjectIdMarker(
 	if (!PROJECT_ID_SHAPE.test(id)) return false
 	const carried = readCarriedId(cwd)
 	if (carried.state === "unparseable") return false
-	// Whichever source is authoritative today is the id whose state directory a
-	// swap would strand.
-	const currentId = carried.state === "id" ? carried.id : readPiMarkerId(cwd)
+	// A stamped id is the one whose state directory a swap would strand; with no
+	// stamp there is nothing to strand, since the hash id is recomputed on demand.
+	const currentId = carried.state === "id" ? carried.id : null
 	if (currentId !== null && currentId !== id && !opts.force) return false
 	const file = path.join(cwd, PROJECT_ID_FILE)
 	try {
@@ -833,11 +818,6 @@ export function getProjectId(cwd: string): string {
 	if (carried.state === "id") {
 		projectIdCache.set(cwd, carried.id)
 		return carried.id
-	}
-	const piMarker = readPiMarkerId(cwd)
-	if (piMarker) {
-		projectIdCache.set(cwd, piMarker)
-		return piMarker
 	}
 	return hashPath(cwd)
 }

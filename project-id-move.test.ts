@@ -14,8 +14,10 @@
  * `~/.pi` read/write denies were left behind in the orphaned directory.
  *
  * So the id is resolved carried-first: `.pi/project.json` inside the tree beats
- * pi's `.pi/permission-modes-<id>.md`, which beats `sha256(cwd)[0:8]`. The tests
- * below build two real tmpdirs and move content between them — never the real tree.
+ * `sha256(cwd)[0:8]`. A third source sat between those — pi's
+ * `.pi/permission-modes-<id>.md`, which no program ever wrote — and was removed on
+ * 2026-10-21. The tests below build two real tmpdirs and move content between them —
+ * never the real tree.
  */
 
 import { describe, expect, it, beforeEach, afterEach } from "vitest"
@@ -54,11 +56,6 @@ function stampAt(root: string, id: string): void {
 	)
 }
 
-function piMarkerAt(root: string, id: string): void {
-	mkdirSync(join(root, ".pi"), { recursive: true })
-	writeFileSync(join(root, ".pi", `permission-modes-${id}.md`), "# pi marker\n")
-}
-
 function rawMarker(root: string): string {
 	return readFileSync(join(root, ".pi", "project.json"), "utf-8")
 }
@@ -87,21 +84,7 @@ describe("getProjectId — resolution order", () => {
 		expect(getProjectId(dir)).not.toBe(hashPath(dir))
 	})
 
-	it("the carried marker wins over pi's own marker", () => {
-		const dir = fresh()
-		piMarkerAt(dir, "45ea0551")
-		stampAt(dir, ID)
-		expect(getProjectId(dir)).toBe(ID)
-	})
-
-	it("pi's .md marker is still honoured when there is no .json", () => {
-		const dir = fresh()
-		piMarkerAt(dir, "45ea0551")
-		expect(getProjectId(dir)).toBe("45ea0551")
-		expect(readProjectIdMarker(dir)).toBe(null)
-	})
-
-	it("falls back to the path hash when neither marker exists", () => {
+	it("falls back to the path hash when nothing is stamped", () => {
 		const dir = fresh()
 		expect(getProjectId(dir)).toBe(hashPath(dir))
 		mkdirSync(join(dir, ".pi"), { recursive: true })
@@ -109,7 +92,7 @@ describe("getProjectId — resolution order", () => {
 		expect(getProjectId(dir)).toBe(hashPath(dir))
 	})
 
-	it("a marker that appears mid-session takes over on the next call", () => {
+	it("a stamp that appears mid-session takes over on the next call", () => {
 		const dir = fresh()
 		expect(getProjectId(dir)).toBe(hashPath(dir))
 		stampAt(dir, ID)
@@ -147,7 +130,7 @@ describe("a move carries the identity with the tree", () => {
 		expect(getProjectPermissionsDir(after)).toBe(join(after, ".pi", "projects", ID))
 	})
 
-	it("the same contents without a marker are two different projects — the bug this fixes", () => {
+	it("the same contents without a stamp are two different projects — the bug this fixes", () => {
 		const before = fresh()
 		mkdirSync(join(before, ".pi", "projects"), { recursive: true })
 		const after = fresh()
@@ -156,9 +139,9 @@ describe("a move carries the identity with the tree", () => {
 		expect(getProjectId(after)).toBe(hashPath(after))
 	})
 
-	it("a copied pi marker is honoured too", () => {
+	it("a copied stamp is honoured too", () => {
 		const before = fresh()
-		piMarkerAt(before, "45ea0551")
+		stampAt(before, "45ea0551")
 		const after = fresh()
 		cpSync(before, after, { recursive: true })
 		expect(getProjectId(after)).toBe("45ea0551")
@@ -211,14 +194,12 @@ describe("writeProjectIdMarker", () => {
 		expect(readProjectIdMarker(dir)).toBe(ID)
 	})
 
-	it("refuses to swap away an id that came from pi's marker", () => {
+	it("stamps a tree that carries nothing, since there is no id to strand", () => {
 		const dir = fresh()
-		piMarkerAt(dir, "45ea0551")
-		expect(writeProjectIdMarker(dir, ID)).toBe(false)
-		expect(existsSync(join(dir, ".pi", "project.json"))).toBe(false)
-		// The id pi already uses is a no-op for the state directory, so it is free.
-		expect(writeProjectIdMarker(dir, "45ea0551")).toBe(true)
-		expect(readProjectIdMarker(dir)).toBe("45ea0551")
+		expect(getProjectId(dir)).toBe(hashPath(dir))
+		expect(writeProjectIdMarker(dir, ID)).toBe(true)
+		expect(readProjectIdMarker(dir)).toBe(ID)
+		expect(getProjectId(dir)).toBe(ID)
 	})
 
 	it("replaces only when told to, with force", () => {
