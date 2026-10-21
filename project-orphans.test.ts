@@ -196,7 +196,10 @@ describe("listProjectStateDirs", () => {
 	it("pairs with getProjectId: the id in use is the one excluded", () => {
 		const cwd = root()
 		mkdirSync(join(cwd, ".pi"), { recursive: true })
-		writeFileSync(join(cwd, ".pi", "permission-modes-" + LIVE + ".md"), "# pi marker\n")
+		writeFileSync(
+			join(cwd, ".pi", "project.json"),
+			JSON.stringify({ projectId: LIVE }) + "\n",
+		)
 		put(cwd, LIVE, "permissions.json", { permissions: { allow: ["Bash(npm test)"] } })
 		put(cwd, ORPHAN, "permissions.local.json", {
 			permissions: { deny: ["Bash(git push*)", "Bash(rm -rf /*)"] },

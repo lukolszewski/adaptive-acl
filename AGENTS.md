@@ -179,7 +179,7 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ```bash
 npm install --ignore-scripts --no-audit --no-fund   # what CI does; nothing here has a build step
-npx vitest run        # 85 files, all green. 3503 tests at this commit — the number moves with the
+npx vitest run        # 85 files, all green. 3500 tests at this commit — the number moves with the
                       # suite, so quote CI's log rather than a figure copied out of a doc.
 npm run typecheck     # tsc --noEmit -p tsconfig.json — zero errors
 npm run pack:dry      # 64 files, ~595 kB tarball, 2.7 MB unpacked
@@ -380,11 +380,15 @@ Everything the package calls itself now says `adaptive-acl`: the config files, t
 the `[adaptive-acl]` console prefix, the `adaptive-acl:context` and `adaptive-acl:plan` prompt anchors, the
 `adaptive-acl-forwarding` session directory, and the `adaptive-acl-notice` transcript entry.
 
-One identifier keeps the old spelling, and the reason is not inheritance. `PI_MARKER_NAME` (`utils.ts:715`)
-matches `.pi/permission-modes-<id>.md`, which this package reads at `utils.ts:699` and never writes. Measured
-on 2026-10-21: pi's installed `dist/` contains no reference to that name at all — its only marker concept is
-`.pi-update-incomplete` for git installs — and nothing in this package or its upstream creates the file. So
-the tier resolves nothing in practice, project id comes from `project.json` or `hashPath(cwd)`, and the tests
-that exercise it (`utils.test.ts:607`, `project-id-move.test.ts:59`) manufacture their own fixture. Treat it
-as a dead candidate kept for tolerance, not as a pi contract: renaming or deleting it changes no behaviour, so
-the only reason to keep the name is that some unknown tool might one day write it.
+Project identity has two sources, not three (`utils.ts:688`): `.pi/project.json` → `projectId`, else
+`hashPath(cwd)`. A third used to sit between them, reading `.pi/permission-modes-<id>.md` and described in a
+comment as "pi's own marker, used for kanban/memory boards too". It was not pi's: pi's installed `dist/` never
+mentions that name — its only marker concept is `.pi-update-incomplete` for git installs — and no writer
+existed here or upstream, so the source resolved nothing while its own tests created the file to read back.
+Removed 2026-10-21.
+
+What that leaves is worth knowing before trusting a move. `writeProjectIdMarker()` is the only writer of
+`project.json` and no shipped code calls it — `grants-adopt.ts` reads `getProjectId()`, it never stamps — so
+every real project is identified by `hashPath(cwd)` and moving a checkout does strand its rules, denies and
+ledger until the tree is stamped by hand. Stamping on first use would make the move story real; that is not
+what the code does today.
