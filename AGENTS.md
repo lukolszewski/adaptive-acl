@@ -380,9 +380,11 @@ Everything the package calls itself now says `adaptive-acl`: the config files, t
 the `[adaptive-acl]` console prefix, the `adaptive-acl:context` and `adaptive-acl:plan` prompt anchors, the
 `adaptive-acl-forwarding` session directory, and the `adaptive-acl-notice` transcript entry.
 
-One identifier keeps the old spelling and must keep it. `PI_MARKER_NAME` (`utils.ts:711`) matches
-`.pi/permission-modes-<id>.md` — a marker **pi** writes and this package only reads (`utils.ts:699`).
-Renaming that regex rebrands nothing: it stops the fork recognising pi's marker, so the project id falls back
-to `hashPath(cwd)` without a word, and a checkout that moved loses the grants and ledger rows filed under the
-id it used to have (`grants-adopt.ts`, `adopt-live.ts`). Change it only together with whatever writes that
-file.
+One identifier keeps the old spelling, and the reason is not inheritance. `PI_MARKER_NAME` (`utils.ts:715`)
+matches `.pi/permission-modes-<id>.md`, which this package reads at `utils.ts:699` and never writes. Measured
+on 2026-10-21: pi's installed `dist/` contains no reference to that name at all — its only marker concept is
+`.pi-update-incomplete` for git installs — and nothing in this package or its upstream creates the file. So
+the tier resolves nothing in practice, project id comes from `project.json` or `hashPath(cwd)`, and the tests
+that exercise it (`utils.test.ts:607`, `project-id-move.test.ts:59`) manufacture their own fixture. Treat it
+as a dead candidate kept for tolerance, not as a pi contract: renaming or deleting it changes no behaviour, so
+the only reason to keep the name is that some unknown tool might one day write it.
