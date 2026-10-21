@@ -429,7 +429,7 @@ function publish(snapshot: AuthoritySnapshot): AuthoritySnapshot {
 	for (const line of snapshot.diagnostics) {
 		if (_warned.has(line)) continue
 		_warned.add(line)
-		console.warn(`[permission-modes] ${line}`)
+		console.warn(`[adaptive-acl] ${line}`)
 	}
 	_snapshot = snapshot
 	return snapshot
@@ -510,7 +510,7 @@ export function updatePermissionModesConfig(
 		return true
 	} catch (err) {
 		console.warn(
-			`[permission-modes] Failed to write ${_configPath}:`,
+			`[adaptive-acl] Failed to write ${_configPath}:`,
 			err,
 		)
 		return false
@@ -654,13 +654,13 @@ export function loadProjectPermissionModesConfig(
 		const parsed = JSON.parse(raw) as unknown
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
 			console.warn(
-				`[permission-modes] ${filePath} is not a JSON object — ignored`,
+				`[adaptive-acl] ${filePath} is not a JSON object — ignored`,
 			)
 			return {}
 		}
 		return parsed as PermissionModesConfig
 	} catch (err) {
-		console.warn(`[permission-modes] Failed to load ${filePath}:`, err)
+		console.warn(`[adaptive-acl] Failed to load ${filePath}:`, err)
 		return {}
 	}
 }
@@ -673,7 +673,7 @@ export function loadPermissionModesConfig(): PermissionModesConfig {
 		return JSON.parse(raw) as PermissionModesConfig
 	} catch (err) {
 		console.warn(
-			`[permission-modes] Failed to load ${_configPath}:`,
+			`[adaptive-acl] Failed to load ${_configPath}:`,
 			err,
 		)
 		return {}

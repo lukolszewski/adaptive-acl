@@ -1,5 +1,5 @@
 /**
- * Pure helpers for the permission-modes extension.
+ * Pure helpers for the adaptive-acl extension.
  *
  * - Bash read-only classifier used by Plan mode and the default/accept-edits
  *   gates (SAFE allowlist AND not DESTRUCTIVE).
@@ -811,7 +811,7 @@ export function writeProjectIdMarker(
 		projectIdCache.delete(cwd)
 		return true
 	} catch (err) {
-		console.warn(`[permission-modes] Failed to write ${file}:`, err)
+		console.warn(`[adaptive-acl] Failed to write ${file}:`, err)
 		return false
 	}
 }
@@ -1025,7 +1025,7 @@ export function trackOutsideWrite(
 			{ mode: 0o600 },
 		)
 	} catch (err) {
-		console.warn("[permission-modes] Failed to track outside write:", err)
+		console.warn("[adaptive-acl] Failed to track outside write:", err)
 	}
 }
 
@@ -1056,12 +1056,12 @@ export function listTrackedOutsideWrites(
 					snaps.push(parsed)
 				}
 			} catch (err) {
-				console.warn(`[permission-modes] Skipping malformed snapshot ${f}:`, err)
+				console.warn(`[adaptive-acl] Skipping malformed snapshot ${f}:`, err)
 			}
 		}
 		return snaps.sort((a, b) => a.timestamp.localeCompare(b.timestamp))
 	} catch (err) {
-		console.warn("[permission-modes] Failed to list tracked writes:", err)
+		console.warn("[adaptive-acl] Failed to list tracked writes:", err)
 		return []
 	}
 }
@@ -1102,7 +1102,7 @@ export function restoreOutsideWrite(snapshot: OutsideWriteSnapshot): {
 		writeFileSync(originalPath, backupContent, { mode: 0o644 })
 		return { restored: true, action: "restored" }
 	} catch (err) {
-		console.warn("[permission-modes] Failed to restore outside write:", err)
+		console.warn("[adaptive-acl] Failed to restore outside write:", err)
 		return { restored: false, action: "noop" }
 	}
 }
@@ -1124,7 +1124,7 @@ export function popTrackedOutsideWrite(
 		const filepath = path.join(dir, filename)
 		if (existsSync(filepath)) unlinkSync(filepath)
 	} catch (err) {
-		console.warn("[permission-modes] Failed to pop tracked write:", err)
+		console.warn("[adaptive-acl] Failed to pop tracked write:", err)
 	}
 }
 
@@ -1163,11 +1163,11 @@ export function popTrackedOutsideWrite(
  */
 // ---- Mode prompt anchor injection (v2.0.0) ------------------------------
 
-export const MODE_PROMPT_BEGIN = "<!-- permission-modes:context -->"
-export const MODE_PROMPT_END = "<!-- /permission-modes:context -->"
+export const MODE_PROMPT_BEGIN = "<!-- adaptive-acl:context -->"
+export const MODE_PROMPT_END = "<!-- /adaptive-acl:context -->"
 
 const MODE_PROMPT_BLOCK_RE =
-	/<!-- permission-modes:context -->[\s\S]*?<!-- \/permission-modes:context -->\n?/
+	/<!-- adaptive-acl:context -->[\s\S]*?<!-- \/adaptive-acl:context -->\n?/
 
 export type PermissionMode = "ask" | "plan" | "auto" | "bypass"
 export type PlanPhase = "exploring" | "refining" | "executing"
@@ -1234,10 +1234,10 @@ export function hashPlan(content: string): string {
 
 const PLAN_FILE_TEMPLATE = `# Plan
 
-<!-- permission-modes:plan -->
+<!-- adaptive-acl:plan -->
 Plan:
 1. (pending)
-<!-- /permission-modes:plan -->
+<!-- /adaptive-acl:plan -->
 `
 
 export function getPlanFilePath(cwd: string): string {
@@ -1271,7 +1271,7 @@ export function ensurePlanFile(cwd: string): string {
 			writeFileSync(filePath, PLAN_FILE_TEMPLATE, { mode: 0o644 })
 		}
 	} catch (err) {
-		console.warn("[permission-modes] Failed to ensure plan file:", err)
+		console.warn("[adaptive-acl] Failed to ensure plan file:", err)
 	}
 	return filePath
 }
@@ -1349,7 +1349,7 @@ export function extractPlanSection(message: string): string | null {
 /** True when plan.md is missing, empty, or still the default placeholder template. */
 export function shouldSyncAssistantPlanToFile(planContent: string | null): boolean {
 	if (!planContent?.trim()) return true
-	if (!planContent.includes("<!-- permission-modes:plan -->")) return false
+	if (!planContent.includes("<!-- adaptive-acl:plan -->")) return false
 	return filterSubstantivePlanItems(extractTodoItems(planContent)).length === 0
 }
 

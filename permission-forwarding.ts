@@ -2,7 +2,7 @@
  * Subagent → parent-session permission ask forwarding (filesystem inbox).
  *
  * Namespace (isolated from gotgenes):
- *   ~/.pi/agent/sessions/permission-modes-forwarding/sessions/<sessionId>/{requests,responses}/
+ *   ~/.pi/agent/sessions/adaptive-acl-forwarding/sessions/<sessionId>/{requests,responses}/
  *
  * Child keeps `challenge` only in memory and requires it echoed on the response,
  * so a forged response that did not read the matching request cannot approve.
@@ -87,7 +87,7 @@ export function forwardingSessionDir(
 	return join(
 		agentDir,
 		"sessions",
-		"permission-modes-forwarding",
+		"adaptive-acl-forwarding",
 		"sessions",
 		encodeURIComponent(sessionId),
 	);

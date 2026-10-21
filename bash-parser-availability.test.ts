@@ -248,7 +248,7 @@ describe("packaged layout: the grammar has to resolve from the artifact", () => 
 
 			expect(warned.mock.calls).toHaveLength(1)
 			const line = warned.mock.calls[0]!.join(" ")
-			expect(line).toContain("[permission-modes]")
+			expect(line).toContain("[adaptive-acl]")
 			expect(line).toContain("analyzer is DOWN")
 			expect(mod.takeBashParserWarning()).toContain("analyzer")
 			expect(mod.takeBashParserWarning()).toBeNull()

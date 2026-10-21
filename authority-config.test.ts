@@ -135,7 +135,7 @@ describe("authority.persist — validation", () => {
 		applyAuthorityLayers({ user: { authority: { persist: "file" as never } } })
 		expect(getAuthorityDiagnostics()).toHaveLength(1)
 		expect(warn).toHaveBeenCalledTimes(1)
-		expect(String(warn.mock.calls[0][0])).toContain("[permission-modes]")
+		expect(String(warn.mock.calls[0][0])).toContain("[adaptive-acl]")
 		expect(String(warn.mock.calls[0][0])).toContain("authority.persist")
 	})
 

@@ -364,7 +364,7 @@ function assignmentNameOf(arg: string): string | null {
  * them would mean every `NODE_ENV=test npm test` prompts forever — the rule an "allow always" writes for
  * that command names the command, and an env prefix the matcher cannot see would make it unhonourable.
  */
-const EXECUTION_ENV_PREFIXES = ["LD_", "DYLD_", "PI_", "PERMISSION_MODES_"]
+const EXECUTION_ENV_PREFIXES = ["LD_", "DYLD_", "PI_", "ADAPTIVE_ACL_"]
 
 const EXECUTION_ENV_NAMES = new Set([
 	// how a process finds its code

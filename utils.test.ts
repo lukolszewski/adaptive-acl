@@ -1181,10 +1181,10 @@ describe("injectModePrompt", () => {
 	it("injects anchor block and replaces previous block", () => {
 		const base = "Base prompt\n"
 		const first = injectModePrompt(base, "[Ask] reminder")
-		expect(first).toContain("<!-- permission-modes:context -->")
+		expect(first).toContain("<!-- adaptive-acl:context -->")
 		expect(first).toContain("[Ask] reminder")
 		const second = injectModePrompt(first, "[Plan] new")
-		expect(second.match(/<!-- permission-modes:context -->/g)?.length).toBe(1)
+		expect(second.match(/<!-- adaptive-acl:context -->/g)?.length).toBe(1)
 		expect(second).toContain("[Plan] new")
 		expect(second).not.toContain("[Ask] reminder")
 	})
@@ -1265,7 +1265,7 @@ describe("plan helpers", () => {
 		)
 		expect(
 			shouldSyncAssistantPlanToFile(
-				"<!-- permission-modes:plan -->\nPlan:\n1. (pending)",
+				"<!-- adaptive-acl:plan -->\nPlan:\n1. (pending)",
 			),
 		).toBe(true)
 	})

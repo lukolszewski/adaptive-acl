@@ -26,7 +26,7 @@
  * code under test, and none of them are ours to normalise.
  */
 
-const INHERITED_PREFIXES = ["PERMISSION_MODES_", "PI_SUBAGENT_"];
+const INHERITED_PREFIXES = ["ADAPTIVE_ACL_", "PI_SUBAGENT_"];
 
 for (const key of Object.keys(process.env)) {
 	if (INHERITED_PREFIXES.some((prefix) => key.startsWith(prefix))) {

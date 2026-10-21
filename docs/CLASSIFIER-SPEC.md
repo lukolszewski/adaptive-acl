@@ -614,9 +614,9 @@ temp-0 extraction rebuilds the same ledger from scratch.
 
 ## 5. Observability and safety rails
 
-- Every decision can be logged: `PERMISSION_MODES_CLASSIFIER_DEBUG=1` turns on the gate, ledger and
+- Every decision can be logged: `ADAPTIVE_ACL_CLASSIFIER_DEBUG=1` turns on the gate, ledger and
   classifier lines (layer, category, entities, model latency, and for a model answer the raw JSON and
-  the verification result); `PERMISSION_MODES_DEBUG=1` covers the parser's own lines.
+  the verification result); `ADAPTIVE_ACL_DEBUG=1` covers the parser's own lines.
 - Denials tell the agent the category and entities so it can ask the user precisely, and an
   unavailable classifier is named as one (`/classifier-status` distinguishes disabled, no endpoint
   resolved, and endpoint present but failing — three states that look identical to the user).

@@ -752,9 +752,9 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
   }
 
   function logClassifierUnavailable(err: unknown, attempt: number): void {
-    const debug = process.env.PERMISSION_MODES_CLASSIFIER_DEBUG === "1";
+    const debug = process.env.ADAPTIVE_ACL_CLASSIFIER_DEBUG === "1";
     const message = classifierErrorMessage(err);
-    const line = `[permission-modes] Classifier unavailable (${attempt}/${MAX_CLASSIFIER_FAILURES}): ${message}`;
+    const line = `[adaptive-acl] Classifier unavailable (${attempt}/${MAX_CLASSIFIER_FAILURES}): ${message}`;
     if (debug) {
       console.warn(line);
       if (err instanceof Error && err.stack) console.debug(err.stack);
@@ -859,7 +859,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       });
       if (!res.ok) {
         // Loud on purpose: a journal we cannot write means approvals are not surviving a restart.
-        console.log(`[permission-modes] grant journal NOT updated (${dest}): ${res.error}`);
+        console.log(`[adaptive-acl] grant journal NOT updated (${dest}): ${res.error}`);
       }
     } catch {
       /* persistence must never break the gate */
@@ -894,7 +894,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
   function startLedgerBackfill(ctx: ExtensionContext, endpoint: ModelEndpoint): void {
     if (ledgerBackfillActive) return;
     ledgerBackfillActive = true;
-    const debugOn = process.env.PERMISSION_MODES_CLASSIFIER_DEBUG === "1";
+    const debugOn = process.env.ADAPTIVE_ACL_CLASSIFIER_DEBUG === "1";
     const myLedger = gateLedger;
     void (async () => {
       try {
@@ -912,7 +912,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
             endpoint,
             maxCalls: 4,
             backfillLimit: classifierConfig.ledgerBackfillLimit,
-            debug: debugOn ? (l) => console.debug("[permission-modes]", l) : undefined,
+            debug: debugOn ? (l) => console.debug("[adaptive-acl]", l) : undefined,
           });
           if (sync.changed) scheduleLedgerPersist();
           if (sync.pending === 0) return;
@@ -933,7 +933,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
     tool: string,
     input: Record<string, unknown>,
   ): Promise<Block | undefined> {
-    const debugOn = process.env.PERMISSION_MODES_CLASSIFIER_DEBUG === "1";
+    const debugOn = process.env.ADAPTIVE_ACL_CLASSIFIER_DEBUG === "1";
     // The resolver knows WHY there is no endpoint; the denial text used to guess. Take the reason with the endpoint.
     const resolution = classifierConfig.enabled
       ? await resolveGateEndpointWithFailure(classifierConfig, ctx.modelRegistry as any)
@@ -978,7 +978,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
             maxCalls: 2,
             backfillLimit: classifierConfig.ledgerBackfillLimit,
             signal: ctx.signal,
-            debug: debugOn ? (l) => console.debug("[permission-modes]", l) : undefined,
+            debug: debugOn ? (l) => console.debug("[adaptive-acl]", l) : undefined,
           });
           if (sync.changed) scheduleLedgerPersist();
           if (sync.pending > 0) startLedgerBackfill(ctx, endpoint);
@@ -994,7 +994,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
           ledger: ledgerOn ? gateLedger : undefined,
           userMessages,
           signal: ctx.signal,
-          debug: debugOn ? (l) => console.debug("[permission-modes]", l) : undefined,
+          debug: debugOn ? (l) => console.debug("[adaptive-acl]", l) : undefined,
         });
       } catch (err) {
         return promptAutoTier3(
@@ -1016,7 +1016,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
         // runGate promoted ledger/transcript grants into the session store
         scheduleLedgerPersist();
         if (debugOn) {
-          console.debug(`[permission-modes] gate allow (${r.grantedBy}): ${r.reason}`);
+          console.debug(`[adaptive-acl] gate allow (${r.grantedBy}): ${r.reason}`);
         }
       }
       return finishAutoTier3Allow(ctx, tool, input);
@@ -1048,7 +1048,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       `heredoc instead of inline. Then try again.`;
     if (debugOn) {
       console.debug(
-        `[permission-modes] unparseable (#${consecutiveUnparseable}): ${why}`,
+        `[adaptive-acl] unparseable (#${consecutiveUnparseable}): ${why}`,
       );
     }
     if (consecutiveUnparseable <= UNPARSEABLE_RETRY_BUDGET) {
@@ -1196,7 +1196,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
             includeAgentsMd: classifierConfig.includeAgentsMd,
             contextTokens: classifierConfig.contextTokens,
             signal: ctx.signal,
-            debug: process.env.PERMISSION_MODES_CLASSIFIER_DEBUG === "1",
+            debug: process.env.ADAPTIVE_ACL_CLASSIFIER_DEBUG === "1",
           });
           if (!verdict.allow) {
             classifierDenialState = recordClassifierDenial(classifierDenialState);
@@ -1218,9 +1218,9 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
           return finishAutoTier3Allow(ctx, tool, input);
         } catch (err) {
           if (attempt < MAX_CLASSIFIER_FAILURES) {
-            if (process.env.PERMISSION_MODES_CLASSIFIER_DEBUG === "1") {
+            if (process.env.ADAPTIVE_ACL_CLASSIFIER_DEBUG === "1") {
               console.debug(
-                `[permission-modes] Classifier retry (${attempt}/${MAX_CLASSIFIER_FAILURES}): ${classifierErrorMessage(err)}`,
+                `[adaptive-acl] Classifier retry (${attempt}/${MAX_CLASSIFIER_FAILURES}): ${classifierErrorMessage(err)}`,
               );
             }
             continue;
@@ -3288,7 +3288,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
   });
 
   // ---- context injection (system prompt anchor) --------------------------
-  // Appends the per-turn permission-modes notice as the LAST message of every
+  // Appends the per-turn adaptive-acl notice as the LAST message of every
   // LLM call (pi converts role "custom" to a user message). Transient: the
   // message is not persisted to the session, and the classifier transcript
   // builder never sees it. Keeping it at the tail preserves the KV cache for
@@ -3299,7 +3299,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       ...(event.messages ?? []),
       {
         role: "custom" as const,
-        customType: "permission-modes-notice",
+        customType: "adaptive-acl-notice",
         content: `<permission-mode>\n${tailBannerText}\n</permission-mode>`,
         display: false,
         timestamp: Date.now(),
@@ -3386,7 +3386,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
           workingPrompt.includes("<skill")
         ) {
           console.warn(
-            `[permission-modes] Skill filter for mode "${currentMode}" was a no-op ` +
+            `[adaptive-acl] Skill filter for mode "${currentMode}" was a no-op ` +
               `(${skillFilter.length} skill(s) requested: ${skillFilter.join(", ")}).`,
           );
         }

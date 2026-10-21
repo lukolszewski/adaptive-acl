@@ -144,7 +144,7 @@ describe("envChangesExecution: where a rule stops being able to speak for a leg"
 		"EDITOR",
 		"CC",
 		"PI_SUBAGENT_CHILD",
-		"PERMISSION_MODES_INHERITED_MODE",
+		"ADAPTIVE_ACL_INHERITED_MODE",
 	])("%s changes execution", (name) => {
 		expect(envChangesExecution(name)).toBe(true)
 	})

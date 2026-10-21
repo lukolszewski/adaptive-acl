@@ -950,7 +950,7 @@ function replySample(message: AssistantMessage): string {
 
 function debugStageReply(label: string, text: string): void {
 	if (!text) return
-	console.debug(`[permission-modes] Classifier ${label}:`, text.slice(0, 2000))
+	console.debug(`[adaptive-acl] Classifier ${label}:`, text.slice(0, 2000))
 }
 
 /** Did the model answer with the forced call at all (as opposed to answering in prose)? */
@@ -1180,7 +1180,7 @@ export async function classifyToolCall(opts: {
 
 		if (opts.debug) {
 			console.debug(
-				"[permission-modes] Classifier request:",
+				"[adaptive-acl] Classifier request:",
 				JSON.stringify({
 					model: opts.modelRef,
 					tool: opts.pendingTool.name,
@@ -1206,7 +1206,7 @@ export async function classifyToolCall(opts: {
 
 		if (opts.debug) {
 			console.debug(
-				"[permission-modes] Classifier verdict:",
+				"[adaptive-acl] Classifier verdict:",
 				JSON.stringify(verdict),
 			)
 		}

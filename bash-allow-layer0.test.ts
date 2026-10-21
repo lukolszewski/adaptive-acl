@@ -262,7 +262,7 @@ describe("the environment a command runs with", () => {
 		"GIT_SSH_COMMAND=nc git push origin",
 		"PATH=/tmp/bin git status",
 		"BASH_ENV=/tmp/rc git status",
-		"PERMISSION_MODES_INHERITED_MODE=auto git status",
+		"ADAPTIVE_ACL_INHERITED_MODE=auto git status",
 	])("no rule covers %s — the prefix changes what executes", (command) => {
 		// The old path refused these only because its assignment scanner left an unknown name attached to
 		// the command. With assignments out of argv the refusal has to be stated, and it is.

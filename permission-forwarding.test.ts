@@ -182,7 +182,7 @@ describe("permission-forwarding", () => {
 		const respPath = join(
 			agentDir,
 			"sessions",
-			"permission-modes-forwarding",
+			"adaptive-acl-forwarding",
 			"sessions",
 			encodeURIComponent("parent-bad"),
 			"responses",
@@ -376,7 +376,7 @@ describe("permission-forwarding", () => {
 		const dir = join(
 			agentDir,
 			"sessions",
-			"permission-modes-forwarding",
+			"adaptive-acl-forwarding",
 			"sessions",
 			encodeURIComponent("parent-7"),
 			"requests",
