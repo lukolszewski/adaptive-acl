@@ -24,6 +24,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os";
 import path from "node:path";
 import { initBashParser, takeBashParserWarning } from "./bash-parser.ts";
+import { describeTarget } from "./target-grammar.ts";
 import {
   classifyToolCall,
   invalidateClassifierVerdictCache,
@@ -154,11 +155,13 @@ import {
 import {
   addGrant,
   createGrantStore,
+  explainGrantsCover,
   grantsCover,
   importSessionGrants,
   revokeRows,
   type SessionGrant,
 } from "./session-grants.ts";
+import { evaluateBash } from "./risk-policy.ts";
 import {
 	collectUserMessagesFromBranch,
 	collectUserMessageRefs,
@@ -180,6 +183,7 @@ import { copilotTokensSpent } from "./copilot-session.ts";
 import {
   createLedger,
   deserializeLedger,
+  explainLedgerCover,
   extractionStats,
   importLedger,
   ledgerCovers,
@@ -949,7 +953,16 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
     const ledgerOn = classifierConfig.ledger !== false;
     // One policy object for both calls: the attribution below resolves the entities the gate returned
     // against the SAME root layer 0 used, and re-deriving it anywhere else mis-resolves them.
-    const gatePolicy = { cwd: ctx.cwd, project: ctx.cwd, home: homedir() };
+    // `env` lets layer 0 see an active virtualenv (`pip install` inside it is not `package_system`); `gitBranch`
+    // is the module variable `readGitBranch` refreshes on session events, read at call time so a bare
+    // `git push` names the branch actually being pushed. Never re-derive either here.
+    const gatePolicy = {
+      cwd: ctx.cwd,
+      project: ctx.cwd,
+      home: homedir(),
+      env: process.env,
+      gitBranch: gitBranch || undefined,
+    };
     // What the caller still knows after the gate returns, for the denial text: whether THIS call had a
     // model endpoint, how much transcript it was given, and which ledger it consulted. Without these
     // three the rendered denial can only say `undetermined`.
@@ -961,6 +974,8 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       endpointFailure: resolution.failure,
       userMessages: userMessages.length,
       ledger: ledgerOn ? gateLedger : undefined,
+      // The session store too, so a denial can name the row that nearly covered the target.
+      grants: gateGrants,
     };
     gateCallInFlight = true;
     let r: GateResult;
@@ -1122,8 +1137,10 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
     const sessionEntityOption = targets.length
       ? `Allow for session: ${targets.slice(0, 3).join(", ")}${targets.length > 3 ? ", …" : ""}`
       : undefined;
+    // A scope the grammar can read is shown in words ("all branches on origin"); the stored value stays the
+    // gate's own spelling (`origin/*`), which is what the matcher compares against.
     const sessionScopeOption = scopes.length
-      ? `Allow for session (scope ${scopes[0]})`
+      ? `Allow for session (${describeTarget(r.category.split("+")[0]!, scopes[0]!) ?? `scope ${scopes[0]}`})`
       : undefined;
     const options: string[] = ["Allow"];
     const folderRule = r.tier !== "never" ? suggestFolderAllowRule(tool, input, ctx.cwd) : undefined;
@@ -2033,8 +2050,53 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
 
   pi.registerCommand("grants", {
     description:
-      "Show grants and the authorisation ledger (clear | revoke <value> | export [path] | import <path> [--replace] [--yes] | auto on|off|path <p> | adopt | adopt confirm <id>)",
+      "Show grants and the authorisation ledger (clear | revoke <value> | explain <command> | export [path] | import <path> [--replace] [--yes] | auto on|off|path <p> | adopt | adopt confirm <id>)",
     handler: async (args, ctx) => {
+      // `/grants explain <command>`: run layer 0 on the command with the SAME policy the gate uses, then print the
+      // verdict of every candidate row in both stores — the gate's own predicates, re-run as pure functions.
+      // This is the read-out for "I said yes to that, why did it ask?": it names the row and the reason, instead of
+      // leaving the user to compare spellings by eye.
+      const explainMatch = /^explain\s+(.+)$/is.exec(String(args ?? "").trim())
+      if (explainMatch) {
+        const cmd = explainMatch[1]!.trim()
+        await initBashParser()
+        const policy = {
+          cwd: ctx.cwd,
+          project: ctx.cwd,
+          home: homedir(),
+          env: process.env,
+          gitBranch: gitBranch || undefined,
+        }
+        const d = evaluateBash(cmd, policy)
+        const el: string[] = []
+        el.push(`command:  ${cmd}`)
+        el.push(`layer 0:  tier ${d.tier} · category ${d.category}${d.unparseable ? " · unparseable" : ""} — ${d.description}`)
+        el.push(
+          `entities: ${d.entities.length ? d.entities.map((e) => `${e.kind} ${e.value}`).join(", ") : "(none)"}`,
+        )
+        if (d.tier === "allow") el.push("tier allow needs no authorisation; the rows below are shown for reference only.")
+        if (d.tier === "never") el.push("tier never cannot be pre-authorised; no row can cover it.")
+        el.push("")
+        el.push("Session grants:")
+        for (const l of explainGrantsCover(gateGrants, d.category, d.entities, policy.home, policy.project)) el.push(`  ${l}`)
+        el.push("")
+        el.push("Ledger:")
+        for (const l of explainLedgerCover(gateLedger, d.category, d.entities, policy.home, policy.project)) el.push(`  ${l}`)
+        const explainText = el.join("\n")
+        if (ctx.hasUI) {
+          pi.sendMessage(
+            {
+              customType: "gate-grants-list",
+              content: `**Why this command is (not) covered**\n\n\`\`\`\n${explainText}\n\`\`\``,
+              display: true,
+            },
+            { triggerTurn: false },
+          )
+        } else {
+          console.log(explainText)
+        }
+        return
+      }
       // Revoke ONE thing, by value. Deliberately not by list index: the list is
       // re-rendered from two stores (ledger + session) in an order that shifts as
       // grants are promoted, so an index-based revoke is one stale list away from
@@ -2279,12 +2341,13 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       lines.push("Ledger grants (extracted from your messages):");
       if (!gateLedger.grants.length) lines.push("  (none)");
       for (const g of gateLedger.grants) {
+        // `modelCategory` is the audit trail of a category the code overrode: shown, never matched on.
         lines.push(
           `  ${g.category}  ${g.value}  — "${g.quote.slice(0, 90)}"${
             g.origin === "imported"
               ? `  [imported from msg ${g.sourceSeq ?? "?"}]`
               : ` (msg ${g.seq})`
-          }`,
+          }${g.modelCategory ? ` (model said ${g.modelCategory})` : ""}`,
         );
       }
       lines.push("");

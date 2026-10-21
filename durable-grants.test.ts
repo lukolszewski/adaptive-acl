@@ -176,6 +176,26 @@ describe("selectDurableGrants", () => {
 		expect(selectDurableGrants(store).map((g) => g.value).sort()).toEqual(["/data/", "/keep/me"])
 	})
 
+	it("selects a durable vcs_remote row — a remote name is not a path", () => {
+		const store = createGrantStore()
+		addGrant(store, "vcs_remote", "origin/*", "entity", true)
+		addGrant(store, "vcs_remote", "gh workflow run", "entity", true)
+		// A sentence is still not a target, whatever category it was filed under.
+		addGrant(store, "vcs_remote", "push this branch to the remote before review", "entity", true)
+		expect(selectDurableGrants(store).map((g) => g.value).sort()).toEqual(["gh workflow run", "origin/*"])
+	})
+
+	it("carries that vcs_remote 'always' through the journal to the next session", () => {
+		const p = at("vcs-durable.json")
+		const earned = createGrantStore()
+		addGrant(earned, "vcs_remote", "origin/*", "entity", true)
+		expect(mergeIntoGrantsFile(p, LEDGER, selectDurableGrants(earned)).written).toBe(1)
+
+		const after = reimport(p)
+		expect(after.grants.map((g) => [g.category, g.value])).toEqual([["vcs_remote", "origin/*"]])
+		expect(after.grants[0]).toMatchObject({ durable: true, origin: "imported" })
+	})
+
 	it("a store that only imported never re-exports", () => {
 		const p = at("nothing-to-export.json")
 		const earned = createGrantStore()

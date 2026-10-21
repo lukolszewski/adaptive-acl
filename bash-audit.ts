@@ -404,7 +404,13 @@ export function envChangesExecution(name: string): boolean {
  */
 function policyVerdict(command: string, cwd: string, preParsed?: PolicyOptions["preParsed"]): PolicyDecision | null {
 	try {
-		return evaluateBash(command, { cwd, project: cwd, home: homedir(), preParsed })
+		// `env` is the live process env, and it is the only place a virtualenv the user activated before
+		// starting pi is visible: layer 0 reads VIRTUAL_ENV / CONDA_PREFIX to tell "this repo's env" from
+		// "the system python" (risk-handlers.ts `pipInVenv`). Without it the same `pip install` is
+		// package_system at the prompt and project env in the shell that ran it.
+		// No `gitBranch`: this path has no session, and inventing a branch would put a name into the target a
+		// rule is matched against that the user never said.
+		return evaluateBash(command, { cwd, project: cwd, home: homedir(), env: process.env, preParsed })
 	} catch {
 		return null
 	}

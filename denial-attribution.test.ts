@@ -48,6 +48,7 @@ import {
 import { AUTO_MODE_REJECTION_PREFIX, buildClassifierUnavailableMessage, buildYoloRejectionMessage, isClassifierDenial } from "./classifier-messages.ts"
 import { DENIAL_LIMITS } from "./denial-tracking.ts"
 import { applyEvent, createLedger, type ExtractedEvent, type Ledger } from "./auth-ledger.ts"
+import { addGrant, createGrantStore, type GrantStore } from "./session-grants.ts"
 import { QUOTE_MAX_CHARS } from "./gate-bridge.ts"
 import { runGate, type GateResult } from "./gate.ts"
 import type { ModelEndpoint } from "./model-client.ts"
@@ -1310,5 +1311,429 @@ describe("D54 — an analysis bail keeps the analysis wall and reports the judge
 		// And no verdict was fabricated: the gate asked, could not be authorised, and prompted.
 		expect(r.outcome).toBe("prompt")
 		expect(r.outcome).not.toContain("allow")
+	})
+})
+
+// ---------------------------------------------------------------------------
+// The near-miss denial.
+//
+// The symptom, from a live session: an unattended `git push origin feature/X` was denied with
+// `decided by: classifier` while `/grants` listed `vcs_remote` rows for that branch. Both halves were
+// true — the model WAS the last authority asked, and no row covered the target — and the reader was told
+// only the first, so the one lever they had (a row filed under a value the matcher cannot read) was never
+// named. The fix is additive, so the two goldens below are pinned byte-for-byte FIRST: (a) with no rows
+// anywhere the text a user reads today must not change by one character; (b) a ledger FORBID gains no
+// near-miss section, because a forbid is a sentence the user authored, not a target somebody missed.
+// ---------------------------------------------------------------------------
+
+const PUSH = "git push origin feature/ABC123"
+const PUSH_TARGET = "origin/feature/ABC123"
+const IMAGE_PUSH = "docker push myrepo/app:1.0"
+
+/** The real gate, the real attribution, the real rendered text. `answer: "no"` is the live shape of the
+ *  defect: the authorisation model answered and the call still denied, so the rung that fires is the one
+ *  that today says only "classifier". No case here builds a DenialContext by hand. */
+async function denied(
+	command: string,
+	rows: { ledger?: Ledger; grants?: GrantStore } = {},
+	call: { answer?: "yes" | "no"; fail?: boolean } = {},
+) {
+	stubFetch({ answer: call.answer ?? "no", fail: call.fail })
+	const r = await runGate("bash", { command }, {
+		policy: GATE_POLICY,
+		endpoint: ENDPOINT,
+		userMessages: ONE_MESSAGE,
+		ledger: rows.ledger,
+		grants: rows.grants,
+	})
+	const ctx = gateDenialAttribution({ result: r, ...knowledge({ endpoint: true, ledger: rows.ledger, grants: rows.grants }) })
+	const text = gateDenialMessage(r, { ...ctx, unattended: true })
+	return { r, ctx, text, lines: text.split("\n") }
+}
+
+/** A ledger with rows, straight from the shapes the extractor writes. */
+function grantLedger(...events: ExtractedEvent[]): Ledger {
+	return ledgerWith(events)
+}
+
+function grantRow(over: Partial<ExtractedEvent> & { value: string; quote: string; seq: number }): ExtractedEvent {
+	return {
+		type: "grant",
+		category: "vcs_remote",
+		kind: "entity",
+		messageId: `m${over.seq}`,
+		...over,
+	} as ExtractedEvent
+}
+
+describe("near-miss goldens: the text that exists today is pinned before anything is added", () => {
+
+	it("no rows anywhere: byte-identical to the text users read today", async () => {
+		const { text } = await denied(PUSH, { ledger: createLedger() })
+		expect(text).toBe(
+			[
+				"Not auto-approved: git push feature/ABC123 to origin (authority wall)",
+				"decided by: classifier — denied: the safety model judged this and said no (its own verdict, not a rule and not layer 0) | category: vcs_remote | target: origin/feature/ABC123",
+				"DENIED: git push origin feature/ABC123 — this publishes to a remote [vcs_remote]",
+				"FIX: keep the change local (commit only) and ask before pushing.",
+				"RETRY: only after you change the command. Repeating it unchanged will be denied again.",
+			].join("\n"),
+		)
+	})
+
+	it("a call site that passed no ledger at all reads exactly the same", async () => {
+		const { text } = await denied(PUSH)
+		expect(text).toBe(
+			[
+				"Not auto-approved: git push feature/ABC123 to origin (authority wall)",
+				"decided by: classifier — denied: the safety model judged this and said no (its own verdict, not a rule and not layer 0) | category: vcs_remote | target: origin/feature/ABC123",
+				"DENIED: git push origin feature/ABC123 — this publishes to a remote [vcs_remote]",
+				"FIX: keep the change local (commit only) and ask before pushing.",
+				"RETRY: only after you change the command. Repeating it unchanged will be denied again.",
+			].join("\n"),
+		)
+	})
+
+	it("a ledger forbid keeps today's text byte for byte, near-miss-shaped rows in the store or not", async () => {
+		// The forbid rung returns before the authority-channel rung, and that is the point: a forbid is
+		// authored, not missed, so pointing at a nearly-fitting row would be an argument with the user's own
+		// sentence. The extra `container_mutation` row is deliberately the shape a near miss is made of —
+		// a row whose value names something else in the same transcript.
+		const ledger = ledgerWith([
+			{
+				type: "forbid",
+				category: "vcs_remote",
+				value: "origin/feature/ABC123",
+				kind: "entity",
+				quote: "never push that branch",
+				messageId: "m1",
+				seq: 1,
+			},
+			{
+				type: "grant",
+				category: "container_mutation",
+				value: "myrepo/app",
+				kind: "entity",
+				quote: "you can push images to myrepo/app",
+				messageId: "m2",
+				seq: 2,
+			},
+		])
+		const { text, ctx } = await denied(PUSH, { ledger })
+		expect(ctx.decidedBy).toBe("ledger")
+		expect(text).toBe(
+			[
+				"Not auto-approved: git push feature/ABC123 to origin (authority wall)",
+				'decided by: ledger — the user\'s own earlier words forbid this: "never push that branch" (row: vcs_remote value=origin/feature/ABC123) | category: vcs_remote | target: origin/feature/ABC123',
+				"clear it: say you allow origin/feature/ABC123 again in your own words — a newer grant for that value outranks the forbid · /grants lists every row · /grants revoke origin/feature/ABC123 lifts this forbid too — the revocation survives re-reading the sentence · /grants clear drops everything",
+				"DENIED: git push origin feature/ABC123 — this publishes to a remote [vcs_remote]",
+				"FIX: keep the change local (commit only) and ask before pushing.",
+				"RETRY: only after you change the command. Repeating it unchanged will be denied again.",
+			].join("\n"),
+		)
+		expect(text).not.toContain("near miss")
+	})
+})
+
+/**
+ * The two live symptoms, each reproduced by running the gate over the row the user actually had.
+ *
+ * Both ended in `decided by: classifier` in a real session. That line is not false — the model WAS the last
+ * authority asked — but it names a lever nobody can pull at 3 a.m., while `/grants` already listed a row about
+ * the same object. What the reader needs is the row and the sentence shape that would have covered the call,
+ * which is what these byte-pins hold in place.
+ */
+describe("a near miss names the row the user can still widen, instead of blaming the model", () => {
+	it("(i) the row is for another branch on the same remote: why = the value, lever = the sentence about that branch", async () => {
+		// Re-pinned. This golden used to seed `vcs_remote origin/*` and read it as a near miss; since the grammar
+		// that row COVERS `origin/feature/ABC123` (the gate allows the push and never asks the model), so naming it
+		// in a denial would be a false statement about an authority the user already holds. `origin/main` is what
+		// the same shape looks like now: the same kind group, a value the grammar answers `false` about, so the
+		// denial still happens for the model's own reason and the row is still the lever.
+		const ledger = grantLedger(
+			grantRow({
+				category: "vcs_remote",
+				value: "origin/main",
+				quote: "you can push main to origin",
+				seq: 1,
+			}),
+		)
+		const { ctx, lines } = await denied(PUSH, { ledger })
+		expect(ctx.nearMiss).toEqual([
+			{
+				store: "ledger",
+				category: "vcs_remote",
+				value: "origin/main",
+				quote: "you can push main to origin",
+				why: `value "origin/main" does not cover "${PUSH_TARGET}"`,
+			},
+		])
+		expect(lines.join("\n")).toBe(
+			[
+				"Not auto-approved: git push feature/ABC123 to origin (authority wall)",
+				"decided by: classifier — denied: the safety model judged this and said no (its own verdict, not a rule and not layer 0) — it found no sentence covering this target; see near miss | category: vcs_remote | target: origin/feature/ABC123",
+				'near miss: ledger grant `vcs_remote origin/main` ("you can push main to origin") — value "origin/main" does not cover "origin/feature/ABC123"',
+				'lever: say "you can push `feature/ABC123` to `origin`" or "you can push any branch to `origin`"',
+				"DENIED: git push origin feature/ABC123 — this publishes to a remote [vcs_remote]",
+				"FIX: keep the change local (commit only) and ask before pushing.",
+				"RETRY: only after you change the command. Repeating it unchanged will be denied again.",
+			].join("\n"),
+		)
+	})
+
+	it("a row that COVERS under the grammar is not a near miss at all — the inverse of (i)", async () => {
+		// The property this pin exists for, shown from the other side: `origin/*` is the value the gate itself stores
+		// for "allow every branch on origin", so for this push there is nothing near about the row — the gate
+		// allowed the call on it. An assertion that a covering row is absent is the only inverse of the (i) pin;
+		// without it, a scan that printed EVERY vcs row would keep every other golden green.
+		const ledger = grantLedger(
+			grantRow({
+				category: "vcs_remote",
+				value: "origin/*",
+				quote: "you can push any branch to origin",
+				seq: 1,
+			}),
+		)
+		const { r, ctx, text } = await denied(PUSH, { ledger })
+		// (1) the gate really did allow on this row — the denial the old golden described no longer exists, and
+		// (2) the scan holds nothing to show, so the key is absent rather than an empty array.
+		expect(r.outcome).toBe("allow-granted")
+		expect(r.reason).toBe('ledger: origin/feature/ABC123←"origin/*"')
+		expect(ctx.nearMiss).toBeUndefined()
+		expect(text).not.toContain("near miss")
+		expect(text).not.toContain("origin/*")
+	})
+
+	it("`origin/*` stops at protected branches, so against `origin/main` it IS a rank (b) near miss", async () => {
+		// The same row, the same kind group, and a target the wildcard does not reach: `main` is protected, so
+		// "any branch on origin" was never permission to push it and the row is genuinely the thing to widen.
+		// This is also the case where a grammar `false` falling through to the string rule would be visible — the
+		// component matcher would call `origin/*` a reacher of `origin/main` and the row would vanish from the
+		// denial as a row that covers.
+		const ledger = grantLedger(
+			grantRow({
+				category: "vcs_remote",
+				value: "origin/*",
+				quote: "you can push any branch to origin",
+				seq: 1,
+			}),
+		)
+		const { ctx, lines } = await denied("git push origin main", { ledger })
+		expect(ctx.nearMiss).toEqual([
+			{
+				store: "ledger",
+				category: "vcs_remote",
+				value: "origin/*",
+				quote: "you can push any branch to origin",
+				why: 'value "origin/*" does not cover "origin/main"',
+			},
+		])
+		expect(lines[2]).toBe('near miss: ledger grant `vcs_remote origin/*` ("you can push any branch to origin") — value "origin/*" does not cover "origin/main"')
+		// The lever offers ONE sentence here, not two. "you can push any branch to `origin`" is the wider
+		// sentence for an ordinary branch, but the wildcard stops at protected names — which is the very
+		// reason this row is a near miss against `origin/main`. Offering it would send the user to say a sentence
+		// that lands them in this same denial, so only the exact branch is on offer.
+		expect(lines[3]).toBe('lever: say "you can push `main` to `origin`"')
+		expect(lines[3]).not.toContain("any branch")
+	})
+
+	it("a non-protected pending branch still gets both alternatives, wildcard included", async () => {
+		// The inverse of the protected-branch pin above, and the reason that pin is a restriction rather than a loss: for a
+		// branch the wildcard DOES cover, the wider sentence is the useful one, so both stay on offer — byte for
+		// byte the line users read today. The row is `vcs_remote origin/release/x`, which the grammar answers
+		// `false` about for `origin/feature/ABC123` (a different branch name), so this is a rank (b) near miss.
+		const ledger = grantLedger(
+			grantRow({
+				category: "vcs_remote",
+				value: "origin/release/x",
+				quote: "you can ship the release branch",
+				seq: 1,
+			}),
+		)
+		const { ctx, lines } = await denied(PUSH, { ledger })
+		expect(ctx.nearMiss).toEqual([
+			{
+				store: "ledger",
+				category: "vcs_remote",
+				value: "origin/release/x",
+				quote: "you can ship the release branch",
+				why: `value "origin/release/x" does not cover "${PUSH_TARGET}"`,
+			},
+		])
+		expect(lines[2]).toBe('near miss: ledger grant `vcs_remote origin/release/x` ("you can ship the release branch") — value "origin/release/x" does not cover "origin/feature/ABC123"')
+		expect(lines[3]).toBe('lever: say "you can push `feature/ABC123` to `origin`" or "you can push any branch to `origin`"')
+	})
+
+	it("(ii) the row is a different kind of action: why = the mention, lever = the sentence about that image", async () => {
+		// The reported image-push shape: the row is `vcs_remote docker` (a `docker push` filed under the vcs kind group),
+		// the pending call is `container_mutation+network_send myrepo/app:1.0` — an image push is that
+		// compound (risk-handlers `artifactPushRows`), so the headline carries a summary per segment and the DENIED
+		// block lists both. The point of the test is unchanged: the categories still differ, so the near miss says
+		// "mentions … but names a different target" and the lever names the image — nothing in the old text said
+		// the categories differ, so the user could not see what to say differently.
+		const store = createGrantStore()
+		addGrant(store, "vcs_remote", "docker", "entity")
+		const { ctx, lines } = await denied(IMAGE_PUSH, { ledger: createLedger(), grants: store })
+		expect(ctx.nearMiss).toEqual([
+			{
+				store: "session",
+				category: "vcs_remote",
+				value: "docker",
+				quote: undefined,
+				why: 'mentions "docker" but names a different target',
+			},
+		])
+		expect(lines.join("\n")).toBe(
+			[
+				"Not auto-approved: docker push myrepo/app:1.0 — publishes this artifact; docker push myrepo/app:1.0 — uploads it to a registry (authority wall)",
+				"decided by: classifier — denied: the safety model judged this and said no (its own verdict, not a rule and not layer 0) — it found no sentence covering this target; see near miss | category: container_mutation+network_send | target: myrepo/app:1.0",
+				'near miss: session grant `vcs_remote docker` — mentions "docker" but names a different target',
+				'lever: say "you can push images to `myrepo/app`"',
+				"DENIED: docker push myrepo/app:1.0 — this mutates containers or images [container_mutation]",
+				"FIX: inspect with read-only commands first, then ask before creating or removing.",
+				"DENIED: docker push myrepo/app:1.0 — this sends data off this machine [network_send]",
+				"FIX: check the payload holds no credentials, then ask before sending.",
+				"RETRY: only after you change the command. Repeating it unchanged will be denied again.",
+			].join("\n"),
+		)
+	})
+
+	it("(a) a row whose SCOPE reaches the target under another kind group says so, and no grammar is invented", async () => {
+		// Rank (a): the value reaches the target (the `/`-prefixed scope rule the gate itself uses) but the row
+		// is a different kind of action. The pending category `write_outside` has no grammar, so the lever must
+		// fall back to naming the exact target rather than inventing a sentence shape for a path.
+		const ledger = grantLedger(
+			grantRow({
+				category: "system_config",
+				value: "/srv/reports/",
+				kind: "scope",
+				quote: "you can write under /srv/reports but do not touch system config",
+				seq: 1,
+			}),
+		)
+		const { lines } = await denied("touch /srv/reports/sum.txt", { ledger })
+		expect(lines[2]).toBe(
+			'near miss: ledger grant `system_config /srv/reports/` ("you can write under /srv/reports but do not touch system config") — category differs: row is system_config, this action is write_outside',
+		)
+		expect(lines[3]).toBe("lever: say the permission naming the exact target (`/srv/reports/sum.txt`)")
+	})
+
+	it("ranks (a) before (b) before (c), keeps at most three, and drops the weakest kind", async () => {
+		// Four rows in three ranks against one pending `write_outside` of /srv/reports/sum.txt: a scope under
+		// another kind group (a), two same-category values that do not reach it (b), and a row whose sentence
+		// only mentions the target's directory name (c). The three printed are a, b, b — newest first.
+		const ledger = grantLedger(
+			grantRow({ category: "system_config", value: "/srv/reports/", kind: "scope", quote: "system config words", seq: 1 }),
+			grantRow({ category: "write_outside", value: "/srv/reports/other.txt", quote: "the other file", seq: 2 }),
+			grantRow({ category: "write_outside", value: "/srv/reports/older.txt", quote: "an older file", seq: 3 }),
+			grantRow({ category: "db_mutation", value: "daily-dump", quote: "back up the reports nightly", seq: 4 }),
+		)
+		const { lines } = await denied("touch /srv/reports/sum.txt", { ledger })
+		const near = lines.filter((l) => l.startsWith("near miss:"))
+		expect(near).toHaveLength(3)
+		expect(near[0]).toContain("`system_config /srv/reports/`")
+		expect(near[1]).toContain("`write_outside /srv/reports/older.txt`")
+		expect(near[2]).toContain("`write_outside /srv/reports/other.txt`")
+		expect(near.join("\n")).not.toContain("db_mutation")
+	})
+
+	it("inside a rank the newest row wins, and `at` is the clock that decides", async () => {
+		const ledger = grantLedger(
+			grantRow({ category: "vcs_remote", value: "origin/old-branch", quote: "the old one", seq: 1 }),
+			grantRow({ category: "vcs_remote", value: "origin/newer-branch", quote: "the newer one", seq: 2 }),
+		)
+		// seq orders rows inside one transcript; `at` is the clock two stores share, and it is what the
+		// revocation logic already compares, so the denial has to agree with it.
+		ledger.grants[0]!.at = 1_000
+		ledger.grants[1]!.at = 2_000
+		const { lines } = await denied(PUSH, { ledger })
+		const near = lines.filter((l) => l.startsWith("near miss:"))
+		expect(near[0]).toContain("`vcs_remote origin/newer-branch`")
+		expect(near[1]).toContain("`vcs_remote origin/old-branch`")
+	})
+
+	it("a blanket `*` row is never shown as one that nearly reached the target", async () => {
+		// It names no target, and the gate reads it as covering EVERYTHING — `auth-ledger.valueCovers` returns true
+		// for a `*` value after the grammar, whatever the category. So a row stored as `*` is not a near miss under
+		// any category: the call was allowed ON it, and a line about it would claim the reader lacks an authority
+		// they hold. Both halves pinned, and both now behave the same way: the grammar-answered vcs row and the
+		// no-grammar `write_outside` row are each skipped as covering, with the gate outcome pinned alongside so the
+		// silence cannot be earned by a denial that simply never happened.
+		const covering = grantLedger(grantRow({ category: "vcs_remote", value: "*", quote: "you can push whatever", seq: 1 }))
+		const allowed = await denied(PUSH, { ledger: covering })
+		expect(allowed.r.outcome).toBe("allow-granted")
+		expect(allowed.ctx.nearMiss).toBeUndefined()
+		expect(allowed.text).not.toContain("near miss")
+
+		const noGrammar = grantLedger(grantRow({ category: "write_outside", value: "*", quote: "you can do whatever", seq: 1 }))
+		const blanket = await denied("touch /srv/reports/sum.txt", { ledger: noGrammar })
+		expect(blanket.r.outcome).toBe("allow-granted") // the row did cover the call, and nothing says it did not
+		expect(blanket.r.reason).toContain('"*"')
+		expect(blanket.ctx.nearMiss).toBeUndefined()
+		expect(blanket.text).not.toContain("near miss")
+		expect(blanket.lines.some((l) => l.startsWith("near miss:"))).toBe(false)
+	})
+
+	it("the row's own words cannot add a line to the denial: quotes are truncated, values are flattened", async () => {
+		const long = "push it ".repeat(40)
+		const ledger = grantLedger(
+			grantRow({
+				category: "vcs_remote",
+				// A value with a newline and a backtick is data from a store, and it must not become a second line
+				// of the gate's own instructions — the same rule `displayQuote` applies to a forbid quote.
+				value: "origin/evil\n`rm -rf /`",
+				quote: `${long} origin`,
+				seq: 1,
+			}),
+		)
+		const { lines } = await denied(PUSH, { ledger })
+		const near = lines.filter((l) => l.startsWith("near miss:"))
+		expect(near).toHaveLength(1)
+		expect(near[0]).toContain("`vcs_remote origin/evil 'rm -rf /'")
+		expect(near[0]).toContain(`${"push it ".repeat(12)}push...`)
+		expect(near[0].length).toBeLessThan(400)
+		expect(lines.filter((l) => l.includes("rm -rf")).length).toBe(1)
+	})
+
+	it("a transport failure keeps the near miss but does not claim the model looked for a sentence", async () => {
+		// The suffix is about what the model FAILED to find, so it belongs to a real `denied` verdict only; the
+		// near-miss block itself is still the truth: here are the rows, here is the sentence to say.
+		// Re-pinned to a row the grammar answers `false` about: with the old `origin/*` fixture the gate
+		// allowed the push on the row, so no authorisation call happened and there was no transport to report —
+		// the denial this test describes had stopped existing.
+		const ledger = grantLedger(grantRow({ value: "origin/main", quote: "you can push main to origin", seq: 1 }))
+		const { ctx, lines } = await denied(PUSH, { ledger }, { fail: true })
+		expect(ctx.classifierWhy).toBe("unavailable")
+		expect(lines[1]).toContain("classifier — unavailable")
+		expect(lines[1]).not.toContain("it found no sentence covering this target")
+		expect(lines[2]).toContain("near miss: ledger grant `vcs_remote origin/main`")
+		expect(lines[3]).toContain('lever: say "you can push `feature/ABC123` to `origin`"')
+	})
+
+	it("a person's Block stays a person's Block: no near miss, nothing to widen", async () => {
+		const ledger = grantLedger(grantRow({ value: "origin/*", quote: "you can push any branch to origin", seq: 1 }))
+		const { r } = await denied(PUSH, { ledger })
+		const ctx = gateDenialAttribution({ result: r, ...knowledge({ endpoint: true, ledger }), blockedByHuman: true })
+		expect(ctx).toEqual({ decidedBy: "user" })
+		expect(gateDenialMessage(r, { ...ctx, unattended: true })).not.toContain("near miss")
+	})
+
+	it("a store the caller did not pass is not scanned — absent is not empty", async () => {
+		const store = createGrantStore()
+		addGrant(store, "vcs_remote", "docker", "entity")
+		stubFetch({ answer: "no" })
+		const r = await runGate("bash", { command: IMAGE_PUSH }, {
+			policy: GATE_POLICY,
+			endpoint: ENDPOINT,
+			userMessages: ONE_MESSAGE,
+			ledger: createLedger(),
+			grants: store,
+		})
+		// The same call, attributed with and without the store the gate actually used.
+		const forgot = gateDenialAttribution({ result: r, ...knowledge({ endpoint: true }) })
+		expect(forgot.nearMiss).toBeUndefined()
+		expect(gateDenialMessage(r, { ...forgot, unattended: true })).not.toContain("near miss")
+		const passed = gateDenialAttribution({ result: r, ...knowledge({ endpoint: true, grants: store }) })
+		expect(passed.nearMiss).toHaveLength(1)
 	})
 })

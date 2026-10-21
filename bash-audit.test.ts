@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest"
 import {
 	auditBashCommand,
 	bashRuleView,
+	bashTierView,
 	categoryHasStrictOperands,
 	envChangesExecution,
 	hitsNeverFloor,
@@ -285,5 +286,62 @@ describe("categoryHasStrictOperands: the table, not a hunch", () => {
 		// `delete_outside+write_outside`, and the destructive half is the reason the rule must be exact.
 		expect(categoryHasStrictOperands("delete_outside+write_outside")).toBe(true)
 		expect(categoryHasStrictOperands("read_only+write_project")).toBe(false)
+	})
+})
+
+/**
+ * The verdict is built with the live process environment, because that is the only place a virtualenv the
+ * user activated before starting pi is written down. Each row states its own environment inline and puts the
+ * shell back afterwards — a test that reads whichever `VIRTUAL_ENV` the suite happened to inherit is the
+ * contamination `vitest.setup.ts` exists to stop, not evidence about the code.
+ */
+describe("the verdict sees the environment", () => {
+	function withEnv(vars: Record<string, string | undefined>, body: () => void): void {
+		const saved = new Map(Object.keys(vars).map((n) => [n, process.env[n]] as const))
+		for (const [n, v] of Object.entries(vars)) {
+			if (v === undefined) delete process.env[n]
+			else process.env[n] = v
+		}
+		try {
+			body()
+		} finally {
+			for (const [n, v] of saved) {
+				if (v === undefined) delete process.env[n]
+				else process.env[n] = v
+			}
+		}
+	}
+
+	const pipVerdict = () => bashTierView("pip install httpx", cwd)
+
+	it("asks for a system package install when no env is named", () => {
+		withEnv({ VIRTUAL_ENV: undefined, CONDA_PREFIX: undefined }, () => {
+			expect(pipVerdict()).toMatchObject({ proven: true, tier: "ask", category: "package_system" })
+		})
+	})
+
+	it("knows an activated virtualenv is the project env", () => {
+		withEnv({ VIRTUAL_ENV: "/home/user/project/.venv" }, () => {
+			expect(pipVerdict()).toMatchObject({ proven: true, tier: "allow", category: "run_project_code" })
+		})
+	})
+
+	it("knows an activated conda env is one too", () => {
+		withEnv({ CONDA_PREFIX: "/home/user/miniconda3/envs/app" }, () => {
+			expect(pipVerdict()).toMatchObject({ proven: true, tier: "allow", category: "run_project_code" })
+		})
+	})
+
+	it("is not fooled by a conda install that was never activated", () => {
+		// CONDA_EXE / CONDA_SHLVL come from the installer; only CONDA_PREFIX means an env is active.
+		withEnv({ VIRTUAL_ENV: undefined, CONDA_PREFIX: undefined, CONDA_EXE: "/opt/conda/bin/conda", CONDA_SHLVL: "0" }, () => {
+			expect(pipVerdict()).toMatchObject({ proven: true, tier: "ask", category: "package_system" })
+		})
+	})
+
+	it("restores the shell it was handed", () => {
+		const before = process.env.VIRTUAL_ENV
+		withEnv({ VIRTUAL_ENV: "/tmp/x" }, () => undefined)
+		expect(process.env.VIRTUAL_ENV).toBe(before)
 	})
 })

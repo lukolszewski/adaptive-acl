@@ -366,16 +366,49 @@ describe("paths are adopted into the path space that exists now", () => {
 			exportedAt: "2026-10-14T00:00:00.000Z",
 			sourceCwd: "/old/place",
 			ledger: { v: 1, grants: [], forbids: [], seen: [] },
-			grants: [{ category: "vcs_remote", value: "origin/main", kind: "entity", at: 1 }],
+			// A jq fragment blamed as a target: it carries an `UNMATCHABLE_MARKERS` entry, so no category
+			// can make it matchable — unlike `origin/main`, which `vcs_remote` now legitimately names.
+			grants: [{ category: "vcs_remote", value: "select(.type!=null) | .type", kind: "entity", at: 1 }],
 		})
 
 		const store = createGrantStore()
 		const plan = planAdoption({ cwd })
 		expect(plan.pending).toEqual([])
-		expect(plan.skipped[0].what).toBe("origin/main")
+		expect(plan.skipped[0].what).toBe("select(.type!=null) | .type")
 		expect(plan.skipped[0].reason).toMatch(/never match a target/)
 		expect(confirmAdoption({ cwd, store, items: plan.pending }).grants).toEqual([])
 		expect(store.grants).toEqual([])
+	})
+
+	it("offers a hand-written vcs_remote scope row, because under that category the value IS a target", () => {
+		const cwd = checkout()
+		// The inverse of the test above, on the same hand-written fixture: `vcs_remote` names a remote,
+		// so `origin/*` is a scope worth keeping. A prune that only ever removes rows is never caught by
+		// a test that only ever asserts removal.
+		writeJson(join(stateDir(cwd, ORPHAN), "grants.json"), {
+			v: 1,
+			exportedAt: "2026-10-14T00:00:00.000Z",
+			sourceCwd: "/old/place",
+			ledger: { v: 1, grants: [], forbids: [], seen: [] },
+			grants: [{ category: "vcs_remote", value: "origin/*", kind: "scope", at: 1 }],
+		})
+
+		const plan = planAdoption({ cwd })
+		expect(plan.pending).toHaveLength(1)
+		expect(plan.pending[0]).toMatchObject({
+			kind: "grant",
+			category: "vcs_remote",
+			value: "origin/*",
+			scope: "scope",
+		})
+		expect(plan.skipped.map((s) => s.what)).not.toContain("origin/*")
+
+		const store = createGrantStore()
+		const confirmed = confirmAdoption({ cwd, store, items: plan.pending })
+		expect(confirmed.refused).toEqual([])
+		expect(texts(confirmed.grants)).toEqual(["origin/*"])
+		expect(store.grants).toHaveLength(1)
+		expect(store.grants[0]).toMatchObject({ category: "vcs_remote", value: "origin/*", kind: "scope" })
 	})
 
 	it("reports a row the session already holds as nothing to do, and does not store it twice", () => {
