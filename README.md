@@ -176,6 +176,13 @@ Before any model is involved, two stores are checked:
   verified extraction per user message. A forbid outranks an older grant. Imported rows are
   background authority that anything said in the current session outranks.
 
+Publish targets match by shape, not by string equality. "You can push any branch to origin" covers
+`git push origin feature/x`, because a git ref is read as `remote/branch` and `origin/*` sweeps every
+branch on that remote except protected ones (`main`, `develop`, `release/*` and friends) — pushing one
+of those still needs a sentence that names it. Image pushes match the same way, registry/repo/tag-wise:
+a grant on `myrepo/app` covers every tag of that repository, a tagged grant only that tag, and a
+different registry never matches.
+
 ### The classifier: two narrow questions
 
 Only if neither store covers the call does a model get asked. Both calls are schema-constrained
@@ -252,6 +259,7 @@ it and what stops a background re-extraction of the chat from re-granting it.
 ```
 /grants                                  list grants and ledger rows, with copyable values
 /grants revoke <value>                   take one back, by value (the list re-orders, so never by index)
+/grants explain <command>                why a call was decided as it was: layer-0 verdict, then per-row coverage
 /grants clear                            drop every session grant
 /grants export [path]                    write the journal
 /grants import <path> [--replace] [--yes]
@@ -608,7 +616,7 @@ every refusal explain itself.
 | Command | `/ask` `/plan` `/auto` `/bypass` | switch mode |
 | Command | `/mode [name]` | set the named mode or pick from a list |
 | Command | `/unattended [on\|off]` | soft-deny with the reason instead of prompting; `never` stays hard-blocked |
-| Command | `/grants …` | list, `clear`, `revoke <value>`, `export`, `import`, `auto`, `adopt` |
+| Command | `/grants …` | list, `clear`, `revoke <value>`, `explain <command>`, `export`, `import`, `auto`, `adopt` |
 | Command | `/permissions` | merged allow/deny/ask rules, each tagged with its scope |
 | Command | `/classifier-status [reset]` | classifier config, endpoint, session counters |
 | Command | `/plan-execute` | execute the current plan now |
@@ -654,7 +662,7 @@ pi -e ./index.ts          # load without installing
 
 ```bash
 npm install --ignore-scripts --no-audit --no-fund
-npx vitest run          # 85 files, all green
+npx vitest run          # 89 files, all green
 npm run typecheck       # tsc --noEmit
 npm run pack:dry        # what the package ships
 ```

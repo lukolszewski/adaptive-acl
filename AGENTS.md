@@ -21,7 +21,7 @@ undo, per-mode model profiles, subagent approval forwarding, and an adaptive foo
 
 ## Module map
 
-Every file matching `git ls-files '*.ts' | grep -v '\.test\.ts$'` (59 entries; the last two are test
+Every file matching `git ls-files '*.ts' | grep -v '\.test\.ts$'` (60 entries; the last two are test
 harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ### Entry point and pi surface
@@ -156,6 +156,10 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
   vocabulary that every store shares, which is the only reason a merge can revoke.
 - `grant-verify.ts` — code-side verification of what the model extracted: verbatim quote, whole-token entity
   match, `canonicalPath`, forbidden-target veto.
+- `target-grammar.ts` — the shape of a publish target: git refs as a `remote/branch` lattice with a
+  protected-branch list, image refs as registry/repo/tag. Asked before string equality for the publish
+  categories; its `false` is a verdict, never a fall-through to the string rule
+  (`docs/CLASSIFIER-SPEC.md` §3 item 3b), and `/grants explain <command>` prints these per-row verdicts.
 - `durable-approval.ts` — what an "always" click stores when authority lives in the journal instead of rule
   files (`authority.persist: "grants"`, the default).
 - `grants-file.ts` — the one portable journal file per project (ledger rows, forbids, read-only posture,
@@ -179,10 +183,10 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ```bash
 npm install --ignore-scripts --no-audit --no-fund   # what CI does; nothing here has a build step
-npx vitest run        # 85 files, all green. 3500 tests at this commit — the number moves with the
-                      # suite, so quote CI's log rather than a figure copied out of a doc.
+npx vitest run        # 89 files, all green. The test count moves with the suite, so quote CI's
+                      # log rather than a figure copied out of a doc.
 npm run typecheck     # tsc --noEmit -p tsconfig.json — zero errors
-npm run pack:dry      # 64 files, ~595 kB tarball, 2.7 MB unpacked
+npm run pack:dry      # 65 files, ~643 kB tarball, 2.8 MB unpacked
 ```
 
 Run all four before you call a change done, and paste the real output into your result. Notes that cost an
@@ -195,7 +199,7 @@ hour each if you learn them by hand:
   that reads them (`bash-walker-golden.ts:31`, `bash-allow-layer0.test.ts:609-610`).
 - **`tsconfig.json:15` includes `*.ts` and `tools/*.ts`, root level only**, with `eval` and `spike` excluded
   (neither directory exists here). A new file in a subdirectory is not typechecked by `npm run typecheck`.
-- **`npm run pack:dry` counts 64** because `package.json:29-38` ships `*.ts` minus `*.test.ts`. That glob is
+- **`npm run pack:dry` counts 65** because `package.json:29-38` ships `*.ts` minus `*.test.ts`. That glob is
   why `bash-walker-golden.ts` ships and `docs/`, the `.jsonl` corpora and `testcases/` do not. If a runtime
   path starts reading a non-`.ts` file, this list has to change with it.
 - The publish contract adds a **leak scan**: grep every tracked file for a fixed list of private tokens —
