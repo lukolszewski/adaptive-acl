@@ -618,12 +618,13 @@ describe("getProjectId", () => {
 		expect(id).toMatch(/^[a-f0-9]{8}$/);
 	})
 
-	it("switches from hash fallback to the stamped id when the stamp appears mid-session", () => {
-		// Positive-only caching: an id written after the first hash-fallback call
-		// must win on the next call. Written through the real writer, not a fixture.
+	it("stamps on first resolution, and an identity change still needs force", () => {
 		const before = getProjectId(tmpDir);
 		expect(before).toMatch(/^[a-f0-9]{8}$/);
-		expect(writeProjectIdMarker(tmpDir, "deadbeef")).toBe(true);
+		// The call above stamped the tree with the derived id, so a different id is
+		// now a swap and is refused until it is explicitly forced.
+		expect(writeProjectIdMarker(tmpDir, "deadbeef")).toBe(false);
+		expect(writeProjectIdMarker(tmpDir, "deadbeef", { force: true })).toBe(true);
 		expect(getProjectId(tmpDir)).toBe("deadbeef");
 	})
 });

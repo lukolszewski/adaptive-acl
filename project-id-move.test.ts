@@ -158,10 +158,13 @@ describe("writeProjectIdMarker", () => {
 		expect(JSON.parse(rawMarker(dir)).projectId).toBe(ID)
 	})
 
-	it("switches the live id without a restart", () => {
+	it("switches the live id without a restart, when the swap is on purpose", () => {
 		const dir = fresh()
 		expect(getProjectId(dir)).toBe(hashPath(dir))
-		writeProjectIdMarker(dir, ID)
+		// The resolution above stamped the tree, so this is now an identity change,
+		// not a first stamp — it needs `force` and then takes effect immediately.
+		expect(writeProjectIdMarker(dir, ID)).toBe(false)
+		expect(writeProjectIdMarker(dir, ID, { force: true })).toBe(true)
 		expect(getProjectId(dir)).toBe(ID)
 	})
 
@@ -194,12 +197,16 @@ describe("writeProjectIdMarker", () => {
 		expect(readProjectIdMarker(dir)).toBe(ID)
 	})
 
-	it("stamps a tree that carries nothing, since there is no id to strand", () => {
+	it("stamps the tree it resolves, so the id stops depending on the path", () => {
 		const dir = fresh()
-		expect(getProjectId(dir)).toBe(hashPath(dir))
-		expect(writeProjectIdMarker(dir, ID)).toBe(true)
-		expect(readProjectIdMarker(dir)).toBe(ID)
-		expect(getProjectId(dir)).toBe(ID)
+		const derived = getProjectId(dir)
+		expect(derived).toBe(hashPath(dir))
+		expect(readProjectIdMarker(dir)).toBe(derived) // the stamp landed
+		// A copy answers with the stamped id, not with a hash of where it now sits.
+		const moved = fresh()
+		cpSync(dir, moved, { recursive: true })
+		expect(getProjectId(moved)).toBe(derived)
+		expect(hashPath(moved)).not.toBe(derived)
 	})
 
 	it("replaces only when told to, with force", () => {
