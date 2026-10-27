@@ -391,8 +391,20 @@ mentions that name — its only marker concept is `.pi-update-incomplete` for gi
 existed here or upstream, so the source resolved nothing while its own tests created the file to read back.
 Removed 2026-10-21.
 
-What that leaves is worth knowing before trusting a move. `writeProjectIdMarker()` is the only writer of
-`project.json` and no shipped code calls it — `grants-adopt.ts` reads `getProjectId()`, it never stamps — so
-every real project is identified by `hashPath(cwd)` and moving a checkout does strand its rules, denies and
-ledger until the tree is stamped by hand. Stamping on first use would make the move story real; that is not
-what the code does today.
+The history matters because the docs used to promise more than the code delivered. Until 2026-10-27 nothing
+shipped ever wrote `project.json` — `writeProjectIdMarker()` had no non-test caller, and `grants-adopt.ts`
+only reads `getProjectId()` — so every real project was identified by `hashPath(cwd)`, and moving a checkout
+did strand its rules, denies and ledger.
+
+That changed on 2026-10-27: identity is now stamp-on-first-use (`utils.ts:823`). The first resolution that has
+to fall back to `hashPath(cwd)` also writes that hash into `<cwd>/.pi/project.json`, so the tree keeps the id
+it was already using and a later move — rename, `git worktree move`, copy — resolves to the same id instead of
+a fresh one. Stamped state is never overwritten: an existing id needs `{ force: true }`, an unparseable
+`project.json` is left untouched, and a failed write (read-only tree) is not an error — resolution still
+returns the hash and that tree just stays path-dependent. The auto-stamped id is deliberately not cached, so
+hand-editing `project.json` mid-session takes effect on the next call.
+
+Two consequences. It is the extension writing one file inside the project it was asked about, not an agent
+tool call, so the read-only posture does not suppress it. And because a stamp travels, a copied checkout now
+carries the same id as its source — two trees sharing one rules/ledger directory — which is what a stamped git
+clone already did, and the reason `writeProjectIdMarker` refuses silent swaps.

@@ -695,11 +695,15 @@ export function findProjectRoot(cwd: string): string | null {
  * most portable first:
  *
  *   1. `<cwd>/.pi/project.json` → `{ "projectId": "…" }`. Lives inside the
- *      checkout, so it is the only source that survives a move. `writeProjectIdMarker()`
- *      is its only writer and no shipped code calls it — the adopt flow reads the id,
- *      never stamps it — so a tree is stamped by hand or not at all;
- *   2. `hashPath(cwd)` — correct while the tree stays where it was, and in practice
- *      the source that always runs, because nothing stamps #1 automatically.
+ *      checkout, so it is the only source that survives a move;
+ *   2. `hashPath(cwd)` — and on the first call that needs it, the hash is written
+ *      into #1 (stamp-on-first-use), so a tree keeps the id it was already using
+ *      instead of re-deriving one from wherever it happens to sit.
+ *
+ * Stamping is the extension writing one small file inside the project it is asked
+ * about — not an agent action, and not governed by the read-only posture. It never
+ * overwrites an id, never touches a file it could not parse, and a failure is not
+ * an error: resolution still returns the hash, that tree just does not travel.
  *
  * A third source used to sit between these: `.pi/permission-modes-<id>.md`, read if
  * present. Nothing wrote it — not this package, not pi (its `dist/` never mentions the
@@ -750,10 +754,15 @@ function readCarriedId(cwd: string): CarriedId {
 	return { state: "unidentified", doc: kept }
 }
 
-// Positive-result cache only: an id that came from a marker is stable for this
-// cwd. The hash fallback stays uncached, so a marker created mid-session takes
-// over on the next call (and `writeProjectIdMarker` drops the entry it invalidates).
+// Positive-result cache only: an id read from `project.json` is stable for this cwd.
+// A tree that has to be stamped is re-resolved after the write, and `writeProjectIdMarker`
+// drops the entry it invalidates.
 const projectIdCache = new Map<string, string>()
+
+// Stamp attempts that did not land (read-only tree, permissions). Remembered so a
+// failing write is tried once per process rather than once per call — never a factor
+// in which id is returned.
+const stampAttempts = new Set<string>()
 
 /**
  * Stamp the checkout with an id of its own (`.pi/project.json`) so the id — and
@@ -766,13 +775,13 @@ const projectIdCache = new Map<string, string>()
  *    the state directory, which is the exact failure this module exists to
  *    prevent, so it takes `{ force: true }` to mean "yes, on purpose";
  *  - the carried file is not parseable — we do not write over a file we could
- *    not read, because we cannot know what identity it held;
- *  - no carried id, but pi's `.md` marker names a different one — same
- *    consequence, so same rule.
+ *    not read, because we cannot know what identity it held.
  *
- * Writing the id pi already uses is always allowed (the state directory does not
- * move, it just stops depending on the path). Unknown keys in the file are kept:
- * it is hand-edited. A successful write drops the cached id for `cwd`.
+ * Writing the id the tree is already known by is always allowed (the state
+ * directory does not move, it just stops depending on the path). Unknown keys in
+ * the file are kept: it is hand-edited. A successful write drops the cached id
+ * for `cwd`. `getProjectId()` calls this on first resolution; callers that mean to
+ * *change* an identity need `{ force: true }`.
  */
 export function writeProjectIdMarker(
 	cwd: string,
@@ -819,7 +828,19 @@ export function getProjectId(cwd: string): string {
 		projectIdCache.set(cwd, carried.id)
 		return carried.id
 	}
-	return hashPath(cwd)
+	const id = hashPath(cwd)
+	// Stamp-on-first-use. Adopting the path hash is only half of it: writing it
+	// down is what makes the id survive the move that this whole module exists for.
+	// `unparseable` is skipped (never overwrite what we could not read), and a
+	// failed write changes nothing about the answer — it only means this tree stays
+	// path-dependent.
+	if (carried.state !== "unparseable" && !stampAttempts.has(cwd)) {
+		stampAttempts.add(cwd)
+		writeProjectIdMarker(cwd, id)
+	}
+	// Deliberately not cached: `project.json` is a hand-editable file, and an id
+	// written into it while a session runs must take over on the next call.
+	return id
 }
 
 /** First 8 hex chars of sha256(input). Deterministic. */

@@ -556,11 +556,11 @@ ignores `response_format` shows up here.
   warning when a heuristic probe spots planted instructions in recent tool output. Independently
   toggled with `/injection-note`.
 - **Predefined messages.** `/msg` stores and sends canned follow-ups ("commit and push the branch").
-- **A moved checkout can keep its authority.** `.pi/project.json` carries the project id inside the
-  tree, so a rename or `git worktree move` does not orphan rules and grants — once you write that file,
-  which nothing does for you; until then a tree is named by where it sits. `/grants adopt` recovers
-  state from before that file existed: tightening rules are taken quietly, every widening one is a
-  candidate confirmed by id.
+- **A moved checkout keeps its authority.** The first time the extension resolves a project id from the path,
+  it writes that id into `.pi/project.json` inside the tree, so a rename or `git worktree move` no longer
+  orphans rules and grants — one small file, created once, never overwritten without an explicit swap.
+  `/grants adopt` recovers state from before that file existed: tightening rules are taken quietly, every
+  widening one is a candidate confirmed by id.
 - **An adaptive footer.** Mode, unattended flag, profile, live token / cost / context figures
   computed incrementally over the current branch.
 
