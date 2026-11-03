@@ -5,7 +5,7 @@
  * MIT-licensed — see LICENSE.
  */
 
-import { Type } from "@earendil-works/pi-ai"
+import { Type } from "typebox"
 import type { Tool } from "@earendil-works/pi-ai/compat"
 
 export const CLASSIFIER_TOOL_NAME = "classify_result"
