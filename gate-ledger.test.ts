@@ -216,9 +216,15 @@ describe("read-only posture ('don't change anything')", () => {
 		const rTmp = await runGate("bash", { command: "echo hi > /tmp/out.txt" }, { policy: POLICY, ledger: roLedger() })
 		expect(rTmp.outcome).toBe("allow")
 	})
-	it("still ALLOWS reads", async () => {
-		const r = await runGate("bash", { command: "cat /etc/hosts" }, { policy: POLICY, ledger: roLedger() })
-		expect(r.outcome).toBe("allow")
+	it("still ALLOWS reads inside the project; an outside read asks for its own reason", async () => {
+		// What this protects is that the read-only POSTURE is not a veto on reads. A second, unrelated reason a
+		// read can prompt — the object is outside the project — exists too, so the outside case asserts the prompt
+		// AND that it is not the posture talking (the posture's own sentence names "change anything").
+		const inside = await runGate("bash", { command: "cat src/a.ts" }, { policy: POLICY, ledger: roLedger() })
+		expect(inside.outcome).toBe("allow")
+		const outside = await runGate("bash", { command: "cat /etc/hosts" }, { policy: POLICY, ledger: roLedger() })
+		expect(outside.outcome).toBe("prompt")
+		expect(outside.reason).not.toContain("change anything")
 	})
 	it("a later per-target grant lifts that target only", async () => {
 		const l = ledgerWith([
@@ -379,19 +385,52 @@ describe("grant window sized to the model's context", () => {
 		expect(kept.every((m) => m.length === 268 || m.length === 260)).toBe(true)
 	})
 
-	it("excludes a message bigger than the whole budget, whole", () => {
+	it("skips a message bigger than the whole budget, whole, and keeps the ones that fit", () => {
 		const huge = messageOf(0, 20_000)
-		// alone: it is the newest and it does not fit, so nothing is sent at all
-		expect(limitUserMessages([messageOf(1, 40), huge], 500)).toEqual([])
-		// behind a fitting one: it is dropped, and nothing older than it is rescued
+		// the oversize one is skipped; an older message that fits is still sent (stopping at the first oversize
+		// message hid every earlier approval in the conversation, and the big paste is read by per-message chunked
+		// extraction anyway)
+		expect(limitUserMessages([messageOf(1, 40), huge], 500)).toEqual([messageOf(1, 40)])
+		// behind a fitting one: it is dropped, and nothing older than it is dropped with it
 		const kept = limitUserMessages([messageOf(1, 20), huge, messageOf(3, 40)], 500)
-		expect(kept).toEqual([messageOf(3, 40)])
+		expect(kept).toEqual([messageOf(1, 20), messageOf(3, 40)])
+		// never a fragment of the oversize message, in either direction
 		expect(kept.some((m) => m.includes("…"))).toBe(false)
+		expect(kept.every((m) => m === messageOf(1, 20) || m === messageOf(3, 40))).toBe(true)
+		// and with nothing else to fill with, the window is empty — the caller then sends no messages at all
+		expect(limitUserMessages([huge], 500)).toEqual([])
 	})
 
 	it("keeps the 60-message window cap on top of the token budget", () => {
 		const many = Array.from({ length: 90 }, (_, i) => messageOf(i, 12))
 		expect(limitUserMessages(many, 100_000)).toEqual(many.slice(-60))
+	})
+
+	it("one long message does not hide the approval said before it", async () => {
+		// The measured failure: `[approval, 11k paste]` with a 2 000-token budget produced `[]`, so the gate
+		// prompted without asking the model at all — although the approval fitted and a grant row for it existed.
+		const approval = "you may delete ~/notes-old"
+		const paste = "lorem ipsum dolor sit amet ".repeat(500) // ~13 500 chars, over the whole window
+		expect(estimateTokens(paste.length)).toBeGreaterThan(2000)
+		const window = limitUserMessages([approval, paste], 2000)
+		expect(window).toEqual([approval])
+		// the invariant stopping-at-the-first-oversize was protecting still holds: nothing was shortened
+		expect(window.every((m) => m === approval || m === paste)).toBe(true)
+
+		// and the paste is not lost from the AUTHORISATION path either: per-message chunked extraction reads all
+		// of it, edge to edge, so a grant worded inside the long message still reaches the ledger.
+		const { fn } = mockExtractionFetch([["delete ~/notes-old", { grants: [], revocations: [] }]])
+		const r = await runGate("bash", { command: "rm -rf ~/notes-old" }, {
+			policy: POLICY,
+			endpoint: { ...EP, contextTokens: 4096 },
+			userMessages: [approval, paste],
+		})
+		expect(fn).toHaveBeenCalledTimes(1)
+		expect(r.modelCalls.some((c) => c.task === "grant")).toBe(true)
+		const sent = JSON.parse(String((fn.mock.calls[0] as unknown as [unknown, { body: string }])[1].body)) as {
+			messages: Array<{ content?: string }>
+		}
+		expect(String(sent.messages[1]?.content ?? "")).toContain(approval)
 	})
 
 	it("prompts without a model call when nothing fits the window", async () => {
@@ -405,6 +444,25 @@ describe("grant window sized to the model's context", () => {
 		expect(r.reason).toContain("classifier window")
 		expect(r.modelCalls).toHaveLength(0)
 		expect(fn).not.toHaveBeenCalled()
+	})
+
+	it("a targetless ask reaches the model with no target, not with the marker", async () => {
+		// The marker is a grant-matching value. A model told the action targets "*" would read it as "everything"
+		// and refuse a sentence that really did approve `su`, so the pending action goes out as "(none)".
+		const { fn } = mockExtractionFetch([])
+		const r = await runGate("bash", { command: "su" }, {
+			policy: POLICY,
+			endpoint: { ...EP, contextTokens: 4096 },
+			userMessages: ["go ahead and su to root for this"],
+		})
+		expect(r.modelCalls.some((c) => c.task === "grant")).toBe(true)
+		const body = JSON.parse(String((fn.mock.calls[0] as unknown as [unknown, { body: string }])[1].body)) as {
+			messages: Array<{ content?: string }>
+		}
+		const prompt = String(body.messages[1]?.content ?? "")
+		expect(prompt).toContain("Action targets: (none)")
+		// the row the prompt offers still carries the marker, so an "always" has something to store
+		expect(r.entities).toEqual([{ kind: "target", value: "*" }])
 	})
 
 	it("still pays the grant call when the history does fit (so the test above is not vacuous)", async () => {
@@ -585,7 +643,7 @@ const copyFilesGrant = {
 	seq: 3,
 }
 const PENDING_WRITE = { path: `${OUT_SCOPE}x.txt`, content: "x" }
-const YES_FROM_ROW: GrantExtraction = { authorized: "yes", allowed_targets: [OUT_SCOPE], forbidden_targets: [], quote: ROW_QUOTE }
+const YES_FROM_ROW: GrantExtraction = { authorized: "yes", effects: ["write_outside"], allowed_targets: [OUT_SCOPE], forbidden_targets: [], quote: ROW_QUOTE }
 const MODEL_SAYS_NO: GrantExtraction = { authorized: "no", allowed_targets: [], forbidden_targets: [], quote: "" }
 
 function ledgerFrom(events: Parameters<typeof applyEvent>[1][]) {
@@ -793,5 +851,80 @@ describe("the message-ref cap is a dump guard, not a size limit", () => {
 		// the list index.ts hands the gate goes through the same clamp, so tokens budget it downstream
 		expect(collectUserMessagesFromBranch(branch(text) as never)).toEqual([ref])
 		expect(MESSAGE_REF_MAX_CHARS).toBeGreaterThan(4_000)
+	})
+})
+
+/**
+ * The `effects` field on the gate's own transcript call, and the coverage check built on it.
+ *
+ * Two facts, both worth pinning: the call ASKS for the field (so every endpoint answers in the same
+ * vocabulary the ledger matches on), and the ANSWER IS READ — a pending segment the quote does not
+ * authorise stops the grant. The field landed unread so that it could be measured before the restriction it
+ * replaces was deleted; this block is the other half, where the field carries the weight.
+ */
+describe("the grant call carries effects, and the verdict reads them", () => {
+	const ANSWERED = [ROW_QUOTE, messageOf(2, 40)]
+
+	it("the request the gate sends asks for effects as the category enum", async () => {
+		const { fn, bodies } = stubGrantCall(YES_FROM_ROW)
+		await runGate("write", PENDING_WRITE, {
+			policy: POLICY,
+			endpoint: { ...EP, contextTokens: DEFAULT_CONTEXT_TOKENS },
+			ledger: ledgerFrom([copyFilesGrant]),
+			userMessages: ANSWERED,
+		})
+		expect(fn).toHaveBeenCalledTimes(1)
+		const sent = JSON.parse(bodies[0]!) as { response_format: { json_schema: { schema: Record<string, any> } } }
+		const schema = sent.response_format.json_schema.schema
+		expect(schema.properties.effects.items.enum.length).toBeGreaterThan(0)
+		expect(schema.properties.effects.items.enum).toContain("package_system")
+		expect(schema.required).toContain("effects")
+	})
+
+	it("the verdict is coverage by kind group: only an effect in the pending family allows", async () => {
+		// Was: "while the verdict reads verbs, no value of effects moves it — empty, matching, or
+		// alarming", asserting `allow-granted` for all five values. The field is decisive now, so the
+		// expectation is inverted for everything except the effect that actually covers `write_outside`.
+		// Nothing about the ALLOW side got looser: the quote, the verbatim check and the target match are
+		// all still required (the recorded-answer pins in risk-policy.test.ts cover those).
+		//
+		// `reason` is what the refusal says about itself. Note `copy_files` reads as EMPTY, not as a
+		// disagreement: `parseEffects` (model-client.ts) drops anything outside the enum before the verifier
+		// ever sees the row, so an invented value arrives as "the model named nothing".
+		const EXPECT: Array<{ effects: unknown; outcome: "allow-granted" | "prompt"; reason: string }> = [
+			{ effects: ["write_outside"], outcome: "allow-granted", reason: "" },
+			{ effects: ["package_system"], outcome: "prompt", reason: "does not authorise" },
+			{ effects: ["wipe_protected"], outcome: "prompt", reason: "does not authorise" },
+			{ effects: ["copy_files"], outcome: "prompt", reason: "effects empty" },
+			{ effects: [], outcome: "prompt", reason: "effects empty" },
+			{ effects: "install it", outcome: "prompt", reason: "effects empty" },
+			{ effects: undefined, outcome: "prompt", reason: "effects empty" },
+		]
+		for (const { effects, outcome, reason } of EXPECT) {
+			const { fn } = stubGrantCall({ ...YES_FROM_ROW, effects } as never)
+			const r = await runGate("write", PENDING_WRITE, {
+				policy: POLICY,
+				endpoint: { ...EP, contextTokens: DEFAULT_CONTEXT_TOKENS },
+				ledger: ledgerFrom([copyFilesGrant]),
+				userMessages: ANSWERED,
+			})
+			expect(fn).toHaveBeenCalledTimes(1)
+			expect(r.outcome, JSON.stringify(effects)).toBe(outcome)
+			expect(r.grantedBy, JSON.stringify(effects)).toBe(outcome === "allow-granted" ? "transcript" : undefined)
+			if (reason) expect(r.reason, JSON.stringify(effects)).toContain(reason)
+		}
+	})
+
+	it("and a model that says no still prompts whatever its effects say", async () => {
+		const { fn } = stubGrantCall({ ...MODEL_SAYS_NO, effects: ["write_outside"] } as never)
+		const r = await runGate("write", PENDING_WRITE, {
+			policy: POLICY,
+			endpoint: { ...EP, contextTokens: DEFAULT_CONTEXT_TOKENS },
+			ledger: ledgerFrom([copyFilesGrant]),
+			userMessages: ANSWERED,
+		})
+		expect(fn).toHaveBeenCalledTimes(1)
+		expect(r.outcome).toBe("prompt")
+		expect(r.reason).toBe("model: not authorised by the user")
 	})
 })

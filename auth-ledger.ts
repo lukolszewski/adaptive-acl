@@ -25,18 +25,24 @@
  */
 
 import type { Entity } from "./risk-policy.ts"
+import { kubeContexts, LOCAL_MACHINE_OBJECT, tempGrantDirs } from "./risk-paths.ts"
 import type { ImageRef } from "./target-grammar.ts"
-import { coversByGrammar, grammarFor, namedByUserStructurally, parseImageRef, parseVcsTarget } from "./target-grammar.ts"
+import { coversByGrammar, grammarFor, namedByUserStructurally, objectStoreCovers, parseImageRef, parseVcsTarget } from "./target-grammar.ts"
 import {
-	BARE_VERB_CATEGORIES,
+	DOING_VERB_EVIDENCE,
 	METHOD_VERB_REQUIRED,
+	NO_OBJECT_TARGET,
 	canonicalPath,
+	categoryDirection,
 	entityMatchesTarget,
 	expandHome,
+	grantAnswersSegment,
+	kindGroup,
 	targetNamedByUser,
 } from "./grant-verify.ts"
 import {
 	asBackgroundRevocations,
+	FORBID_ANY_CATEGORY,
 	foldRevocations,
 	localRevocationKeys,
 	partitionRevoked,
@@ -151,7 +157,11 @@ export function readOnlyActive(ledger: Ledger): { quote: string; seq: number } |
 /** Under read-only, does a ledger grant made AFTER the posture (seq > roSeq) cover
  *  ALL pending targets? Such a later grant re-permits that specific target
  *  ("don't change anything" … later … "you can write to /x/"). A targetless
- *  mutation cannot be lifted this way — only a blanket re-enable clears it. */
+ *  mutation cannot be lifted this way — only a blanket re-enable clears it.
+ *
+ *  Since the model's category is the evidence there is no verb gate here at all: reach comes from the row's
+ *  own category (a delete is answered by a delete-category row), so a sentence about destroying needs no word
+ *  recognised in code to lift the posture — and a wrong category costs one prompt. */
 export function readOnlyLiftedByGrant(
 	ledger: Ledger,
 	category: string,
@@ -163,15 +173,12 @@ export function readOnlyLiftedByGrant(
 	const primary = category.split("+")[0] ?? category
 	const targets = entities.filter((e) => e.kind === "target").map((e) => e.value)
 	if (targets.length === 0) return false
-	// ANY delete segment arms the verb gate — never just the first-listed one.
-	const needDeleteVerb = compoundHas(category, DELETE_CATEGORIES)
 	return targets.every((t) =>
 		ledger.grants.some(
 			(g) =>
 				g.seq > roSeq &&
 				valueCovers(g, t, home, project, primary) &&
-				grantMatchesPending(g, primary, category, t, home, project) &&
-				(!needDeleteVerb || DELETE_VERB_RE.test(g.quote)),
+				grantMatchesPending(g, primary, t, home, project),
 		)
 	)
 }
@@ -190,17 +197,110 @@ const FS_MUTATION_CATEGORIES = new Set([
 ])
 
 /**
- * The subset of mutation categories where READING is genuinely entailed: the user said the
- * agent may create or edit content here, and you cannot edit what you cannot open.
+ * Where the direction table lives now, and why the two sets that used to sit here are gone.
  *
- * Deliberately narrower than FS_MUTATION_CATEGORIES. `delete_*` is excluded because "you may
- * delete /w" does not say anything about reading /w — deletion is not a read capability in
- * disguise. `system_config` and `perm_change` are excluded because they authorize service or
- * metadata changes, not content access. `write_sensitive` IS included (you are editing those
- * files) but note it still cannot reach `read_secret`, which is what keeps credentials behind
- * their own gate regardless of what may be written to the folder.
+ * `grant-verify.ts` owns `grantDirection` / `grantAnswersSegment`, because the same question — "does a grant for
+ * X answer an action of kind Y?" — is asked by three stores and by the transcript verdict, and three copies of
+ * a harm taxonomy is how the four start disagreeing. The reasoning that used to be recorded here still holds and
+ * is now stated once, there:
+ *
+ *  · you cannot edit what you cannot open, so a write grant reaches reads (secret-class reads included: an
+ *    edit of a credentials file needs the read that precedes it);
+ *  · you cannot remove what you may not look at either, so a delete grant reaches reads — and, through
+ *    delete→write, still buys no write it did not buy before;
+ *  · removing ONE file is part of editing it, so a write grant reaches `delete_outside` — never
+ *    `delete_recursive`, never `delete_data`, and never the folder the row was granted over.
+ *
+ * What has NOT changed: `system_config` and `perm_change` are metadata or service changes rather than content
+ * access, so they are reached as OBJECTS in {@link SERVICE_OBJECT_CATEGORIES}, never as a direction over paths;
+ * and a READ grant buys no change of any kind.
  */
-const FS_WRITE_CATEGORIES = new Set(["write_outside", "write_project", "write_sensitive"])
+
+/**
+ * The categories whose object is a SERVICE, HOST or CLUSTER instead of a path — and whose grant therefore
+ * already contains reading that object.
+ *
+ * Layer 0 names the object of a non-file read (`docker ps` → the daemon, `kubectl get` → the cluster,
+ * `ssh host …` → the host, `psql` → the database, `curl` → the site), so the question the user answers is
+ * per object, not per command. A grant that already lets the agent drive that object — restart the daemon,
+ * apply to the cluster, run on the host — plainly includes looking at it; refusing `docker ps` to someone
+ * who approved `docker restart` is friction with no security content.
+ *
+ * `package_system` is deliberately NOT here: its object is a package or a client, and "you may install
+ * ripgrep" is not "you may list every mirror". `agent_spawn` is not either — spawning is not reading.
+ * A service grant whose value is `*` ("any container, anywhere") is refused below: the rule covers "the object
+ * you named", and a category-wide row names none.
+ */
+const SERVICE_OBJECT_CATEGORIES = new Set([
+	"container_mutation",
+	"cluster_mutation",
+	"db_mutation",
+	"remote_exec",
+	"network_send",
+	"process_control",
+	"system_config",
+])
+
+/**
+ * The categories a temp-class grant may speak for.
+ *
+ * "You may write temporary files" is a permission over a handful of directories, so the effects it can
+ * honestly carry are the ones you perform on files in a directory: read, write, delete, run. Anything else
+ * — a cluster, a database, a permission change, credentials — is not a thing a scratch directory holds, and
+ * a row claiming one is a model answer this file does not act on: it registers nothing and is counted, so
+ * the work behind it costs its ordinary prompt.
+ *
+ * `read_secret` is excluded on purpose: a scratch space is where a script dumps what it read, so "temp
+ * files" is never a licence to go looking for credentials, and the class asks for read + write (+ run), not for
+ * the secret gate to move.
+ */
+const TEMP_CLASS_CATEGORIES = new Set([
+	"read_only",
+	"write_project",
+	"write_outside",
+	"write_sensitive",
+	"delete_outside",
+	"delete_recursive",
+	"delete_data",
+	"run_project_code",
+])
+
+/**
+ * The classes of MACHINE a grant can name without spelling an address, the same shape as the temp-file class:
+ * the model says WHICH machine it meant, code decides what that is.
+ *
+ * The model never names this machine in prose — "my machine", "here", "the box" are not verbatim-checkable
+ * strings — so a row about it carries the class instead, exactly like `temp_files`. The class is not a target
+ * and widens nothing: it supplies the object for one row of the category the model already named.
+ *
+ * `current_cluster` is the narrow one, and the restriction is the point: a kubeconfig with several
+ * contexts has no single "my cluster" for a sentence to mean. With one context there is exactly what the user
+ * meant; with several, the row registers NOTHING and the read costs its prompt, which is the "asks" this
+ * class exists to ask for. A named context is not this class's business — it is an ordinary target,
+ * verbatim-checked.
+ */
+const MACHINE_TARGET_CLASSES = new Set(["local_machine", "current_cluster"])
+
+/**
+ * What `current_cluster` means on this machine: its kubeconfig's current context, and ONLY when the file
+ * holds exactly one context. Several contexts means several possible referents for one sentence, so the
+ * answer is `undefined` — the row registers nothing and the read asks, which is the outcome named for an
+ * ambiguous "my cluster".
+ *
+ * The count is the number of context ENTRIES the file declares, not the number of names we managed to read:
+ * an entry whose name this scanner cannot see is still another referent, so it keeps the answer ambiguous
+ * rather than narrowing the file down to the one cluster we happen to be able to name.
+ *
+ * Only the context names and `current-context` are ever read out of the file (see `kubeContexts`); a
+ * kubeconfig holds credentials and nothing here may echo a field beyond those two.
+ */
+export function singleClusterContext(env?: Record<string, string | undefined>): string | undefined {
+	const home = env?.HOME ?? process.env.HOME ?? ""
+	if (!home) return undefined
+	const { contexts, entries, current } = kubeContexts(home, env)
+	if (!current) return undefined
+	return entries === 1 && contexts.length === 1 ? current : undefined
+}
 
 /** Does a grant entry authorise this pending category, for this pending target?
  *
@@ -210,17 +310,37 @@ const FS_WRITE_CATEGORIES = new Set(["write_outside", "write_project", "write_se
  *  /usr/bin/foo" extracts as write_outside (fs-write) while the write itself
  *  classifies as write_sensitive (secret), because /usr/bin is a sensitive
  *  prefix, and the two never met. Scopes and wildcards are NOT widened: naming
- *  one file is not permission for a whole tree. */
+ *  one file is not permission for a whole tree.
+ *
+ *  The widening never reaches a DELETE pending, and that limit is load-bearing. It fixes a
+ *  group mismatch on CONTENT — the same harm, a different display category — and "you may edit this file"
+ *  buying "you may destroy it" is a change of direction, not a spelling. One shape of that direction is
+ *  open, and open as a RULE rather than as a spelling: a write row answers `delete_outside`
+ *  (removing one file is part of editing it), never `delete_recursive`, never `delete_data`, and never the
+ *  folder the row was granted over. Those refusals live in `grantAnswersSegment`, together with the rest of
+ *  the direction table, so every store refuses the same three things. */
 function grantMatchesPending(
 	g: LedgerEntry,
 	segment: string,
-	/** The WHOLE pending category, needed to tell a publish compound from a plain send. */
-	pendingCategory: string,
 	target: string,
 	home?: string,
 	project?: string,
 ): boolean {
-	if (grantAuthorises(g, segment, pendingCategory)) return true
+	// The directions a stored category answers at all — group equality plus the three named one-way rules
+	// (delete→write, write→read, write→single-file delete) — applied WITH the target, so the two target-shaped
+	// refusals (no object-less row, never the granted folder itself) happen where the target is known. This one
+	// call replaces what used to be `grantAuthorises` plus the fs half of `readEntailedBy`: the same question
+	// answered once, for the ledger, the session store and the transcript verdict alike.
+	if (
+		grantAnswersSegment({
+			grant: g,
+			pendingSegment: segment,
+			target,
+			covers: (seg) => valueCovers(g, target, home, project, seg),
+			space: { home, project },
+		})
+	)
+		return true
 	if (
 		g.kind === "entity" &&
 		g.value !== "*" &&
@@ -231,20 +351,81 @@ function grantMatchesPending(
 		// classifies as write_sensitive); it never meant "and you may chmod it".
 		!PRIVILEGE_CATEGORIES.has(g.category) &&
 		!PRIVILEGE_CATEGORIES.has(segment) &&
+		// …and the same argument against the other direction: a named file the user may WRITE is not a
+		// named file the user may DELETE. See the doc block above.
+		kindGroup(segment) !== "fs-delete" &&
 		valueCovers(g, target, home, project, segment)
 	)
 		return true
-	// WRITE IMPLIES READ. A file you may not open is not a file you may edit: "you can write
-	// into /w" that still prompts for every read of /w is friction with no security content,
-	// and the user's own wording ("write", "work in", "create files there") already contains
-	// the read. Direction matters absolutely here — this is one-way. read_secret is NOT in
-	// this list, and neither is anything delete-shaped: credentials stay behind their own
-	// gate no matter what was written into the folder. Pinning both refusals is the point of
-	// the matrix in directed-permissions.test.ts.
-	if (segment === "read_only" && FS_WRITE_CATEGORIES.has(g.category) && valueCovers(g, target, home, project, segment)) {
-		return true
-	}
+	// The OBJECT directions, which are about a service, host, cluster or daemon rather than about a path, and
+	// therefore cannot live in the category table above: a grant that already drives that object plainly contains
+	// looking at it. A `read_system_state` row is reached only from a grant on the same machine, never from a file
+	// grant — the object, not the spelling, is what has to match.
+	if (segment === "read_only" && serviceReadEntailedBy(g, target, home, project, segment)) return true
+	if (segment === "read_system_state" && machineReadEntailedBy(g, target, home, project, segment)) return true
 	return false
+}
+
+/**
+ * The first shape of "does this grant already contain reading `target`?", narrowed to grants whose object IS a
+ * service, host, cluster or daemon.
+ *
+ * The fs half this function used to carry (write and delete grants covering `read_only`, and the `*` rule that
+ * went with them) now lives in `grantAnswersSegment` with the rest of the direction table — that direction was
+ * widened to `read_secret`, which is a statement about paths and belongs with the path rules. What is left is
+ * the part that is not a path at all: a grant that drives a service has the service as its object, so a read of
+ * that object is not a new capability.
+ *
+ * A `*` value is refused here exactly as everywhere else: "any service, anywhere" names no object, so it cannot
+ * be evidence about this one.
+ */
+function serviceReadEntailedBy(g: LedgerEntry, target: string, home?: string, project?: string, segment?: string): boolean {
+	const segments = categorySegments(g.category)
+	const entailed = segments.filter((c) => SERVICE_OBJECT_CATEGORIES.has(c))
+	if (entailed.length === 0) return false
+	if (g.value === "*") return false
+	return valueCovers(g, target, home, project, segment)
+}
+
+/**
+ * The second shape of the same one-way question: does a grant the user gave for some OTHER effect already
+ * contain reading this machine, host or cluster?
+ *
+ * Narrower than {@link serviceReadEntailedBy} on purpose. A write or delete grant over a PATH is not evidence
+ * about a machine — `/var/log` and "this machine" are different objects, and letting one answer the other is
+ * how a folder permission quietly becomes a licence to survey the box. What does answer it is a grant whose
+ * object already IS that machine, host, cluster or daemon (the service rule above, unchanged in direction), or a
+ * plain read grant on the same object.
+ *
+ * A `*` value is refused here too: "any service, anywhere" names no object, so it cannot be evidence about
+ * this one.
+ */
+/**
+ * The categories whose object can BE a machine or a cluster, and whose grant therefore says something about
+ * reading that machine's status — the service-object set above, narrowed for this one question.
+ *
+ * Deliberately missing, and the reason:
+ *  · `network_send` — its object is an endpoint somebody sent a packet to. "You may probe `db.internal:5432`"
+ *    is not permission to read that box's process table, and a host string appearing in both categories is a
+ *    coincidence of spelling, not of authority;
+ *  · `db_mutation` — the object is a database. A cluster's pods are not inside it in the sense that matters.
+ * `read_only` is included because it is already a read of that exact object: the user said "read this", and a
+ * status read of the same object is that, which is the direction the service rule already pins.
+ */
+const MACHINE_READ_GRANT_CATEGORIES = new Set([
+	"container_mutation",
+	"cluster_mutation",
+	"remote_exec",
+	"process_control",
+	"system_config",
+	"read_only",
+])
+
+function machineReadEntailedBy(g: LedgerEntry, target: string, home?: string, project?: string, segment?: string): boolean {
+	if (g.value === "*") return false
+	const entailed = categorySegments(g.category).filter((c) => MACHINE_READ_GRANT_CATEGORIES.has(c))
+	if (entailed.length === 0) return false
+	return valueCovers(g, target, home, project, segment)
 }
 
 export const MAX_GRANTS = 200
@@ -253,21 +434,29 @@ export const MAX_FORBIDS = 100
 /**
  * Extraction diagnostics.
  *
- * When the model extracts an action our category table cannot name, the grant is
- * stored under a `*action*` pseudo-category - and `compatible()` treats only bare
- * `"*"` as a wildcard, so that label can never match a real pending category. The
- * grant is therefore recorded and authorises nothing: silent in effect.
+ * When the model returns a category this gate cannot match — missing, `"other"`, or a value outside
+ * the enum — the grant registers NOTHING: the word list that used to invent a category from the
+ * display label is deleted. That is the failure mode worth counting, because a permission the user
+ * actually gave is indistinguishable from one they never gave: no prompt happens, no row appears in
+ * `/grants`, the work simply asks again. Surfaced by /classifier-status.
  *
- * That is the failure mode worth counting, because it is indistinguishable from
- * "the user never granted it". Surfaced by /classifier-status.
+ * There used to be an ordered table of English regexes below `isGrantCategory`, run over the model's
+ * `action` string to invent a category. The extraction prompt defines `action` as a display label and
+ * then this file made authority out of it, which is how "do not delete any images" became an
+ * fs delete that could never reach the container it withdrew.
  */
 export const extractionStats = {
 	mapped: 0,
+	/** Grant rows that registered NOTHING. Two ways to get here and both cost the same prompt: the row
+	 *  had no usable category, or it named no object without asking for the whole category (so a wildcard
+	 *  would have invented the authority the missing value was supposed to carry). */
 	unmapped: 0,
 	lastUnmapped: "",
 	/** Categories that came from the model as an enum value — the schema-first path. */
 	fromSchema: 0,
-	/** Categories recovered by the English word list, i.e. the endpoint ignored the schema. */
+	/** Categories recovered by the English word list. PERMANENTLY ZERO: the table is
+	 *  deleted, and the counter stays because `/classifier-status` prints it — a line that reads
+	 *  "0 recovered by the English word list" is the visible proof that no endpoint is riding on it. */
 	legacyWordList: 0,
 	/** Grants the model marked as a location scope, so folder permissions registered. */
 	scopes: 0,
@@ -282,9 +471,10 @@ export const extractionStats = {
 	 *  things: a grant that cannot come back is a permission the user took away, a forbid that
 	 *  cannot come back is a ban the user cancelled. Summed into one counter, neither is legible. */
 	forbidRevocationsBlocked: 0,
-	/** Answers the deterministic noun map overrode. Without this the override is invisible:
-	 *  the stored category looks like the model's own answer, and "the endpoint keeps calling a
-	 *  docker push a git push" is only visible as a grant that never fires. */
+	/** Rows whose category the code counted as a disagreement with their own targets (counted,
+	 *  never applied — the model's category is what gets stored). Without this a docker push
+	 *  filed under a git category, and therefore unreachable from any wording, was only
+	 *  visible as a grant that never fired. */
 	crossChecked: 0,
 }
 
@@ -307,53 +497,13 @@ export function createLedger(): Ledger {
 
 // ---------------------------------------------------------------- kind groups
 
-/** Category → matching group (§2.4). Ledger matching compares groups, not exact
- *  categories, so a grant reaches the siblings inside its own group. What a group may NOT
- *  decide is direction - that is grantAuthorises' job, because "copy to /x/" covering mkdir
- *  follows from writing content, while covering chmod never did. */
-const KIND_GROUPS: Record<string, string> = {
-	write_outside: "fs-write",
-	// Split from writes on purpose. One group for both meant a folder grant for either authorised
-	// both, and the direction that mattered - "you may edit" buying "you may remove" - was decided
-	// by adjacency rather than by anyone. The legitimate half is now a named one-way rule.
-	delete_outside: "fs-delete",
-	delete_recursive: "fs-delete",
-	delete_data: "fs-delete",
-	// Privilege is a different harm class from content: chmod decides who ELSE may read what the
-	// user granted. Never implied by a write or a delete; it has to be named.
-	perm_change: "fs-perm",
-	package_system: "pkg",
-	privilege: "priv",
-	network_send: "net-send",
-	vcs_remote: "vcs-remote",
-	vcs_discard: "vcs-discard",
-	cluster_mutation: "cluster",
-	container_mutation: "cluster",
-	db_mutation: "db",
-	// write_project only reaches ledger matching via the named-forbid downgrade
-	// (an allow-tier action the user explicitly forbade); grouping it with
-	// fs-write lets a later "ok, you can delete X now" lift the forbid.
-	write_project: "fs-write",
-	remote_exec: "exec",
-	agent_spawn: "exec",
-	network_listen: "listen",
-	// Split on purpose. Both used to be "secret", and `compatible()` is pure group
-	// equality, so a grant to READ a secret path authorised WRITING it — and vice
-	// versa — through the kind-group widening. Reading and mutating a secret-bearing
-	// path are different permissions and must never be interchangeable, so they get
-	// distinct groups and neither reaches the other. This is strictly tighter: it can
-	// only cost an extra prompt, never grant a false allow.
-	read_secret: "secret-read",
-	write_sensitive: "secret-write",
-	process_control: "proc",
-	system_config: "sysconf",
-	interactive_editor: "editor",
-}
-
-export function kindGroup(category: string): string {
-	const primary = category.split("+")[0] ?? category
-	return KIND_GROUPS[primary] ?? primary
-}
+/** Category → matching group (§2.4) now lives in `grant-verify.ts`, because the transcript side needed the
+ *  same map the ledger matches on: `verifyGrant` answers "does this sentence authorise this effect?" by
+ *  comparing the kind group of every pending segment against the kind groups of the model's `effects`.
+ *  Two copies of a harm taxonomy is how the two sides start disagreeing, and the import direction here
+ *  (auth-ledger → grant-verify) leaves no other place to put it without a cycle. Re-exported unchanged so
+ *  every existing importer of `kindGroup` keeps reading the one table. */
+export { kindGroup }
 
 function compatible(entryCategory: string, pendingCategory: string): boolean {
 	if (entryCategory === "*") return true
@@ -375,8 +525,29 @@ const FORBID_FAMILIES: Record<string, string> = {
 	"fs-perm": "fs-mutation",
 }
 
+/**
+ * The object-store half of the same family, stated by CATEGORY because the two effects do not share a
+ * kind group and must not borrow the fs one.
+ *
+ * A bucket is entered by uploading (`network_send` in layer 0 — `aws s3 cp` to a URI) and emptied by deleting
+ * objects (`delete_data`). "Do not write in X" therefore has to stop overwrites AND deletes inside X, exactly
+ * as the `fs-mutation` family makes a writes-forbid on a directory stop `rm` inside it. Relying on the small
+ * model to list a second category for that was measured first, and it is not dependable — a row the model did
+ * not emit is a hole, while a family is a rule.
+ *
+ * Symmetric, like `fs-mutation`: a delete-only forbid also binds an upload to the same value. That direction
+ * is wider than the sentence that earned it and it costs one prompt, never an allow — the same price the fs
+ * family already pays, and the reason the family is keyed by VALUE coverage everywhere it is used.
+ */
+const STORE_FORBID_FAMILY: ReadonlySet<string> = new Set(["network_send", "delete_data"])
+
 function forbidCompatible(entryCategory: string, pendingCategory: string): boolean {
+	// `any` is every action on the named target — it is the widest forbid the schema can express, so it
+	// binds under every segment. It can never reach a grant row: grants are matched by `grantAuthorises`, and
+	// `isGrantCategory` refuses the value at every door a grant row comes through.
+	if (entryCategory === FORBID_ANY_CATEGORY) return true
 	if (compatible(entryCategory, pendingCategory)) return true
+	if (STORE_FORBID_FAMILY.has(entryCategory) && STORE_FORBID_FAMILY.has(pendingCategory)) return true
 	const a = FORBID_FAMILIES[kindGroup(entryCategory)] ?? kindGroup(entryCategory)
 	const b = FORBID_FAMILIES[kindGroup(pendingCategory)] ?? kindGroup(pendingCategory)
 	return a === b
@@ -393,66 +564,41 @@ const PRIVILEGE_CATEGORIES = new Set([
 ])
 
 /**
- * Does a stored grant authorise this pending category? Directed, and per segment.
+ * Does a stored grant authorise this pending category at all (target not considered)?
  *
- * Per segment because a compound grant (`write_outside+perm_change`, from one approval of one
- * command) names exactly its own effects - which is what the coarse group used to fake, at the cost
- * of letting an unrelated category in through the same door. The coarse group is gone, so the
- * compound has to say so itself; that path is why the per-segment fix in session-grants.ts had to
- * land first.
+ * Category-only, and therefore only used where the answer is about the SHAPE of the row rather than about
+ * authority over a target — the `/grants explain` candidate scan. Everything that decides whether an action may
+ * run goes through {@link grantMatchesPending}, which applies the same directions WITH the target and can
+ * therefore refuse the two target-shaped cases (an object-less row, and the granted folder itself).
  *
- * `pendingCategory` is the WHOLE pending category, not the segment being answered. One rule needs
- * it — the publish bridge — and it needs it precisely because that rule turns on which COMPOUND the
- * segment belongs to, which a segment alone cannot say.
+ * The answer is the direction table and nothing else: the row's own segments, delete→write, and the
+ * two directions write implies (read, single-file delete). Two bridges used to live here and both are gone:
+ *
+ *  - fs-write → fs-delete, conditional on a delete verb found in the row's quote. One shape of it is open —
+ *    `delete_outside`, the single-file delete — as a rule about the target (a file inside what the row names)
+ *    rather than about a word in a sentence.
+ *  - cluster → network_send on a publish compound. A `docker push` is filed by layer 0 as
+ *    `container_mutation+network_send`; the send half is reached by a row in the `net-send` group covering the
+ *    target, or by the transcript call naming `network_send` in its `effects`.
  */
-function grantAuthorises(g: LedgerEntry, segment: string, pendingCategory: string): boolean {
+function grantAuthorises(g: LedgerEntry, segment: string): boolean {
 	if (g.category === "*") return true
-	const pending = kindGroup(segment)
-	const segments = new Set(g.category.split("+").map((s) => kindGroup(s)))
-	if (segments.has(pending)) return true
-	// One-way, by name: a delete grant over a folder already permits destroying every byte inside
-	// it, so writing there is not a new class of harm. The reverse is refused outright.
-	if (pending === "fs-write" && segments.has("fs-delete")) return true
-	// The recorded mv/rename trade-off, now expressed as a direction rather than a shared group:
-	// destruction is reachable from a content grant only when the user's own words named it.
-	// ledgerCovers arms the same verb gate for every delete-shaped pending, so this only ever
-	// narrows relative to the old grouping.
-	if (pending === "fs-delete" && segments.has("fs-write") && DELETE_VERB_RE.test(g.quote)) return true
-	// One-way, by name: publishing an artifact IS a send — `docker push myrepo/app` cannot
-	// happen without uploading it — so an image/container row whose OWN words named the publish
-	// authorises the send half of the publish compound. That half was otherwise unreachable: layer 0
-	// files an artifact push as `container_mutation+network_send`, while the sentence that granted it
-	// can only ever name the artifact.
-	//
-	// Three bounds, and each of them carries weight: the pending must actually HAVE a
-	// container_mutation segment, so a plain `network_send https://x` is never reached — a push to a
-	// registry and a curl to a URL are different authorities, which is why the two groups were split
-	// and this must not undo that; the row must sit in the cluster group; and the row's own verified
-	// quote must carry the publish verb, not merely name an artifact.
-	if (
-		segment === "network_send" &&
-		categorySegments(pendingCategory).includes("container_mutation") &&
-		segments.has("cluster") &&
-		PUBLISH_VERB_RE.test(g.quote)
-	)
-		return true
-	return false
+	return categoryDirection(g.category, segment) !== undefined
 }
 
-const DELETE_CATEGORIES = new Set(["delete_recursive", "delete_outside", "delete_data"])
-
-/** The verbs that make "this artifact leaves the machine" the thing the user agreed to. Matched
- *  against the user's own verified words, like DELETE_VERB_RE: recognising "push" in a quote about
- *  an image grants nothing nobody asked for, because the row's value still has to cover the entity. */
-const PUBLISH_VERB_RE = /\b(push|publish|upload|release)\b/i
-
-/** Categories whose pending action READS, and nothing else. Two uses, both about keeping a read
- *  from standing in for a mutation: a derived forbid that names only these must not bind an action
- *  that mutates (`namedForbidCovers`), and a sentence that named only these derives a row in these
- *  categories instead of a wide one (`namedTargetCategory`). The split is the one that keeps
+/**
+ * Categories whose pending action READS, and nothing else. Two uses, both about keeping a read
+ *  from standing in for a mutation: a forbid that names only these must not bind an action that
+ *  mutates (`namedForbidCovers`), and a revocation whose category is one of these gets ONE shaped row
+ *  instead of the entity-plus-subtree pair a mutation gets. The split is the one that keeps
  *  `read_secret` out of a folder write grant — reading a path and changing it have never been
- *  interchangeable in this file. */
-const READ_CATEGORIES = new Set(["read_only", "read_secret"])
+ *  interchangeable in this file.
+ *
+ *  `read_system_state` belongs here on both counts: it is a read of a machine rather than a change to one,
+ *  and "stop reading my processes" is one sentence about one object, not a subtree pair. It is deliberately
+ *  NOT in any group with the other two — its kind group is its own name, which is what makes an approval to
+ *  read a machine's state reach no file read and no credential read. */
+const READ_CATEGORIES = new Set(["read_only", "read_secret", "read_system_state"])
 
 /**
  * A compound category (`write_outside+delete_outside`, from one command that both
@@ -460,9 +606,9 @@ const READ_CATEGORIES = new Set(["read_only", "read_secret"])
  * join order is composition order, not severity.
  *
  * Reading `category.split("+")[0]` therefore makes a security decision depend on
- * which segment happened to be listed first: with a write primary the delete-verb
- * gate was skipped entirely, so one operand order demanded a delete-specific grant
- * and the other let a plain write grant authorise the delete. That fails OPEN.
+ * which segment happened to be listed first: with a write primary a gate armed by the
+ * delete half was skipped entirely, so one operand order demanded a delete-shaped row
+ * and the other let a plain write grant answer the delete. That fails OPEN.
  *
  * Two dual rules, both monotone:
  *  - `compoundHas` — requirements that only ever ADD a check: true if ANY segment
@@ -482,34 +628,6 @@ export function compoundAll(category: string, set: Set<string>): boolean {
 	return parts.length > 0 && parts.every((c) => set.has(c))
 }
 
-/**
- * Verbs that make a user quote count as authorising a delete.
- *
- * `mv`/`move`/`rename` are here because a MOVE is what produces the
- * `delete_outside` half of `delete_outside+write_outside` (the source stops
- * existing at its old path). Without them a move could never satisfy the verb
- * gate its own category arms, so an approved `mv` re-prompted forever — the gap
- * was invisible while segment order decided whether the gate ran at all, and
- * became binding once that gate was made order-independent.
- *
- * `unlink|rmdir|trash|shred` were added after measuring usage (70/35/12/10 occurrences) and
- * because they are delete-ONLY words: unlike `move`, they cannot appear incidentally in a
- * quote that authorises something else, so they widen the gate with no English-word risk.
- *
- * This regex is tested against the user's OWN quoted words, not model text, so
- * recognising "move" for a move grants nothing nobody asked for; the grant's
- * target still has to cover the entity.
- */
-const DELETE_VERB_RE = /\b(delete|remove|rm|clean|clear|wipe|prune|drop|erase|purge|mv|move|rename|unlink|rmdir|trash|shred)\b/i
-
-// Why `mv|move|rename` belong in the delete-evidence set, and why that is not a bug to
-// tighten: a move DESTROYS its source path. `mv /w/a /tmp` means /w/a is gone, so a user who
-// authorises moving files into /w has authorised the disappearance of those paths. Four tests
-// pin this (gate-move.test.ts, compound-category.test.ts, one titled "accepted trade-off").
-// An earlier attempt here split a stricter DESTRUCTIVE_VERB_RE without read those tests first
-// and broke four of them; the recorded trade-off wins, and this note exists so the next
-// reader does not rediscover it as a hole.
-
 // ---------------------------------------------------------------- action mapping
 
 /**
@@ -525,6 +643,7 @@ const DELETE_VERB_RE = /\b(delete|remove|rm|clean|clear|wipe|prune|drop|erase|pu
 export const GRANT_CATEGORY_VALUES = [
 	"read_only",
 	"read_secret",
+	"read_system_state",
 	"write_project",
 	"write_outside",
 	"write_sensitive",
@@ -576,54 +695,21 @@ export function isGrantCategory(c: string): boolean {
 	return GRANT_CATEGORY_SET.has(c)
 }
 
-/**
- * LEGACY: free-text `action` → gate category. Ordered: domain nouns before generic verbs
- * ("delete the pod" is cluster, not fs).
- *
- * Not the authorisation path any more — the model names the category from
- * {@link GRANT_CATEGORY_VALUES} and that value wins. This table runs only for endpoints
- * that ignore the schema contract, and every use of it is counted, so a session quietly
- * riding on English word lists is visible instead of merely unlucky. Do not extend it: add
- * a value to the enum. It cannot express any language but English by construction.
- */
-const ACTION_MAP: Array<[RegExp, string]> = [
-	[/\b(kubectl|k8s|kubernetes|namespace|pod|deployment|statefulset|helm|cluster)\b/i, "cluster_mutation"],
-	[/\b(docker|container|image)s?\b/i, "container_mutation"],
-	[/\b(table|database|db|sql|schema|collection|redis)\b/i, "db_mutation"],
-	[/\b(push|force-push|publish|release|pull request|\bpr\b)\b/i, "vcs_remote"],
-	[/\b(discard|reset --hard|stash drop|revert)\b/i, "vcs_discard"],
-	[/\b(install|uninstall|apt|apt-get|brew|dnf|yum|pacman|pip|npm|package)\b/i, "package_system"],
-	[/\b(sudo|root|privilege|elevated)\b/i, "privilege"],
-	[/\b(installer|curl.*\|.*(bash|sh)|download.*(run|execute)|remote script)\b/i, "remote_exec"],
-	[/\b(serve|server|listen|listener|tunnel|expose|port)\b/i, "network_listen"],
-	[/\b(upload|send|post|transfer|exfil)\b/i, "network_send"],
-	[/\b(kill|restart|stop|terminate)\b/i, "process_control"],
-	[/\b(systemctl|firewall|mount|sysctl|cron|service)\b/i, "system_config"],
-	[/\b(ssh|remote host|connect)\b/i, "remote_exec"],
-	[/\b(secret|credential|token|\.env|key|password)\b/i, "read_secret"],
-	// PRIVILEGE takes an ACL VERB, and this row sits ABOVE the read row so the phrase can fire at
-	// all: in English an ACL edit is "grant … access", and `access` is also a read verb, so one of
-	// the two rows had to win by position and the specific phrase should.
-	//
-	// The bare NOUN used to live here (`permission`), and that one word is why "I do not want to use
-	// ANY permission files" became `{category:"perm_change", value:"*"}`: the noun bought the
-	// privilege category, the no-target fallback bought `value:"*"`, and the fs-mutation family fold
-	// (`FORBID_FAMILIES`, load-bearing for revocations) then blocked every write and recursive delete in the
-	// workspace and quoted the user's own sentence back at them. A noun names a thing; only a verb
-	// says what the user wants done to it. A sentence that names the noun instead gets the rule-file
-	// target class below, which is what it actually talked about.
-	[/\b(chmod|chown|chgrp|setfacl|chacl|cacls|icacls)\b|\b(?:grant|give|add|revoke|withdraw|remove|change|set)\w*\b[^.]{0,24}?\baccess\b/i, "perm_change"],
-	// READS. These rows were absent, which is why "read files" produced an inert
-	// `*read files*` label and a user's explicit folder permission registered nothing.
-	// Ordered AFTER the secret row so "read secret files" still lands on read_secret.
-	[/\b(read|view|open|list|browse|inspect|show|cat|access)\b/i, "read_only"],
-	[/\b(delete|remove|rm\b|erase|wipe|clean|clear|purge)\b/i, "delete_outside"],
-	[/\b(write|create|mkdir|copy|cp\b|move|mv\b|rsync|save|put|store|work in|extract)\b/i, "write_outside"],
-]
+/** `"any"` — every action on the target. Declared in `session-grants.ts`, which sits below this module
+ *  and refuses the value at every grant door, and re-exported here so every caller reads one name — the same
+ *  way `kindGroup` travels. "Leave X alone" withdraws EVERY action on X, while "do not write in X" withdraws
+ *  writes only; only forbids get the wide form, because a missed grant row costs a prompt while a missed
+ *  forbid category costs an allow. */
+export { FORBID_ANY_CATEGORY }
 
-export function mapActionToCategory(action: string): string | undefined {
-	for (const [re, cat] of ACTION_MAP) if (re.test(action)) return cat
-	return undefined
+/** The enum the revocation half of the extraction schema offers: every effect word, plus `any`. */
+export const REVOCATION_CATEGORY_VALUES = [...GRANT_CATEGORY_VALUES, FORBID_ANY_CATEGORY] as const
+
+const REVOCATION_CATEGORY_SET: ReadonlySet<string> = new Set(REVOCATION_CATEGORY_VALUES)
+
+/** Is `c` a category a revocation may name? */
+export function isRevocationCategory(c: string): boolean {
+	return REVOCATION_CATEGORY_SET.has(c)
 }
 
 // ---------------------------------------------------------------- fold / insert
@@ -815,6 +901,34 @@ function valueCovers(
 }
 
 /**
+ * Does a FORBID row's value reach this pending target?
+ *
+ * The grant rule, plus one widening a ban can afford: a store named by a forbid reaches the objects inside it
+ * (`archive` ↔ `s3://archive/reports.csv`), the same way the entity-plus-subtree pair makes a directory forbid
+ * reach the files under it. `target-grammar.ts` owns the reading; this is the door that lets ONLY forbids
+ * through it.
+ *
+ * How much this changes is measured, not assumed: the component matcher in `grant-verify.ts` already
+ * let a bare store name hit a URI that contains it as a path component, so most of the container reach existed
+ * by accident. What this adds is the rule stated where it belongs — bucket-level equality, prefix boundaries,
+ * scheme independence — and a place to widen a ban that is not a side effect of a path comparison.
+ *
+ * Grants keep today's matching and are not passed through here. Widening a ban costs at most one prompt; a
+ * grant that reaches further than the sentence that earned it costs an action the user never approved, and
+ * `namedForbidCovers` uses this for the forbid scan and the plain rule for the grant that lifts it.
+ */
+function forbidValueCovers(
+	entry: LedgerEntry,
+	target: string,
+	home?: string,
+	project?: string,
+	segment?: string,
+): boolean {
+	if (valueCovers(entry, target, home, project, segment)) return true
+	return objectStoreCovers(entry.value, target) === true
+}
+
+/**
  * Named-forbid scan for ALLOW-tier actions ("do not delete X" must bind even
  * where the risk tables say allow). Considers "target" AND "path" entities
  * (allow segments mark touched files as kind "path"). Blanket forbids
@@ -860,13 +974,16 @@ export function namedForbidCovers(
 		segments.length === 0
 			? valueCovers(row, value, home, project)
 			: segments.some((seg) => valueCovers(row, value, home, project, seg))
+	// The forbid scan widens across a container; the grant that lifts a ban does not.
+	const banReaches = (row: LedgerEntry, value: string): boolean =>
+		reaches(row, value) || objectStoreCovers(row.value, value) === true
 	const values = entities.filter((e) => e.kind === "target" || e.kind === "path").map((e) => e.value)
 	for (const v of values) {
 		let best: LedgerEntry | null = null
 		for (const f of ledger.forbids) {
 			if (f.value === "*") continue
 			if (skipReadForbids && READ_CATEGORIES.has(f.category)) continue
-			if (!reaches(f, v)) continue
+			if (!banReaches(f, v)) continue
 			if (!best || f.seq > best.seq) best = f
 		}
 		if (!best) continue
@@ -890,25 +1007,56 @@ function forbidSeqFor(
 	project?: string,
 ): number {
 	return ledger.forbids
-		.filter((f) => forbidCompatible(f.category, segment) && valueCovers(f, target, home, project, segment))
+		.filter((f) => forbidCompatible(f.category, segment) && forbidValueCovers(f, target, home, project, segment))
 		.reduce((m, f) => Math.max(m, f.seq), -1)
+}
+
+/** The defused revocation row a message left behind, if it left one.
+ *
+ *  A revocation defuses when code could not place what it named: a category outside the vocabulary, or a
+ *  target that is a phrase rather than a name (see {@link placeableTarget}). A defused row reaches nothing by
+ *  value and bans nothing — that is the point, it may not become a wildcard — so on its own it only
+ *  says "this sentence withdrew something this file could not name".
+ *
+ *  OUTSIDE one message that is enough: `newerForbid` (strictly later) keeps such a row from being read as
+ *  consent for an older grant. INSIDE one message it was not, and the gap was a false allow: extraction reads
+ *  a message's grants and its revocations in ONE call, so both rows carry the same `seq` and a strictly-later
+ *  test cannot see the withdrawal at all. One message that grants a folder and withdraws it again in words that
+ *  describe it rather than name it is exactly that shape, and the grant won. Sameness of `seq`
+ *  is what makes this the same sentence's business, so the fallback is bounded to one message and can never
+ *  become a session-wide ban.
+ *
+ *  Deliberately NOT `forbidden: true` at the call site: the row names no capability, so the honest answer is
+ *  "no auto-allow from this", which is what a deferral is — the gate's own model call, which
+ *  reads the whole conversation, decides.
+ */
+function sameMessageDefusal(ledger: Ledger, seq: number): LedgerEntry | undefined {
+	for (const f of ledger.forbids) if (f.seq === seq && f.category === UNKNOWN_FORBID_CATEGORY) return f
+	return undefined
+}
+
+/** The newest forbid row in the ledger that postdates `seq`, whatever its category or value.
+ *
+ *  Strictly `>` matters: a row imported from a grants file carries `seq: 0` as background authority
+ *  (see `LedgerEntry.origin`), so an imported file can never defer a live session's own grant — a
+ *  stale file must not be able to switch the ledger off. Only a sentence from THIS transcript, whose
+ *  seq is the message's ordinal, outranks a grant. */
+function newerForbid(ledger: Ledger, seq: number): LedgerEntry | undefined {
+	let newest: LedgerEntry | undefined
+	for (const f of ledger.forbids) if (f.seq > seq && (!newest || f.seq > newest.seq)) newest = f
+	return newest
 }
 
 /** Does the row fail the verb gate this lookup arms?
  *
- *  Two gates, both about the USER's own words rather than the model's:
- *  - METHOD_VERB_REQUIRED belongs to the SEGMENT, because naming the entity is not approving the
- *    method, and "install" is the verb for the install segment only.
- *  - the delete gate belongs to the WHOLE pending (`compoundHas`, unchanged from before compound
- *    matching): if any effect destroys, every row behind this decision has to be a sentence about
- *    destroying. Answering the write half with a sentence that never mentioned destruction and the
- *    delete half with one that did would be a different decision than the one the user made, and
- *    stricter is the direction a verb gate exists to face.
- */
-function verbGateMissing(segment: string, pendingCategory: string, g: LedgerEntry): boolean {
-	const needVerb = METHOD_VERB_REQUIRED.has(segment) ? BARE_VERB_CATEGORIES[segment] : undefined
+ *  One gate, and it belongs to the SEGMENT: naming the entity is not approving the method, and "install"
+ *  is the verb for the install segment only. The delete gate that used to sit beside it (`compoundHas`
+ *  over the whole pending, answered by a destructive word in the quote) is gone — a delete is covered by a
+ *  delete-category row and by nothing else, so the question "was this sentence about destroying?" is
+ *  answered by the model's category rather than by a word list. See `grantAuthorises`. */
+function verbGateMissing(segment: string, g: LedgerEntry): boolean {
+	const needVerb = METHOD_VERB_REQUIRED.has(segment) ? DOING_VERB_EVIDENCE[segment] : undefined
 	if (needVerb && !needVerb.test(g.quote)) return true
-	if (compoundHas(pendingCategory, DELETE_CATEGORIES) && !DELETE_VERB_RE.test(g.quote)) return true
 	return false
 }
 
@@ -934,13 +1082,15 @@ export type LedgerVerdict = {
  *
  * Per segment also means per-segment matching: each segment needs its own row, its own
  * METHOD_VERB_REQUIRED verb, and its own grammar — `valueCovers` is handed the segment so one
- * compound row is read with the same grammar on both of its halves. The delete-verb gate stays
- * category-wide (`compoundHas`, as before): if any effect destroys, every row behind the decision
- * has to be a sentence about destroying.
+ * compound row is read with the same grammar on both of its halves. The delete-verb gate is gone,
+ * so the only verb gate left is the one METHOD_VERB_REQUIRED arms for the segment it names: a pending that
+ * destroys is answered by a delete-category row, not by a sentence that happens to contain a destructive
+ * word, and which segment the gate happens to list first decides nothing either way.
  *
- * Verb gates and seq precedence are unchanged: METHOD_VERB_REQUIRED categories and (via
- * kind-group widening) deletes require the grant quote to carry the action verb, and a matching
- * forbid with a higher seq outrules the grant.
+ * Seq precedence is unchanged: a matching forbid with a higher seq outrules the grant.
+ *
+ * On top of that, ANY forbid newer than the grant defers the decision — see {@link newerForbid}
+ * for why the check is category-agnostic, and why it answers "not covered" rather than "forbidden".
  */
 export function ledgerCovers(
 	ledger: Ledger,
@@ -950,11 +1100,23 @@ export function ledgerCovers(
 	project?: string,
 ): LedgerVerdict {
 	const segments = categorySegments(category)
-	const targets = entities.filter((e) => e.kind === "target").map((e) => e.value)
+	const named = entities.filter((e) => e.kind === "target").map((e) => e.value)
+	// A targetless action's object IS its category (`su`, an interactive shell, a bare `systemctl`). It used to
+	// bail here, so no row could ever answer it — not even the `{category, "*"}` row the prompt stored for
+	// exactly that shape. The marker is what such a row matches, and nothing else: a row that names a value
+	// cannot reach it (`valueCovers` → `entityMatchesTarget`), and a named pending never sees it.
+	//
+	// Only a pending with NO entities at all is targetless; one carrying a touched path or a scope has an object
+	// the other layers already match on, and the marker must not stand in for it.
+	const targets = named.length > 0 ? named : entities.length === 0 ? [NO_OBJECT_TARGET] : []
 	const no: LedgerVerdict = { covered: false, forbidden: false, by: [], reason: "no matching ledger entry" }
 	if (targets.length === 0 || segments.length === 0) return no
 
 	const by: LedgerVerdict["by"] = []
+	/** The newest revoke-style sentence that postdates a grant we would otherwise accept. Recorded
+	 *  rather than returned on the spot: a later TARGET may hold a compatible forbid, and `forbidden`
+	 *  is the stronger answer — answering early here would hide the row the user actually named. */
+	let deferred: { seq: number; quote: string } | undefined
 	for (const segment of segments) {
 		// Each gate belongs to the segment that arms it, so segment ORDER can no longer decide
 		// whether a check runs at all — the bug `compoundHas` was introduced to fix, now applied
@@ -962,21 +1124,51 @@ export function ledgerCovers(
 		for (const t of targets) {
 			const forbidSeq = forbidSeqFor(ledger, segment, t, home, project)
 			const grant = ledger.grants.find((g) =>
-				grantMatchesPending(g, segment, category, t, home, project) &&
+				grantMatchesPending(g, segment, t, home, project) &&
 				valueCovers(g, t, home, project, segment) &&
 				g.seq > forbidSeq &&
-				!verbGateMissing(segment, category, g),
+				!verbGateMissing(segment, g),
 			)
 			if (!grant) {
 				if (forbidSeq >= 0) {
 					const f = ledger.forbids.find(
-						(x) => x.seq === forbidSeq && forbidCompatible(x.category, segment) && valueCovers(x, t, home, project, segment),
+						(x) => x.seq === forbidSeq && forbidCompatible(x.category, segment) && forbidValueCovers(x, t, home, project, segment),
 					)
 					return { covered: false, forbidden: true, by: [], reason: `user forbade "${t}" ("${(f?.quote ?? "").slice(0, 80)}")` }
 				}
 				return no
 			}
+			// A revocation the user said AFTER this grant was earned defers the whole decision, even
+			// when nothing in the ledger says the two rows are about the same thing.
+			//
+			// A revocation's category is the model's word now, which makes
+			// `forbidCompatible` mean something it did not mean when this line was written — but it is
+			// still not a proof that the sentence left this grant alone. Two cases survive the field:
+			// a row this file could not place carries the defused label, which matches nothing by design,
+			// and a withdrawal can name a different FAMILY than the grant it withdraws ("stop deleting
+			// things" over a `container_mutation` grant). A recorded row that said `container_mutation`
+			// binds directly; a row that says `other` does not, and deferring
+			// is what keeps it from being read as consent.
+			//
+			// Deliberately NOT `forbidden: true`: that branch skips the transcript model call and prompts
+			// on the row alone, which would turn every stale forbid into a refusal of every later grant —
+			// the over-block this ledger exists to avoid. Deferring means "no auto-allow from this row",
+			// and the gate's own model call, which reads the whole conversation, decides.
+			// A defused revocation from the SAME message counts here too: same `seq`, so the strictly-later test
+			// above cannot see it, and the sentence that withdrew the thing was in the same breath as the grant.
+			const later = newerForbid(ledger, grant.seq) ?? sameMessageDefusal(ledger, grant.seq)
+			if (later && (!deferred || later.seq > deferred.seq)) deferred = { seq: later.seq, quote: later.quote ?? "" }
 			by.push({ entity: t, entry: grant })
+		}
+	}
+	// Deferred, so nothing is stamped and nothing is promoted to a session grant: a row the gate did not
+	// accept must not look freshly matched (`lastMatchedAt` feeds persistence and the recent-window fallback).
+	if (deferred) {
+		return {
+			covered: false,
+			forbidden: false,
+			by: [],
+			reason: `deferred: newer revocation seq ${deferred.seq} ("${deferred.quote.slice(0, 80)}")`,
 		}
 	}
 	const now = Date.now()
@@ -1003,7 +1195,9 @@ export function ledgerCovers(
  * Reasons, in the order the gate reaches them: `group` (the row's category does not authorise any
  * segment of this pending), `value` (it authorises a segment but does not reach this target), `verb`
  * (it reaches, but the user's own words never named the method the segment requires), `forbid seq n`
- * (a ban outranks it), and per segment `segment X uncovered` for the effects no row reached at all.
+ * (a ban outranks it), `deferred: newer revocation seq n` (a sentence said after this row, which this
+ * file cannot place, took the decision away from it), and per segment `segment X uncovered` for the
+ * effects no row reached at all.
  */
 export function explainLedgerCover(
 	ledger: Ledger,
@@ -1020,24 +1214,24 @@ export function explainLedgerCover(
 	const label = (g: LedgerEntry): string => `row ${g.category} "${g.value}" seq ${g.seq}`
 	const candidates = ledger.grants.filter(
 		(g) =>
-			segments.some((seg) => grantAuthorises(g, seg, category)) ||
+			segments.some((seg) => grantAuthorises(g, seg)) ||
 			targets.some((t) => segments.some((seg) => valueCovers(g, t, home, project, seg))),
 	)
 
 	const covered = new Map<string, Set<string>>(segments.map((seg) => [seg, new Set<string>()]))
 	for (const target of targets) {
 		for (const g of candidates) {
-			const fitting = segments.filter((seg) => grantAuthorises(g, seg, category))
+			const fitting = segments.filter((seg) => grantAuthorises(g, seg))
 			if (fitting.length === 0) {
 				lines.add(`${label(g)}: rejected: group`)
 				continue
 			}
-			const reaching = fitting.filter((seg) => valueCovers(g, target, home, project, seg))
+			const reaching = fitting.filter((seg) => grantMatchesPending(g, seg, target, home, project))
 			if (reaching.length === 0) {
 				lines.add(`${label(g)}: rejected: value`)
 				continue
 			}
-			const spoken = reaching.filter((seg) => !verbGateMissing(seg, category, g))
+			const spoken = reaching.filter((seg) => !verbGateMissing(seg, g))
 			if (spoken.length === 0) {
 				lines.add(`${label(g)}: rejected: verb`)
 				continue
@@ -1046,6 +1240,13 @@ export function explainLedgerCover(
 			const allowed = spoken.filter((_, i) => g.seq > blockers[i]!)
 			if (allowed.length === 0) {
 				lines.add(`${label(g)}: rejected: forbid seq ${Math.max(...blockers)}`)
+				continue
+			}
+			// The same deferral `ledgerCovers` returns, worded the same way, so an explanation can never
+			// promise a coverage the gate would refuse (the invariant of this whole function).
+			const later = newerForbid(ledger, g.seq)
+			if (later) {
+				lines.add(`${label(g)}: deferred: newer revocation seq ${later.seq} ("${later.quote.slice(0, 80)}")`)
 				continue
 			}
 			lines.add(`${label(g)}: covers ${target}`)
@@ -1064,16 +1265,41 @@ export function explainLedgerCover(
 
 export type MessageGrantExtraction = {
 	grants: Array<{
+		/** Display label. Nothing here reads it (the extraction prompt says the same). */
 		action?: string
-		/** Enum value from GRANT_CATEGORY_VALUES; authoritative when present. */
+		/** Enum value from GRANT_CATEGORY_VALUES — the only category a grant row can get. */
 		category?: string
 		/** entity = this target only; scope = everything under this location. */
 		kind?: string
+		/** How far the permission reaches: `named` | `category` | `everything`. */
+		scope?: string
+		/** A class the permission names instead of a path — `temp_files` or `none`. A grant can never
+		 *  name `rule_files`: that class exists on the revocation side only, so the plugin's own allow-list
+		 *  is unreachable from a permission the model was asked to read. */
+		targetClass?: string
 		includesSecrets?: boolean
 		targets: string[]
 		quote: string
 	}>
-	revocations: Array<{ action?: string; targets: string[]; all: boolean; quote: string }>
+	revocations: Array<{
+		/** Display label, never read. */
+		action?: string
+		/** Enum value(s) from REVOCATION_CATEGORY_VALUES: which kinds of work were withdrawn. A list;
+		 *  the single string the field used to be is still accepted, because recordings and older endpoints send
+		 *  it, and it means the one-element list. */
+		category?: string | string[]
+		/** How far the withdrawal reaches: `named` | `category` | `everything`. */
+		scope?: string
+		/** A class the withdrawal names instead of a path; `rule_files` or `none`. */
+		targetClass?: string
+		/** The names the user withdrew work on — every one of them verified against the message. */
+		targets: string[]
+		/** Width on the wire that predates `scope`. NOT READ: `scope` is the one field that answers
+		 *  how wide a row is, and two fields for one question is a disagreement code would have to
+		 *  arbitrate. Kept on the type so recordings made against the old schema still type. */
+		all?: boolean
+		quote: string
+	}>
 }
 
 function quoteInMessage(quote: string, message: string): boolean {
@@ -1086,121 +1312,107 @@ function targetKind(value: string): "entity" | "scope" {
 	return value.endsWith("/") ? "scope" : "entity"
 }
 
-/** Pronouns/deixis the model sometimes emits as "targets" ("force-push it").
- *  They are not names; dropping them routes the grant into the bare-verb path. */
-const PRONOUN_TARGETS = new Set([
-	"it", "that", "this", "them", "these", "those", "everything", "anything",
-	"all", "stuff", "things", "one",
-])
-
-/** Generic kind-words the model sometimes emits as revocation "targets"
- *  ("do not delete any images" → targets ["images"]). They are not names and
- *  can never match a concrete entity, which would silently drop the revocation
- *  — escalate to a category-wide forbid instead (fail-safe direction). */
-const GENERIC_KIND_TARGETS = new Set([
-	"image", "images", "container", "containers", "file", "files", "folder",
-	"folders", "directory", "directories", "dir", "dirs", "table", "tables",
-	"database", "databases", "db", "dbs", "branch", "branches", "package",
-	"packages", "service", "services", "pod", "pods", "namespace", "namespaces",
-	"repo", "repos", "repository", "repositories", "volume", "volumes", "data",
-	"backup", "backups", "dump", "dumps", "server", "servers", "process",
-	"processes",
-])
-
-/** Explicit read-only posture phrases — always lock the session. */
-const READ_ONLY_ASSERTION_RE =
-	/\b(?:read[- ]?only|analysis[- ]only|analyze[- ]only|just (?:look|read|inspect|browse|check)|only look|hands? off)\b/i
-
-/** Read-side activities. A blanket complaint whose subject is only these is about
- *  SCOPE/EFFORT, not about mutating anything. */
-const READISH_ACTIVITY_RE =
-	/\b(?:search(?:ing|ed)?|find(?:ing)?|grep|ripgrep|scan(?:ning|ned)?|look(?:ing|ed)?|browse(?:|ing|d)|read(?:ing)?|investigat\w+|explor\w+|hunt(?:ing|ed)?|clues?)\b/i
-
-/** Mutating or executing activity. Any of these makes a blanket revocation real,
- *  so ambiguity keeps the posture (fail-safe: at worst one extra prompt). */
-const MUTATION_OR_RUN_RE =
-	/\b(?:chang\w+|modify|modifying|modif\w*|edit\w*|writ(?:e|es|ing)|touch\w*|alter\w*|delet\w+|remov\w+|run|running|execut\w+|install\w+|apply|applying|applie[sd]|commit\w+|push\w*|create\w+|add\w*|make|makes|making|fix\w*|configur\w*)\b/i
-
-/** Does a blanket, action-unmappable revocation mean "no mutations this session"?
+/**
+ * Can code place this value at all — that is, can it ever be compared with something the gate produces?
  *
- *  It used to be: ANY such revocation locked every write for the rest of the
- *  session. That turned a scoping complaint — "you will not search half a tb of
- *  files in my home to find clues" — into a read-only lock that then refused
- *  files the user had explicitly authorised by name, and the refusal quoted the
- *  unrelated sentence back at them.
+ * The verbatim check (`targetNamedByUser`) owns the half of a target that is about the user's words: did they
+ * say it. This owns the other half, which is about the value's SHAPE: is it a name. Every matcher in this tree
+ * addresses a thing by `/`-separated components, so a value carrying a space is a phrase — "build artefacts",
+ * "the certificates directory" — and can only ever match by the accident of `entityMatchesTarget`'s
+ * noun-phrase rule (`target-grammar.ts`'s `clean()` refuses the same shape for the same reason).
  *
- *  Decided by EXCLUSION rather than an allowlist so it stays fail-safe: only a
- *  complaint about reading/searching, with no mutating or executing verb
- *  anywhere, fails to arm the posture. "stop, don't run anything risky anymore"
- *  still arms it. */
-function isReadOnlyPosture(quote: string, messageText: string): boolean {
-	const text = `${quote} ${messageText}`
-	if (READ_ONLY_ASSERTION_RE.test(text)) return true
-	if (MUTATION_OR_RUN_RE.test(text)) return true
-	return !READISH_ACTIVITY_RE.test(text)
+ * Nothing here asks what the phrase MEANS, which is the thing code must not do with a sentence: the value is not
+ * interpreted, not corrected and not refused. A row whose target is unplaceable is kept exactly as the model
+ * wrote it (it may still match by noun components); all this decides is whether the fold leaves the defused
+ * marker row beside it, which is what stops a grant from the SAME message answering the sentence that
+ * withdrew it.
+ */
+function placeableTarget(value: string): boolean {
+	return !/\s/.test(value.trim())
 }
 
-/** Clear phrases that globally re-enable changes, lifting the read-only posture. */
-const RE_ENABLE_CHANGES =
-	/(?:(?:you (?:can|may)|go ahead(?: and)?|feel free to|ok(?:ay)? to|it'?s (?:ok|okay|fine) to|resume|re-?enable|allow)\b[^.]*\b(?:make changes?|changes?|modif\w*|writ\w*|edit\w*)\b)|(?:\bchanges? (?:are (?:ok|okay|fine|allowed|permitted)|enabled|allowed)\b)|(?:\b(?:no longer|not) read[- ]?only\b)/i
+/**
+ * The three width values the extraction schema offers — the same machine tokens as `SCOPE_VALUES` in
+ * `model-client.ts`, restated here because this file does not import the wire module. `named` = only
+ * what the row's target list names; `category` = every target of the ONE category the row names;
+ * `everything` = every kind of action at once.
+ *
+ * The question "how wide is this row" has exactly one answer field and this is where it is read. No
+ * paraphrase of the sentence is consulted, in this function or anywhere else on this path.
+ */
+const EXTRACTION_SCOPES = ["named", "category", "everything"] as const
+type ExtractionScope = (typeof EXTRACTION_SCOPES)[number]
+
+/** The row's width, or `undefined` when the row did not answer. An unusable value reads as no answer,
+ *  and no answer is treated as the NARROWEST width, never the widest: a row the code cannot
+ *  place may cost one prompt, it may never arm a session lock. */
+function extractionScope(value: unknown): ExtractionScope | undefined {
+	const s = typeof value === "string" ? value.trim().toLowerCase() : ""
+	return (EXTRACTION_SCOPES as readonly string[]).includes(s) ? (s as ExtractionScope) : undefined
+}
+
+/** The model's category, kept only when the enum it was offered actually contains it and the gate can
+ *  match it. `"other"` is the model's own "nothing fits", so it names no capability either. */
+function extractionCategory(value: unknown): string | undefined {
+	const c = typeof value === "string" ? value.trim().toLowerCase() : ""
+	return c !== "" && c !== "other" && isGrantCategory(c) ? c : undefined
+}
 
 /**
- * The rule-file TARGET CLASS: "permission files", "rule files", and the filenames themselves.
+ * A revocation's category LIST, kept only as far as the enum it was offered contains it.
  *
- * This exists because a class of files is not a category of action. The word inside the class name
- * (`permission`) used to hit the privilege row of `ACTION_MAP`, which turned "I do not want to use
- * ANY permission files" into a `perm_change` category-wide forbid, and the `FORBID_FAMILIES` fold then
- * spread that over every write and recursive delete in the workspace. Read as what it is — a set of
- * paths the user refused to have used — the sentence scopes a forbid to those paths and leaves the
- * rest of the tree alone.
+ * The wire asks for a list; a row that arrives with a bare string (an endpoint ignoring the schema, a
+ * recording made against the older schema) is read as the one-element list it means, so old captures still
+ * fold. Values outside the revocation enum, and `"other"`, name no capability and are dropped — dropping may
+ * make the row unusable (the caller then defuses it), it may never make it wider.
  *
- * Detection is code-side, over the quote that `quoteInMessage` already verified word for word, so
- * the paths below are not the model inventing targets: the phrase that summons them is the user's
- * own. The `*` row of `permissions-loader`'s project layer lives under `.pi/projects/<id>/`, which
- * no session can spell without the cwd, hence the project-relative form for that half.
+ * A list LONGER than the schema allows is not a partial truth to keep: it is an answer that did not come from
+ * this schema, so the whole list is refused and the row defuses. Keeping the first six would quietly drop a
+ * category the user named, which is the one thing a forbid may not lose.
  */
-const RULE_FILE_CLASS_RE =
-	/\b(?:permissions?|rules?) files?\b|\bpermissions?\.json\b|\badaptive-acl\.json\b|\bpermission-modes\.json\b|\bpermissions\.local\.json\b|\bgrants\.json\b/i
+function extractionCategories(value: unknown): string[] {
+	const list = Array.isArray(value) ? value : typeof value === "string" ? [value] : []
+	if (list.length === 0 || list.length > MAX_REVOCATION_CATEGORIES) return []
+	const out: string[] = []
+	for (const item of list) {
+		const c = typeof item === "string" ? item.trim().toLowerCase() : ""
+		if (c === "" || c === "other" || !isRevocationCategory(c)) continue
+		if (!out.includes(c)) out.push(c)
+	}
+	return out
+}
 
-/** The paths the class names, spelled the way the gate RENDERS them — `~/…` outside the project,
+/**
+ * The category of a forbid row the code could not place.
+ *
+ * It replaces three things at once: the `"*"` category this file used to infer from a sentence's
+ * verbs, the read-only posture the same inference used to arm, and the `*action*` label it invented
+ * from a display label. `kindGroup` of it is itself, so it can never equal a pending group and can
+ * never produce a `forbidden` verdict — the sentence is kept in the ledger for audit and authorises
+ * nothing, while `newerForbid` (which reads every forbid regardless of category) still takes the
+ * auto-allow away from any older grant, which costs one model call.
+ *
+ * Never `"*"`, never a posture: a missing value may not become a wildcard.
+ */
+const UNKNOWN_FORBID_CATEGORY = "*unknown*"
+
+/**
+ * How many categories one revocation may name. The wire schema caps the list here
+ * (`MAX_REVOCATION_CATEGORIES` is sent as `maxItems` by `model-client.ts`), and the ledger refuses a longer
+ * answer rather than keeping a prefix of it — a forbid that quietly loses one of the categories the user named
+ * is a weaker ban that looks like the sentence was obeyed.
+ */
+export const MAX_REVOCATION_CATEGORIES = 6
+
+/** The one target class a revocation may name instead of a path (`targetClass` in the schema). */
+const RULE_FILE_CLASS = "rule_files"
+
+/** The paths that class names, spelled the way the gate RENDERS them — `~/…` outside the project,
  *  `./…` inside — because `canonicalPath` resolves both halves at match time against the caller's
- *  own home and project root. Hardcoding an absolute `/home/<user>` here would match nobody else. */
+ *  own home and project root. Hardcoding an absolute `/home/<user>` here would match nobody else.
+ *  The `*` row of `permissions-loader`'s project layer lives under `.pi/projects/<id>/`, which no
+ *  session can spell without the cwd, hence the project-relative form for that half. */
 const RULE_FILE_PATHS = ["~/.pi/agent/adaptive-acl.json", "./.pi/projects/"]
-
-/** Paths named by the class, or none when the sentence also said an ACL verb: a sentence that
- *  names `chmod` really is about privilege, and the verb is the stronger signal of the two. */
-function ruleFileTargets(quote: string, mapped: string | undefined): string[] {
-	if (mapped && PRIVILEGE_CATEGORIES.has(mapped)) return []
-	return RULE_FILE_CLASS_RE.test(quote) ? RULE_FILE_PATHS : []
-}
-
-/** A negated read binds the read categories in `READ_CATEGORIES` and nothing else. */
-
-/**
- * Which category a forbid that NAMES a target may carry.
- *
- * `"*"` means "every category AT THIS PATH" and it is the oldest meaning a named row has — "do not
- * touch ~/backups" really does forbid the delete, the write and the chmod. What it must never do is
- * be INFERRED from a sentence that named an action and named it as reading:
- * "you will not ever search in /home/u/dev" produced `{category:"*", value:"/home/u/dev/"}`,
- * a prefix that contains the project, so a sentence about reading outside the repo blocked writing
- * a file inside it and quoted the user's own words back as the reason.
- *
- * Anything with a mutating verb anywhere in it stays wide, which is the fail-closed side: "stop
- * reading and writing /x" keeps `"*"`. Read verbs alone bind to the read categories.
- *
- * Search verbs are deliberately NOT in `ACTION_MAP`, and that is why this reads the sentence and not
- * only the mapped category: mapping `search` would also turn a blanket complaint about scanning a
- * whole home directory ("you will not search half a tb of files") into a session-wide read ban — the
- * same over-block in the other direction, already solved once by `isReadOnlyPosture`. This is the
- * narrow half of that vocabulary, and it applies only where the sentence also named a target.
- */
-function namedTargetCategory(mapped: string | undefined, evidence: string): string {
-	if (MUTATION_OR_RUN_RE.test(evidence)) return "*"
-	if (mapped && READ_CATEGORIES.has(mapped)) return mapped
-	if (mapped) return "*"
-	return READISH_ACTIVITY_RE.test(evidence) ? "read_only" : "*"
-}
 
 /**
  * The one row a sentence gets when it names a place rather than a specific file operation.
@@ -1225,62 +1437,38 @@ function singleRowShape(value: string): { value: string; kind: "entity" | "scope
 	return { value: `${bare}/`, kind: "scope" }
 }
 
-// ---------------------------------------------------------------- publish targets
+// ---------------------------------------------------------------- category audit
 
 /**
- * The first three `ACTION_MAP` rows: they match a NOUN — kubectl, docker, psql — the thing the
- * sentence acted ON. The rows below them match VERBS, and a verb is exactly what a model generalises
- * a category from when it has not read the object: measured, the answer to `docker push` came back
- * `vcs_remote`, and the code accepted it, because a schema enum short-circuited the word list that
- * held the right answer one row earlier.
+ * Count a category the row's own targets do not fit — counted only, never applied.
  *
- * Derived from the table instead of written out, so reordering `ACTION_MAP` cannot silently change
- * which rows count as nouns.
+ * The finding was an image push filed under a git category: the stored row was unreachable from
+ * any wording, and nothing anywhere said so. This file may not answer that disagreement by
+ * overriding the model — the model's category is what gets stored — but it may notice, because the
+ * only thing code knows deterministically about a target is its own grammar: `host/repo:tag` and
+ * `remote/branch` are machine syntax, not English vocabulary, and the two grammars are disjoint.
+ *
+ * So the check asks one shape question: do NONE of the targets parse under the grammar this category
+ * uses, while SOME of them parse under the other one? Yes means "this row is filed under a category
+ * whose targets look like something else" — a number worth showing in `/classifier-status`, worth
+ * nothing to the matcher.
  */
-const NOUN_MAP_CATEGORIES: ReadonlySet<string> = new Set(ACTION_MAP.slice(0, 3).map(([, cat]) => cat))
-
-/** Nouns that name a publishable artifact. Their publish sentence has TWO effects — a mutation and a
- *  send — because pushing an image is a mutation of the artifact and a send off the machine at once. */
-const PUBLISHABLE_NOUNS = new Set(["container_mutation", "cluster_mutation"])
-
-/**
- * Cross-check the model's category against the deterministic noun map.
- *
- * The noun wins the capability half: "docker push" is about a container whatever the enum said, and
- * `vcs_remote` means a GIT remote — filing an image push there is what made the grant unreachable
- * from any wording.
- *
- * The second half of the compound is the EFFECT the verb names, never the model's label, and that is
- * a safety bound rather than taste: `container_mutation+vcs_remote` carrying the category-wide `*`
- * would authorise every push to every remote off the back of a sentence about docker — the exact
- * false allow the one-way bridge above exists to prevent. So a publish verb over a publishable noun becomes
- * `+network_send`, which is the half layer 0 itself files the command under, and any other
- * disagreement keeps the noun alone with the model's answer preserved on the row as `modelCategory`
- * (audited now, never treated as authority).
- */
-function crossCheckCategory(
-	fromSchema: string | undefined,
-	action: string,
-	evidence: string,
-): { category: string; modelCategory: string } | undefined {
-	if (!fromSchema) return undefined
-	const det = mapActionToCategory(action)
-	if (!det || !NOUN_MAP_CATEGORIES.has(det)) return undefined // a verb row: nothing to override the model with
-	if (kindGroup(det) === kindGroup(fromSchema)) return undefined // they agree, so there is nothing to record
-	const effect = PUBLISHABLE_NOUNS.has(det) && PUBLISH_VERB_RE.test(evidence) ? "network_send" : undefined
-	return { category: effect ? `${det}+${effect}` : det, modelCategory: fromSchema }
+function categoryDisagreesWithTargets(category: string, targets: string[]): boolean {
+	const grammar = grammarFor(primarySegment(category))
+	if (grammar === undefined || targets.length === 0) return false
+	const parses = (value: string, want: "vcs" | "image"): boolean =>
+		want === "vcs"
+			? parseVcsTarget(value)?.branch !== undefined
+			: parseImageRef(value)?.repo !== undefined
+		const other = grammar === "vcs" ? "image" : "vcs"
+		const mine = targets.some((t) => parses(t, grammar))
+		const theirs = targets.some((t) => parses(t, other))
+		return !mine && theirs
 }
 
 /** Split the verified quote into candidate target tokens. `:` and `@` survive: `HEAD:refs/heads/x` and
  *  `myrepo/app:1.0@sha256:…` are each ONE token. */
 const TOKEN_SPLIT_RE = /[\s,;!?()\[\]{}<>"'`]+/
-
-/** `any branch`, `all the tags`, `every image` — a quantifier within three words of the kind-word. */
-const QUANTIFIER_RE = /\b(?:any|all|every)(?:\s+[\w'-]+){0,3}\s+(?:branch(?:es)?|tags?|images?)\b/i
-// Written as `branch(?:es)?`, not `branches?`: the latter reads as "branche" + optional "s" and
-// matches no plural in English. It silently matched nothing at all until a test said so — the regex
-// version of the dead row this task is about, and the reason the quantifier rules are tested with
-// the singular AND the plural kind-word.
 
 /** The tools a user names when they meant the command rather than a target. */
 const TOOL_NAME_WORDS = new Set(["docker", "podman", "nerdctl", "git", "gh", "helm", "kubectl", "pip", "npm"])
@@ -1289,12 +1477,21 @@ const TOOL_NAME_WORDS = new Set(["docker", "podman", "nerdctl", "git", "gh", "he
  *  is the dead-row bug in a new costume (`vcs_remote push` covers nothing and hides the fact that the
  *  sentence named no ref), so they are evidence for the rules below and never a value. */
 const NOT_A_TARGET_NAME = new Set([
-	...GENERIC_KIND_TARGETS,
 	...TOOL_NAME_WORDS,
-	// The vocabulary of this specific permission, which `GENERIC_KIND_TARGETS` predates: `tag` is not
-	// in that list (no one was granting tags yet), and a bare kind-word parses as a repo named "tag".
-	"tag", "tags", "ref", "refs", "branch", "branches", "remote", "repository", "registry",
-	"push", "publish", "upload", "release", "pull", "pr", "request", "head", "workflow", "job", "runner",
+	// Kind-words: they PARSE as a one-component ref and name nothing. Spelled out here (they used to
+	// live in a separate set that also served the revocation path, where its word list is
+	// gone) because this list is only ever consulted at the door of a grammar value, never as evidence
+	// about a sentence.
+	"image", "images", "container", "containers", "file", "files", "folder", "folders",
+	"directory", "directories", "dir", "dirs", "table", "tables", "database", "databases",
+	"db", "dbs", "package", "packages", "service", "services", "pod", "pods",
+	"namespace", "namespaces", "volume", "volumes", "data", "backup", "backups", "dump",
+	"dumps", "server", "servers", "process", "processes",
+	// The vocabulary of this specific permission: `tag` was in neither older list (no one was granting
+	// tags yet), and a bare kind-word parses as a repo named "tag".
+	"tag", "tags", "ref", "refs", "branch", "branches", "remote", "repository", "repositories",
+	"repo", "repos", "registry", "push", "publish", "upload", "release", "pull", "pr", "request",
+	"head", "workflow", "job", "runner",
 ])
 
 /**
@@ -1319,10 +1516,6 @@ function quoteTokens(text: string): string[] {
 		.split(TOKEN_SPLIT_RE)
 		.map((t) => t.replace(/^["'`]+/, "").replace(/[.,;:!?"'`]+$/g, ""))
 		.filter(Boolean)
-}
-
-function allToolNames(targets: string[]): boolean {
-	return targets.length > 0 && targets.every((t) => TOOL_NAME_WORDS.has(t.trim().toLowerCase()))
 }
 
 function imageSpelling(ref: ImageRef): string {
@@ -1353,22 +1546,26 @@ function targetFromToken(grammar: "vcs" | "image", token: string, tokens: string
  * Turn the targets of one extraction into values the matcher can actually use, or into NO row.
  *
  * Tried in order, first answer wins:
- *  (i)   a ref-shaped token in the verified quote → the parsed value, in the gate's own spelling;
- *  (ii)  a quantifier ("any branch") together with a remote or registry named in the quote →
- *        `origin/*` / `ghcr.io`, which is the value the prompt's broader-scope button writes;
- *  (iii) a quantifier with no place attached, or targets that are only tool names, plus the publish
- *        verb in the quote → the category-wide `*`: literally what "you may run docker push" says;
- *  (iv)  nothing else. Prose ("the new branch", "any branch" as a bare object) is NEVER stored,
- *        because a row that can never match anything is worse than no row — it shows up in `/grants`
- *        as authority the gate does not have. The verified quote still reaches the grant-model
- *        call unchanged, so the sentence is not lost, only not laundered into a matcher value.
+ *  (i)  a ref-shaped token in the verified quote → the parsed value, in the gate's own spelling;
+ *  (ii) `scope: "category"` — the model's own "every object of that kind" — → the grammar's wildcard:
+ *       `origin/*` for refs, the registry host for images, `*` when the row scoped no place at all
+ *       (and NOTHING when it scoped a place this file cannot verify — `*` would be wider than the row);
+ *  (iii) nothing else. Prose ("the new branch", "any branch" as a bare object under a `named` row) is
+ *       NEVER stored, because a row that can never match anything is worse than no row — it shows up
+ *       in `/grants` as authority the gate does not have. The verified quote still reaches the
+ *       grant-model call unchanged, so the sentence is not lost, only not laundered into a value.
  *
- * Every value must also pass `namedByUserStructurally` against the message, which replaces
- * `targetNamedByUser` on this path: the anti-hallucination bound is unchanged (the user's own words
- * must name every component the row names), but it is now structural, so `origin/*` can be stored
- * from "any branch on origin" — under the whole-token rule that value could never be stored at all.
+ * Every value must also pass `namedByUserStructurally` against the message: the anti-hallucination
+ * bound is that the user's own words name every component the row names (`origin/*` is storable from
+ * "any branch on origin", which the older whole-token rule could never have stored).
  */
-function normaliseTargets(category: string, targets: string[], quote: string, messageText: string): string[] {
+function normaliseTargets(
+	category: string,
+	targets: string[],
+	quote: string,
+	messageText: string,
+	scope: ExtractionScope | undefined,
+): string[] {
 	const segment = primarySegment(category)
 	const grammar = grammarFor(segment)
 	if (grammar === undefined) return []
@@ -1389,25 +1586,46 @@ function normaliseTargets(category: string, targets: string[], quote: string, me
 	}
 	if (specific.length > 0) return specific
 
-	const quantified = QUANTIFIER_RE.test(quote)
+	// Width comes from the field. Two English rules used to stand in for it: a quantifier three words
+	// from a kind-word, and a publish verb that made the difference between a noun phrase and a
+	// permission. Both are gone — `scope` answers the question, and a row that did not answer it gets no
+	// wildcard.
+	if (scope !== "category") return []
+	// The wildcard's spelling belongs to the grammar: `origin/*` for refs; a bare registry host for
+	// images, because the image grammar has no `registry/*` form and reads a registry-only row as
+	// "everything in it"; and the bare `*` when the sentence named no place at all.
 	const place = tokens.find(remoteOrHostLike)
-	if (quantified && place !== undefined) {
+	if (place !== undefined) {
 		const value = grammar === "vcs" ? `${place}/*` : place
-		if (named(value)) return [value]
+		// A place the user's own words never named is DROPPED, not widened to `*`.
+		return named(value) ? [value] : []
 	}
-	// `*` is the widest value a row can hold, so it needs the verb: "any branch" without a push is a
-	// noun phrase, not a permission, and tool names alone are only authority when the publish verb is
-	// the thing the user was talking about.
-	if (PUBLISH_VERB_RE.test(quote) && (quantified || allToolNames(targets))) return ["*"]
-	return []
+	// `*` means "every object of this kind, anywhere", so it is only honest when the ROW scoped nothing.
+	// If the model's own target list names a place this file cannot verify against the message, `*` would
+	// be wider than the row it was handed — a filter making a row broader than the model asked for, which
+	// is exactly what a value filter may never do — so such a row registers nothing and costs one prompt instead.
+	if (targets.some((t) => remoteOrHostLike(t.trim()))) return []
+	return ["*"]
 }
 
 /**
- * Convert one message's extraction into ledger events, dropping anything the
- * code cannot verify against the message text (fail-safe: a dropped event
- * costs at most one prompt later). The extraction context is the single
- * message, so requiring targets to appear in it verbatim is sound here —
- * unlike task A, there is no pending action for the model to echo from.
+ * Convert one message's extraction into ledger events.
+ *
+ * Every decision here comes from a structured field the model returned, plus the one bound code is
+ * allowed to enforce on prose: a quote must appear verbatim in the message (`quoteInMessage`) and a
+ * target must appear verbatim in it too (`targetNamedByUser`). No sentence is asked what it meant —
+ * not the category, not the width, not whether a sentence re-enables changes, not whether a target is
+ * a pronoun. What is left is precedence and the fail-safe choice, which is all code owns.
+ *
+ * What garbage costs, per path:
+ *  - a grant with a missing or unusable category produces NO row → one prompt, never an allow;
+ *  - a grant that names no object and did not answer `scope: "category"` produces NO row (counted): a
+ *    missing value never becomes a wildcard, so "force-push it" buys nothing at all;
+ *  - a revocation with a missing or unusable width produces one defused `*unknown*` row → the sentence
+ *    is kept and takes the auto-allow away from every older grant, which sends the pending action to
+ *    the gate's own model call. It never arms the session posture and never becomes a `"*"` category;
+ *  - a target the user's words do not contain is dropped. Dropping may make a row unusable and may
+ *    never widen it.
  */
 export function eventsFromExtraction(
 	x: MessageGrantExtraction,
@@ -1420,100 +1638,147 @@ export function eventsFromExtraction(
 	for (const g of x.grants ?? []) {
 		const quote = String(g.quote ?? "")
 		if (!quoteInMessage(quote, messageText)) continue
-		// Schema-first: the category comes from an enum the model had to satisfy, so no
-		// English vocabulary sits on this path. The word list is reached only when that value
-		// is missing or "other", i.e. the endpoint ignored the schema.
-		const modelAnswer = String(g.category ?? "").trim().toLowerCase()
-		const fromSchema = isGrantCategory(modelAnswer) && modelAnswer !== "other" ? modelAnswer : undefined
-		const action = String(g.action ?? "")
-		const mapped = fromSchema ?? mapActionToCategory(action)
-		if (fromSchema) {
-			extractionStats.fromSchema++
-			extractionStats.mapped++
-		} else if (mapped) {
-			extractionStats.legacyWordList++
-			extractionStats.mapped++
-		} else {
+		const scope = extractionScope(g.scope)
+		// `everything` on a grant is the user taking a stop back and nothing more — the schema prompt is
+		// explicit that such a row authorises nothing further — so it lifts the posture and produces no
+		// grant. The phrase list that used to decide that by reading the quote is gone: a row that did not
+		// answer the width question lifts nothing, and one that answered `everything` needs no verb beside it.
+		if (scope === "everything") {
+			out.push({ type: "readonly-off", category: "*", value: "*", kind: "scope", quote, messageId, seq })
+			continue
+		}
+		const category = extractionCategory(g.category)
+		if (category === undefined) {
+			// No category the gate can match: the endpoint ignored the enum, or answered "other". The word
+			// list that used to guess one from the display label is gone, so this row registers nothing
+			// and the work behind it costs its normal prompt. Counted, because a grant that silently did
+			// not register is otherwise indistinguishable from a sentence the user never said.
 			extractionStats.unmapped++
 			extractionStats.lastUnmapped = String(g.action ?? "").slice(0, 80)
+			continue
 		}
-		// The enum answer is not taken on faith when the sentence names a NOUN the deterministic
-		// map reads differently. `cross` is the audit record of that override.
-		const cross = crossCheckCategory(fromSchema, action, `${action} ${quote}`)
-		if (cross) extractionStats.crossChecked++
-		const audit = cross ? { modelCategory: cross.modelCategory } : {}
-		const category = cross?.category ?? mapped ?? `*${String(g.action ?? "").slice(0, 60)}*`
-		// Structural fields, not phrases: the model says whether this is a location and
-		// whether the user's words included credentials. Absent means the narrow answer.
+		extractionStats.fromSchema++
+		extractionStats.mapped++
+		// A category the row's own targets do not look like is counted here and nowhere else.
+		if (categoryDisagreesWithTargets(category, g.targets ?? [])) extractionStats.crossChecked++
+		// Structural fields, not phrases: the model says whether this is a location and whether the
+		// user's words included credentials. Absent means the narrow answer.
 		const wantsScope = String(g.kind ?? "") === "scope"
 		const includesSecrets = g.includesSecrets === true
 		if (wantsScope) extractionStats.scopes++
 		if (includesSecrets) extractionStats.secretInclusions++
-		const targets = (g.targets ?? [])
-			.map(String)
-			.filter((t) => t.trim().length >= 2 && !PRONOUN_TARGETS.has(t.trim().toLowerCase()))
-		if (targets.length === 0) {
-			// bare-verb grant ("force-push it"): only for bare-verb categories,
-			// and the quote itself must carry the verb.
-			if (!mapped) continue
-			const verbRe = BARE_VERB_CATEGORIES[mapped]
-			if (!verbRe || !verbRe.test(quote)) continue
-			out.push({ type: "grant", category, value: "*", kind: "scope", quote, messageId, seq, ...audit })
-			continue
-		}
-		// Publish targets are TYPED. Under a grammar category the model's target strings are never
-		// stored verbatim: they are normalised into the spelling the matcher reads, or the sentence
-		// produces no row at all. `kind: "scope"` means nothing here either — the scope of a
-		// git ref is `remote/*`, which rule (ii) derives from the user's own quantifier rather than from
-		// a flag the endpoint may or may not set.
-		if (grammarFor(primarySegment(category)) !== undefined) {
-			for (const value of normaliseTargets(category, targets, quote, messageText)) {
-				out.push({ type: "grant", category, value, kind: "entity", quote, messageId, seq, ...audit })
-			}
-			continue
-		}
-		// A LOCATION permission grants the directory, not one file. "you can work in
-		// /home/me/proj", "edits under ~/tmp/x/" — the preposition is what makes the
-		// path a scope rather than a target. Without this, approving a folder is
-		// recorded file-by-file and every new file in it prompts again.
+		const targets = (g.targets ?? []).map(String).filter((t) => t.trim().length >= 2)
+		// The TEMP-FILES class. The user's sentence contains no path — the object of "you may write
+		// temporary files" is a CLASS — so there is nothing for the verbatim target check to find and the
+		// check must not be what decides the row. Code owns the class → directories mapping
+		// (`tempGrantDirs`), the model owns the decision that this sentence was about that class, and the
+		// quote check above still applies to every row: a quote that is not in the message registers nothing.
 		//
-		// Bounded three ways: (a) only for path-MUTATING categories, so "read
-		// anything in /etc" stays a read permission; (b) the path must appear
-		// verbatim in the verified quote; (c) scopes are session-scoped like any
-		// other grant, and /grants revoke removes one — which is why there is no
-		// path-depth ceiling: revocability is the control, not a prefix ban.
-		// Emitted from the QUOTE, not from the file targets: a directory permission
-		// names the directory and usually no file at all, so deriving it inside the
-		// per-target loop (which is gated on the file being user-named) drops it
-		// entirely. Verified by test.
-		const loc = /\b(?:in|under|inside|below|within)\s+(~?\/[^\s,.;:!?)'"]+)/i.exec(quote)
-		const locRaw = loc?.[1]?.replace(/["'`]+$/, "")
-		// Scopes from the verified quote. Historically this fired for path-MUTATING
-		// categories only, which produced a confusing asymmetry: "you can write into /x"
-		// became one folder permission while "you can read everything in /x" became nothing
-		// usable, so every file under the folder prompted again. Reads are included now — the
-		// three bounds are unchanged (verified quote, user-named path, path-shaped category),
-		// and it stays narrow in the direction that matters: a read_only scope cannot reach
-		// read_secret, because those are different kind groups.
-		if (
-			!wantsScope &&
-			mapped &&
-			(FS_MUTATION_CATEGORIES.has(mapped) || mapped === "read_only") &&
-			locRaw &&
-			locRaw.length >= 2
-		) {
-			if (targetNamedByUser(locRaw, [messageText])) {
-				const scopeValue = locRaw.endsWith("/") ? locRaw : `${locRaw}/`
-				out.push({ type: "grant", category, value: scopeValue, kind: "scope", quote, messageId, seq, ...audit })
+		// Garbage answers, in order: a class value outside the enum became "none" in the parser and this row
+		// takes its normal target-shaped path; a class on a category that cannot live in a temp dir
+		// registers nothing and is counted, which costs the one prompt it would have cost anyway; nothing
+		// here can arm a session lock or allow an action the user did not name.
+		if (String(g.targetClass ?? "") === "temp_files") {
+			const dirs = TEMP_CLASS_CATEGORIES.has(category) ? tempGrantDirs() : []
+			if (dirs.length === 0) {
+				extractionStats.unmapped++
+				extractionStats.lastUnmapped = String(g.action ?? "").slice(0, 80)
+				continue
 			}
+			// One SCOPE row per temp root: reading under it arrives through write-implies-read, and a
+			// second effect the user named ("and run them too") arrives as its own row, because "one row PER
+			// EFFECT" is the extraction prompt's rule, not a guess this file makes.
+			for (const dir of dirs) {
+				out.push({ type: "grant", category, value: `${dir}/`, kind: "scope", quote, messageId, seq })
+			}
+			continue
+		}
+		// The MACHINE classes, same shape as the temp class above — code owns the mapping, the model owns
+		// the decision that the sentence was about that machine, and the quote check still applies.
+		// Garbage answers: a class outside the enum became `none` in the parser and the row takes its normal
+		// target-shaped path; a class on a category that is not a machine read (a delete, a push, a secret)
+		// registers NOTHING and is counted, costing the prompt it would have cost anyway; an ambiguous
+		// "my cluster" registers nothing. None of those paths can arm a lock or allow anything.
+		const machineClass = String(g.targetClass ?? "")
+		if (MACHINE_TARGET_CLASSES.has(machineClass)) {
+			// A class and a name in one row is a disagreement, and code may not arbitrate it by
+			// picking the wider reading. The NAMED target wins and the class is dropped: the target has a verbatim
+			// check behind it, and a row whose quote names `buildhost` must not quietly become a grant over THIS
+			// machine, which the user never named. Dropping the class costs a prompt; taking it would have been an
+			// allow nobody gave.
+			const namedTargets = (g.targets ?? []).map(String).filter((t) => t.trim().length >= 2)
+			if (namedTargets.length > 0) {
+				for (const t of namedTargets) {
+					if (!targetNamedByUser(t, [messageText])) continue
+					out.push({ type: "grant", category, value: t, kind: targetKind(t), quote, messageId, seq })
+				}
+				continue
+			}
+			const object = machineClass === "local_machine"
+				? LOCAL_MACHINE_OBJECT
+				: singleClusterContext()
+			if (category !== "read_system_state" || object === undefined) {
+				extractionStats.unmapped++
+				extractionStats.lastUnmapped = String(g.action ?? "").slice(0, 80)
+				continue
+			}
+			// One ENTITY row: "this machine" is one object, not a location with things under it, and the class
+			// must not read as a wildcard over the category the way a `scope` row would.
+			out.push({ type: "grant", category, value: object, kind: "entity", quote, messageId, seq })
+			continue
+		}
+		// A row that says "every object of that kind" and names no ref is answered by the grammar's own
+		// wildcard, and that is the ONLY way a wildcard grant is produced any more: the quantifier regex
+		// ("any branch" three words from a kind-word) and the publish-verb rule that used to stand in for
+		// the width field are gone. Checked before the bare-verb path so a `category` row is answered by
+		// the field rather than by whether the quote happens to contain the verb.
+		const grammar = grammarFor(primarySegment(category))
+		if (grammar !== undefined && scope === "category") {
+			for (const value of normaliseTargets(category, targets, quote, messageText, scope)) {
+				out.push({ type: "grant", category, value, kind: "entity", quote, messageId, seq })
+			}
+			continue
+		}
+		if (targets.length === 0) {
+			// A row with no object in it is a wildcard only on the model's own word for it. `scope` is the
+			// width field; "named" with nothing named is a MISSING VALUE, and a missing value must never
+			// become `*`: "force-push it" / "drop that table" name nothing, so the row registers
+			// nothing and costs the one prompt it would have cost anyway — instead of `vcs_remote *`
+			// (push any ref anywhere) or `delete_data *` from three words with a pronoun object.
+			// A `category` row is still honoured, but only for the categories whose whole meaning IS a verb
+			// (the quote must carry it), and only for the ones with no grammar — a grammar category that
+			// answered `category` was already answered by its own wildcard above, and its `*` spelling is
+			// `origin/*`/registry host, not this bare form.
+			const verbRe = scope === "category" ? DOING_VERB_EVIDENCE[category] : undefined
+			if (verbRe !== undefined && verbRe.test(quote)) {
+				out.push({ type: "grant", category, value: "*", kind: "scope", quote, messageId, seq })
+				continue
+			}
+			// Counted, not silent: "the grant did not register" and "the user never said it" have to stay
+			// distinguishable from outside, and this is the counter /classifier-status prints.
+			extractionStats.unmapped++
+			extractionStats.lastUnmapped = String(g.action ?? "").slice(0, 80)
+			continue
+		}
+		// Git/image targets are TYPED. Under a grammar category the model's target strings are never
+		// stored verbatim: they are normalised into the spelling the matcher reads, or the sentence
+		// produces no row at all. `kind: "scope"` means nothing here either — the scope of a git
+		// ref is `remote/*`, which the wildcard rule above answers from the model's `scope` field.
+		if (grammar !== undefined) {
+			for (const value of normaliseTargets(category, targets, quote, messageText, scope)) {
+				out.push({ type: "grant", category, value, kind: "entity", quote, messageId, seq })
+			}
+			continue
 		}
 		for (const t of targets) {
 			if (!targetNamedByUser(t, [messageText])) continue
 			if (wantsScope) {
-				// One folder permission, not one grant per file inside it. Note the failure
-				// direction: a FILE path marked as a scope keeps its own name and cannot reach a
-				// sibling, so a wrong kind degrades toward the narrow answer rather than the wide
-				// one. Verified in schema-first-grants.test.ts.
+				// One folder permission, not one grant per file inside it. This is the model's own
+				// `kind: "scope"` and now the only source of a folder grant: the "in|under|inside <path>"
+				// regex that read the preposition out of the sentence is gone, so a folder the model did
+				// not mark as a location registers as its own name — the narrow answer, not the wide one.
+				// Note the failure direction stays fail-safe either way: a FILE path marked as a scope
+				// keeps its own name and cannot reach a sibling.
 				const scopeValue = t.endsWith("/") ? t : `${t}/`
 				out.push({
 					type: "grant",
@@ -1523,7 +1788,6 @@ export function eventsFromExtraction(
 					quote,
 					messageId,
 					seq,
-					...audit,
 					...(includesSecrets ? { includesSecrets: true } : {}),
 				})
 				// A scope the user said includes secrets gets its own row. read_only cannot
@@ -1536,114 +1800,139 @@ export function eventsFromExtraction(
 				}
 				continue
 			}
-			out.push({ type: "grant", category, value: t, kind: targetKind(t), quote, messageId, seq, ...audit })
-			// A compound permission names more than one capability: "I give you
-			// permission to use sudo to write to that file" authorises the elevation
-			// AS WELL AS the write. Without this the same sentence leaves no privilege
-			// grant and every sudo'd follow-up re-prompts the user for what they just
-			// granted. Only the method word in the verified quote earns it.
-			if (category !== "privilege" && /\bsudo\b|\bsu -\b|\bas root\b|\belevat\w*/i.test(quote)) {
-				out.push({ type: "grant", category: "privilege", value: t, kind: targetKind(t), quote, messageId, seq })
-			}
+			// One row per effect is the extraction prompt's job ("one row PER EFFECT"), so the compound a
+			// sentence describes arrives as sibling rows — including the elevated-rights half. The sudo
+			// regex that used to synthesise a `privilege` row from a method word inside the quote is gone:
+			// reading HOW a thing was done to infer that the user authorised it is exactly the inference
+			// this file no longer makes.
+			out.push({ type: "grant", category, value: t, kind: targetKind(t), quote, messageId, seq })
 		}
 	}
 	for (const r of x.revocations ?? []) {
 		const quote = String(r.quote ?? "")
 		if (!quoteInMessage(quote, messageText)) continue
-		const action = String(r.action ?? "")
-		// a mapped action scopes an all-forbid to its kind group; unmappable → all groups
-		const mapped = mapActionToCategory(action)
-		const cat = mapped ?? "*"
+		const scope = extractionScope(r.scope)
+		// The kinds the sentence withdrew, as a LIST — a withdrawal can name several actions, or every
+		// action, on one thing. A row that arrives with a single string is read as the one-element list it
+		// means, so recordings made against the old schema fold unchanged.
+		const categories = extractionCategories(r.category)
+		// `any` is every action on the named thing, so no other value adds anything to a row that carries it:
+		// one `any` row per target replaces the list rather than sitting beside it.
+		const saysAny = categories.includes(FORBID_ANY_CATEGORY)
+		// The session posture, from the field alone: `everything` is the model's answer to "nothing may
+		// change". Three regexes used to second-guess that answer in both directions — arming a lock on a
+		// scoping complaint ("you will not search half a tb of files in my home to find clues") and
+		// declining to arm on a real one — and both directions belong to the model now. A wrong
+		// `everything` is therefore the one garbage answer that can cost more than one prompt; what it
+		// costs is prompts, and any later `everything` grant or `/grants revoke` ends it.
+		if (scope === "everything") {
+			out.push({ type: "readonly-on", category: "*", value: "*", kind: "scope", quote, messageId, seq })
+			continue
+		}
 		const targets = (r.targets ?? []).map(String).filter((t) => t.trim().length >= 2)
-		const named = targets.filter((t) => {
-			const low = t.trim().toLowerCase()
-			return !PRONOUN_TARGETS.has(low) && !GENERIC_KIND_TARGETS.has(low)
-		})
-		// A target CLASS the user's own verified words name counts as a named target, so a sentence
-		// about rule files scopes to those paths instead of falling through to a category-wide row.
-		// `all: true` still outranks the MODEL's target list — refusing to widen a deny on a guess is
-		// the fail-safe side of the fold, and that is what it always was — but it does not outrank a
-		// class read out of the sentence itself: "ANY permission files" is all-ness over that CLASS,
-		// not all-ness over every category the gate knows.
-		const classTargets = named.length === 0 ? ruleFileTargets(quote, mapped) : []
-		// The old blanket test, kept exactly — `all: true` OR nothing named — with ONE exception: a
-		// class the sentence itself named supplies targets, and then the sentence is not targetless.
-		// Written this way so every other combination lands where it landed before this change, including
-		// `all: false` with only generic kind-words (`do not delete any images`), which is blanket.
-		const isBlanket = classTargets.length === 0 && (r.all === true || named.length === 0)
-		if (isBlanket) {
-			if (cat === "*") {
-				// Global "don't change anything / read-only" → session posture (not a
-				// wildcard forbid row, which would match hallucinated targets and report
-				// a fabricated "user forbade X") — but only when the sentence really
-				// asserts a no-mutation posture. See READ_ONLY_POSTURE_RE.
-				if (isReadOnlyPosture(quote, messageText)) {
-					out.push({ type: "readonly-on", category: "*", value: "*", kind: "scope", quote, messageId, seq })
-				} else {
-					// Unmappable action, no posture assertion: keep the sentence, defuse
-					// the lock. `*action*` can never equal a gate category group.
-					const label = String(r.action ?? "unspecified").slice(0, 60)
-					out.push({ type: "forbid", category: `*${label}*`, value: "*", kind: "scope", quote, messageId, seq })
-				}
-			} else {
-				// mapped category with no specific target: forbid that whole category. Still exactly
-				// one category — `value: "*"` means every TARGET of what the user named, never every
-				// category — and this is the only path that may produce it. "no writes anywhere, ever"
-				// and "chmod is not allowed on any file" are posture statements and keep their width;
-				// a sentence that named a thing never reaches this line, because it has a target by now.
-				out.push({ type: "forbid", category: cat, value: "*", kind: "scope", quote, messageId, seq })
+		// The only judgement code makes about a target: whether the user's own words contain it. Pronouns
+		// and kind-words are no longer recognised and dropped here — they ARE in the message, so they
+		// pass, and a value that no real path or ref can equal costs one prompt later.
+		const named = targets.filter((t) => targetNamedByUser(t, [messageText]))
+		// A withdrawal whose target is a PHRASE is verbatim-correct and unplaceable: no entity the gate produces
+		// will equal it, so its forbid rows reach nothing on their own. The sentence is kept as the model wrote it
+		// and the defused marker is left beside it, because a grant extracted from the SAME message would
+		// otherwise answer the very action the user had just withdrawn — the false allow where the grant
+		// and the withdrawal came out of one message and the grant was allowed to speak for both. The marker can
+		// match no category and no value, so it bans nothing, licenses nothing, and cannot outlive its message.
+		for (const t of named) {
+			if (placeableTarget(t)) continue
+			out.push({ type: "forbid", category: UNKNOWN_FORBID_CATEGORY, value: t, kind: targetKind(t), quote, messageId, seq })
+		}
+		// A target CLASS is neither a name nor model invention: the sentence was verified verbatim above
+		// and the paths are this code's own knowledge of where its rule files live, so they are not put
+		// through a naming check they could never pass. It resolves BEFORE the category is checked because
+		// the class is narrower than the wildcard: recorded, a smaller model answers
+		// `{category: "other", scope: "category", targetClass: "rule_files"}` to "I do not want to use ANY
+		// permission files", and an unusable category must not throw away the paths the sentence did name
+		// in favour of `value: "*"`.
+		const targetClass = String(r.targetClass ?? "").trim().toLowerCase()
+		const values = named.length > 0 ? named : targetClass === RULE_FILE_CLASS ? RULE_FILE_PATHS : []
+		// Every action withdrawn and no object named is the whole-session stop — `any` with
+		// no targets, and the direction that blocks more, never less: a targetless forbid row is ignored by the
+		// named-forbid scan, the posture refuses every ask/unknown mutation from the next action onward.
+		//
+		// Only when the MODEL named nothing. Targets the model named but the verbatim check could not find in
+		// the message mean a row this file cannot place, and an unusable row costs one model call — it may not
+		// arm a session lock, so that case falls through to the defused row below.
+		if (saysAny && values.length === 0 && targets.length === 0) {
+			out.push({ type: "readonly-on", category: "*", value: "*", kind: "scope", quote, messageId, seq })
+			// A posture is a DEFAULT, not a veto: `readOnlyLiftedByGrant` lets a grant made after it authorise a
+			// target, and the gate consults grants before the posture at all. So a stop the model described as
+			// every-action-on-everything-of-one-kind has to leave a BAN behind too, or it ranks below a grant the
+			// user gave before they spoke. Measured on one model: the same sentence filed as
+			// `forbid container_mutation *` prompted, and filed as `readonly-on *` came back allow-granted — the
+			// wider word, the weaker effect. The invariant for `any` with nothing named is "blocks more,
+			// never less", and only this row makes it true. The width is the model's own `category` scope: at
+			// `named` with nothing named the posture is already wider than anything code may write.
+			if (scope === "category") {
+				out.push({ type: "forbid", category: FORBID_ANY_CATEGORY, value: "*", kind: "scope", quote, messageId, seq })
 			}
 			continue
 		}
-		// Two sources of values, verified in two different ways. A target the MODEL offered must
-		// appear in the user's own words or it is dropped (`targetNamedByUser`). A class path is not
-		// model invention either — the phrase that summons it was verified verbatim above — so it is
-		// not put through a check it could never pass: the class name is in the sentence, the paths are
-		// the code's own knowledge of where its rule files live.
-		const values = named.length > 0 ? named.filter((t) => targetNamedByUser(t, [messageText])) : classTargets
-		const namedCategory = named.length > 0
-			? namedTargetCategory(mapped, `${action} ${quote}`)
-			: mapped && READ_CATEGORIES.has(mapped) ? mapped : "*"
-		for (const t of values) {
-			if (named.length === 0 || READ_CATEGORIES.has(namedCategory)) {
-				// One row for one sentence: the read categories (task B — a negated read must not be able
-				// to outrank a write, and must not arrive twice) and the class paths (the code's own list,
-				// shaped once here rather than doubled below).
-				const row = singleRowShape(t)
-				out.push({ type: "forbid", category: namedCategory, value: row.value, kind: row.kind, quote, messageId, seq })
-				continue
+		// The categories the rows carry: the model's list, `any` alone when the list said so, or the defused
+		// label that can never equal a pending group. A defused row never answers `forbidden` —
+		// `forbidCompatible` cannot match it — while `newerForbid` reads every forbid whatever its
+		// category and still takes the auto-allow away from any older grant, so an unusable category costs one
+		// model call and never an allow.
+		const rowCategories = saysAny ? [FORBID_ANY_CATEGORY] : categories.length > 0 ? categories : [UNKNOWN_FORBID_CATEGORY]
+		if (values.length === 0) {
+			// Nothing to put a row on. `category` width plus a category the gate can match is the model's
+			// own "every target of this one kind", and it is the only path that may produce the
+			// category-wide value; `everything` was answered above, and a width the code cannot read
+			// keeps the sentence defused rather than blanket. A list fans out to one category-wide
+			// row per kind named, because a ban that answers only the first of them is a weaker ban than the
+			// sentence the user spoke.
+			const wide = scope === "category" && categories.length > 0
+			for (const wideCategory of wide ? categories : [UNKNOWN_FORBID_CATEGORY]) {
+				out.push({
+					type: "forbid",
+					category: wideCategory,
+					value: "*",
+					kind: "scope",
+					quote,
+					messageId,
+					seq,
+				})
 			}
-			// named revocations apply across all categories: "don't touch
-			// ~/backups" forbids deletes AND writes AND chmod there.
-			out.push({ type: "forbid", category: "*", value: t, kind: targetKind(t), quote, messageId, seq })
-			// AND across the subtree. A grant can be a location permission — the model marks it
-			// `kind: "scope"`, and folder reads/writes also arise from the verified-quote path —
-			// so a revocation that names the same location must reach everything the grant
-			// reaches, or "stop, don't delete anything under ~/scratch-data" would leave the
-			// earlier folder grant authorising files inside it. That is a real false allow, and
-			// it is how this row was found: eval case L-02.
-			//
-			// Widening a FORBID is fail-safe in a way widening a grant is not: the worst case is
-			// one extra prompt, never an unapproved action. A later grant naming the value still
-			// lifts it by seq, exactly as the single-file revocation did.
-			if (!t.endsWith("/")) {
-				out.push({ type: "forbid", category: "*", value: `${t}/`, kind: "scope", quote, messageId, seq })
-			}
+			continue
 		}
-	}
-	// Blanket re-enable ("ok, you can make changes now") lifts the read-only posture.
-	// Conservative phrase match, and only when no specific grant target is involved
-	// (a specific grant already overrides per-target via seq). Not classification —
-	// a clear re-enable phrase.
-	for (const g of x.grants ?? []) {
-		const quote = String(g.quote ?? "")
-		if (!quoteInMessage(quote, messageText)) continue
-		const hasTarget = (g.targets ?? []).some((t) => {
-			const low = String(t).trim().toLowerCase()
-			return low.length >= 2 && !PRONOUN_TARGETS.has(low) && !GENERIC_KIND_TARGETS.has(low)
-		})
-		if (!hasTarget && RE_ENABLE_CHANGES.test(quote)) {
-			out.push({ type: "readonly-off", category: "*", value: "*", kind: "scope", quote, messageId, seq })
+		// A row that named a thing forbids that thing, under each category the model named. The `"*"`
+		// category this file used to infer for a named target — "every category AT THIS PATH", read off
+		// whether the sentence contained a mutating verb — is gone with the regex that read it: a named
+		// row reaches what the model's own answer reaches, and what it does not reach goes to the gate's
+		// model call instead of being guessed here. `any` is the answer the model may give when the sentence
+		// withdrew all of them at once, and `forbidCompatible` makes that one row bind under every segment.
+		for (const t of values) {
+			for (const rowCategory of rowCategories) {
+				// The shape belongs to the CATEGORY, not to the sentence: a withdrawal of two kinds is a read
+				// row and a mutation row, and only the mutation half needs the subtree pair.
+				const shapeOnce = named.length === 0 || READ_CATEGORIES.has(rowCategory)
+				if (shapeOnce) {
+					// One row for one sentence: the read categories (a negated read must not outrank a write,
+					// and must not arrive twice), the class paths (the code's own list, shaped once here) and
+					// nothing else that needs two rows to say one thing.
+					const row = singleRowShape(t)
+					out.push({ type: "forbid", category: rowCategory, value: row.value, kind: row.kind, quote, messageId, seq })
+					continue
+				}
+				out.push({ type: "forbid", category: rowCategory, value: t, kind: targetKind(t), quote, messageId, seq })
+				// AND across the subtree, because a grant can be a folder permission and a revocation naming
+				// the same location has to reach everything that grant reaches, or "stop, don't delete
+				// anything under ~/scratch-data" would leave the earlier folder grant authorising files inside
+				// it. That is a real false allow, and it is how this row was found: eval case L-02.
+				//
+				// Widening a FORBID is fail-safe in a way widening a grant is not: the worst case is one extra
+				// prompt, never an unapproved action. A later grant naming the value still lifts it by seq.
+				if (!t.endsWith("/")) {
+					out.push({ type: "forbid", category: rowCategory, value: `${t}/`, kind: "scope", quote, messageId, seq })
+				}
+			}
 		}
 	}
 	return out

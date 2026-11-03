@@ -21,12 +21,14 @@
 import { describe, expect, it } from "vitest"
 
 import {
+	addGrant,
+	asGrantRow,
 	createGrantStore,
 	deserializeGrants,
+	grantsCover,
 	restoreGrantRows,
 	revokeRows,
 	serializeGrants,
-	addGrant,
 	type GrantRevocation,
 	type SessionGrant,
 } from "./session-grants.ts"
@@ -166,5 +168,38 @@ describe("restoring session grants passes the stored payload through (D5)", () =
 		const restored = deserializeGrants(serializeGrants(store))
 		expect(restored.grants.map((g) => [g.value, g.at, g.durable])).toEqual(before)
 		expect(restored.grants.map((g) => g.at)).toEqual(before.map(([, at]) => at))
+	})
+})
+
+/**
+ * `any` — every action on the target — is a FORBID value. No session grant may carry it, because a
+ * session grant is an allow and the wide form was reserved for bans (a missed grant row costs a prompt, a
+ * missed forbid category costs an allow).
+ */
+describe("`any` never becomes a session grant", () => {
+	it("addGrant refuses it, including inside a compound", () => {
+		const store = createGrantStore()
+		addGrant(store, "any", "/srv/warehouse/", "scope")
+		addGrant(store, "write_outside+any", "/srv/other/", "scope")
+		expect(store.grants.map((g) => `${g.category} ${g.value}`)).toEqual(["write_outside /srv/other/"])
+	})
+
+	it("asGrantRow drops a stored row that names it, and keeps its neighbour", () => {
+		const bad = asGrantRow({ category: "any", value: "/srv/warehouse/", kind: "scope", at: 1 })
+		const good = asGrantRow({ category: "write_outside", value: "/srv/warehouse/", kind: "scope", at: 1 })
+		expect(bad).toBeUndefined()
+		expect(good?.category).toBe("write_outside")
+	})
+
+	it("restore/import of a hand-written store cannot smuggle it in", () => {
+		const restored = deserializeGrants(JSON.stringify({ grants: [{ category: "any", value: "*", kind: "scope", at: 1 }], revoked: [] }))
+		expect(restored.grants).toEqual([])
+	})
+
+	it("even if one were stored by other means, it authorises nothing (category equality is the matcher)", () => {
+		const store = createGrantStore()
+		store.grants.push({ category: "any", value: "/srv/warehouse/", kind: "scope", at: 1 })
+		expect(grantsCover(store, "write_outside", [{ kind: "target", value: "/srv/warehouse/a.txt" } as never]).covered).toBe(false)
+		expect(grantsCover(store, "delete_outside", [{ kind: "target", value: "/srv/warehouse/a.txt" } as never]).covered).toBe(false)
 	})
 })

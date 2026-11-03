@@ -12,8 +12,38 @@
 import type { Entity } from "./risk-policy.ts"
 import { coversByGrammar, grammarFor, parseVcsTarget } from "./target-grammar.ts"
 
+/**
+ * The value an action carries when its OBJECT is its category rather than a name somebody could say.
+ *
+ * `su` is "be another user", an interactive shell is "hand this terminal to a human", a bare `systemctl` is the
+ * tool's own usage: the capability IS the category, so there is no noun to put in a target list. Layer 0
+ * (`risk-handlers.ts`) labels those rows with this marker so that the answer a prompt stores —
+ * `{category, "*"}` — can match them, and so that the prompt says what it is about.
+ *
+ * The marker is NOT a wildcard for a NAMED target, and the matchers keep that separation:
+ *  · a stored row `{category, "*"}` matches the marker, and a named target never does;
+ *  · a stored row naming a value (`pi`, `~/out/`) does not match the marker — see `entityMatchesTarget`,
+ *    where a one-component target must equal a component of the entity;
+ *  · the extraction door cannot produce it: a model-named target has to be a whole token the user wrote, and
+ *    `targetVariants` refuses a value shorter than two characters.
+ * That is what makes the row a faithful record of "the user approved a targetless action of this category":
+ * it can never answer an action that names something.
+ */
+export const NO_OBJECT_TARGET = "*"
+
+/** The targets an action actually names, with {@link NO_OBJECT_TARGET} dropped. */
+export function namedTargetValues(entities: readonly Entity[]): string[] {
+	return entities.filter((e) => e.kind === "target" && e.value !== NO_OBJECT_TARGET).map((e) => e.value)
+}
+
 export type GrantExtraction = {
 	authorized: "yes" | "no"
+	/** The action types the quoted sentence itself authorises, in the same vocabulary as the gate's own
+	 *  categories (`GRANT_CATEGORY_VALUES`). This is the field that replaced the verb-in-quote tables: the
+	 *  question "does the user's sentence cover THIS effect?" is a question about meaning, and meaning
+	 *  belongs to the model, not to code reading the words. Missing or empty means the model named no effect,
+	 *  which grants nothing — see the effects gate in `verifyGrant`. */
+	effects?: string[]
 	allowed_targets: string[]
 	forbidden_targets: string[]
 	quote: string
@@ -31,9 +61,203 @@ export type GrantVerdict = {
 	source?: "message" | "ledger"
 }
 
-/** Categories where a bare verb ("push it", "clean the build dir") is a complete
- *  instruction, so an empty allowed_targets list with a verb-bearing quote may grant. */
-export const BARE_VERB_CATEGORIES: Record<string, RegExp> = {
+/**
+ * Category → matching group (§2.4). Ledger matching compares groups, not exact categories, so a grant
+ * reaches the siblings inside its own group. What a group may NOT decide is direction — that is
+ * `auth-ledger.ts`'s `grantAuthorises`, because "copy to /x/" covering mkdir follows from writing content,
+ * while covering chmod never did.
+ *
+ * Lives here rather than in the ledger because the transcript side needs the same map: the pending action's
+ * segments and the model's `effects` are both categories, and "does this sentence authorise this effect?" is
+ * answered by comparing their groups, not their spellings — `cluster_mutation` and `container_mutation` are
+ * one kind of harm, `delete_data` and `cluster_mutation` are not. `auth-ledger.ts` re-exports it; the
+ * direction of the import is auth-ledger → here, so putting the table anywhere else would close a cycle.
+ */
+const KIND_GROUPS: Record<string, string> = {
+	write_outside: "fs-write",
+	// Split from writes on purpose. One group for both meant a folder grant for either authorised
+	// both, and the direction that mattered - "you may edit" buying "you may remove" - was decided
+	// by adjacency rather than by anyone. The legitimate half is now a named one-way rule.
+	delete_outside: "fs-delete",
+	delete_recursive: "fs-delete",
+	delete_data: "fs-delete",
+	// Privilege is a different harm class from content: chmod decides who ELSE may read what the
+	// user granted. Never implied by a write or a delete; it has to be named.
+	perm_change: "fs-perm",
+	package_system: "pkg",
+	privilege: "priv",
+	network_send: "net-send",
+	vcs_remote: "vcs-remote",
+	vcs_discard: "vcs-discard",
+	cluster_mutation: "cluster",
+	container_mutation: "cluster",
+	db_mutation: "db",
+	// write_project only reaches ledger matching via the named-forbid downgrade
+	// (an allow-tier action the user explicitly forbade); grouping it with
+	// fs-write lets a later "ok, you can delete X now" lift the forbid.
+	write_project: "fs-write",
+	remote_exec: "exec",
+	agent_spawn: "exec",
+	network_listen: "listen",
+	// Split on purpose. Both used to be "secret", and `compatible()` is pure group
+	// equality, so a grant to READ a secret path authorised WRITING it — and vice
+	// versa — through the kind-group widening. Reading and mutating a secret-bearing
+	// path are different permissions and must never be interchangeable, so they get
+	// distinct groups and neither reaches the other. This is strictly tighter: it can
+	// only cost an extra prompt, never grant a false allow.
+	read_secret: "secret-read",
+	write_sensitive: "secret-write",
+	process_control: "proc",
+	system_config: "sysconf",
+	interactive_editor: "editor",
+}
+
+export function kindGroup(category: string): string {
+	const primary = category.split("+")[0] ?? category
+	return KIND_GROUPS[primary] ?? primary
+}
+
+/** The kind groups whose pending action READS a path's bytes. Deliberately just these two: `read_system_state`
+ *  is its own group, so a permission over files can never answer a read of a machine. */
+const PATH_READ_GROUPS: ReadonlySet<string> = new Set(["read_only", "secret-read"])
+
+/** The kind groups a grant must be in to be a WRITE about the thing it names.
+ *
+ * Two, because the secret categories were split apart put `write_sensitive` in a group of its own: a permission
+ * to edit a credentials file is still a permission to write there, and the write-implies-read direction — an
+ * edit needs a read first — has to hold for exactly the files where that sentence matters most. */
+const WRITE_GROUPS: ReadonlySet<string> = new Set(["fs-write", "secret-write"])
+
+/** The groups a DELETE grant is in (destruction of content, whether a path or an object store). */
+const DELETE_GROUPS: ReadonlySet<string> = new Set(["fs-delete"])
+
+/**
+ * The directions in which a stored grant answers an effect it is not filed under.
+ *
+ * `"own"` is the old group equality — the row's own segments, unchanged. The other three are the named
+ * one-way rules, and the whole point of naming them is that "a row about X answers Y" is a statement
+ * somebody made, not an accident of adjacency:
+ *
+ *  · `"delete-gives-write"` — destroying every byte under a scope already permits putting bytes there
+ *    (the reverse is refused: a write grant buys no delete through this direction).
+ *  · `"write-gives-read"` — you cannot edit what you cannot open, so a grant that lets the agent
+ *    create or change content at a place lets it read there too. Secret-class paths INCLUDED, because an
+ *    edit of a credentials file needs the read that precedes it; the direction is one-way, so a READ grant
+ *    never buys a write and `read_system_state` is not answerable from a file at all.
+ *  · `"write-gives-single-delete"` — removing ONE file is part of the same work as editing it
+ *    (`rm file`, and `mv`, which is delete+write). Recursive delete, `delete_data` and the granted folder
+ *    itself are refused, and refused below in {@link grantAnswersSegment} where the target is known.
+ *
+ * Nothing here can be reached from a read row: a permission to look at something buys no change, ever.
+ */
+export type GrantDirection =
+	| "own"
+	| "delete-gives-write"
+	| "write-gives-read"
+	| "write-gives-single-delete"
+
+/** Which direction, if any, lets one stored category segment answer one pending segment. */
+export function grantDirection(grantSegment: string, pendingSegment: string): GrantDirection | undefined {
+	const stored = kindGroup(grantSegment)
+	const pending = kindGroup(pendingSegment)
+	if (stored === pending) return "own"
+	if (stored === "fs-delete" && pending === "fs-write") return "delete-gives-write"
+	if ((WRITE_GROUPS.has(stored) || DELETE_GROUPS.has(stored)) && PATH_READ_GROUPS.has(pending)) return "write-gives-read"
+	// The single-file delete is one category, not a group: `delete_outside` is that category. `delete_recursive`
+	// and `delete_data` share its group and are exactly what this direction excludes, so they are compared as
+	// themselves and never inherit it.
+	if (WRITE_GROUPS.has(stored) && pendingSegment === "delete_outside") return "write-gives-single-delete"
+	return undefined
+}
+
+/** The strongest direction across a possibly compound grant category (`write_outside+delete_outside`). */
+export function categoryDirection(grantCategory: string, pendingSegment: string): GrantDirection | undefined {
+	let best: GrantDirection | undefined
+	for (const seg of grantCategory.split("+").map((s) => s.trim()).filter(Boolean)) {
+		const d = grantDirection(seg, pendingSegment)
+		if (d === "own") return d
+		if (d) best = d
+	}
+	return best
+}
+
+/**
+ * Is this value the root of that one, once both are spelled in the same path space?
+ *
+ * The single-file-delete direction's one target-shaped refusal needs it: "write implies single-file delete
+ * INSIDE its scope" never means deleting the scope. Both sides are canonicalised the way every other path
+ * decision is (`~` → home, `./x` → the project root), so a user's absolute wording and the gate's display
+ * wording cannot disagree about it.
+ */
+export function sameGrantRoot(value: string, target: string, space?: PathSpace): boolean {
+	const strip = (v: string): string => canonicalPath(v, space).replace(/\/+$/, "").toLowerCase()
+	const a = strip(value)
+	const b = strip(target)
+	return a.length > 0 && a === b
+}
+
+/**
+ * Does a stored grant answer this pending effect, for this target?
+ *
+ * The ONE place the direction table is applied with a target, so the ledger, the session store and the
+ * transcript verdict cannot drift apart about what a permission contains. `covers` is the caller's own value
+ * matcher: each store matches values its own way (the ledger has grammars and wildcards, the session store has
+ * scope prefixes), and that difference is about spelling, not about authority.
+ *
+ * Two refusals belong to the single-file-delete direction and live here because they are about the target
+ * rather than the category:
+ *  · a row that names no object (`*`) authorises no single-file delete — "write anywhere" is not a licence to
+ *    remove a file somebody would have to name;
+ *  · a write row never removes the folder it was granted over; a descendant is fine, the root is not.
+ */
+export function grantAnswersSegment(opts: {
+	grant: { category: string; value: string; kind: "entity" | "scope" | string }
+	pendingSegment: string
+	target: string
+	/** The caller's own value matcher for ONE stored segment: the ledger passes the segment it is asking about (its
+	 *  value grammars are keyed by category), the session store passes the pending segment (a prompt-scoped row
+	 *  matches by scope prefix either way). The direction, not the caller, decides whether the row may be asked at
+	 *  all, so a store cannot widen by choosing a matcher. */
+	covers: (grantSegment: string) => boolean
+	space?: PathSpace
+}): boolean {
+	for (const seg of opts.grant.category.split("+").map((s) => s.trim()).filter(Boolean)) {
+		const direction = grantDirection(seg, opts.pendingSegment)
+		if (!direction) continue
+		if (direction === "write-gives-single-delete") {
+			if (opts.grant.value === "*") continue
+			// "Never the granted folder itself" is about a FOLDER. A grant on one file is a grant on that file, and
+			// removing it is the whole of that direction — refusing there would make a per-file write grant unable
+			// to delete the file it names, which is the opposite of the rule.
+			const folder = opts.grant.kind === "scope" || opts.grant.value.endsWith("/")
+			if (folder && sameGrantRoot(opts.grant.value, opts.target, opts.space)) continue
+		}
+		// A delete row that names no object cannot speak for a PATH READ either: "you may delete anything"
+		// says nothing about opening a particular file. A write row may ("write anywhere" is "open
+		// anything"), which is the shape the write direction already accepted before it was extended to reads of
+		// secret-class paths.
+		if (direction === "write-gives-read" && DELETE_GROUPS.has(kindGroup(seg)) && opts.grant.value === "*") continue
+		if (opts.covers(seg)) return true
+	}
+	return false
+}
+
+/**
+ * The words that count as the user's own words naming the DOING (install it, run it elevated, hold a port
+ * open) rather than only its object ("ripgrep is missing" names ripgrep).
+ *
+ * No entry in this table can put an effect into the model's list. Both remaining readers may only WITHHOLD:
+ *  - `METHOD_VERB_REQUIRED` below, in `verifyGrant` and in `auth-ledger.ts`'s verb gate;
+ *  - the targetless `scope: "category"` row in `auth-ledger.ts`'s `eventsFromExtraction`, where it is the one
+ *    thing standing between a width field and a `"*"` wildcard grant.
+ *
+ * The `METHOD_VERB_REQUIRED` read is kept on purpose, even though it is an English read in a gate that tries
+ * not to need one: measurement showed deleting it false-allows "ripgrep is missing from this box, sort that
+ * out" — the model answers `authorized:"yes"` with `effects:["package_system"]` — so the sentence names the
+ * package without approving the install. Until code owns that distinction this is the one surviving read of
+ * English in the gate, and dropping it is a loosening, not a cleanup.
+ */
+export const DOING_VERB_EVIDENCE: Record<string, RegExp> = {
 	vcs_remote: /\b(push|publish|pr|pull request|release)\b/i,
 	vcs_discard: /\b(reset|discard|clean|throw away|revert|undo)\b/i,
 	delete_recursive: /\b(delete|remove|clean|clear|wipe|rm)\b/i,
@@ -49,7 +273,11 @@ export const BARE_VERB_CATEGORIES: Record<string, RegExp> = {
 
 /** Categories where naming the entity is NOT the same as approving the method:
  *  the quote must also carry the action verb ("ripgrep is missing" names ripgrep
- *  but does not approve a system-wide install). */
+ *  but does not approve a system-wide install).
+ *
+ *  Kept NOT because the idea is good English parsing — it is not — but because the measured alternative is a
+ *  false allow on the live classifier. Do not widen this set and do not add to it; see `DOING_VERB_EVIDENCE`
+ *  above for the measurement. */
 export const METHOD_VERB_REQUIRED = new Set([
 	"package_system", "privilege", "remote_exec", "network_listen",
 ])
@@ -137,7 +365,7 @@ export type PathSpace = { home?: string; project?: string }
 /**
  * Canonicalise a path-shaped value so both sides of a comparison are spelled the same way.
  *
- * WHY THIS EXISTS. `displayPath` (`risk-paths.ts:259`) renders every in-project target
+ * WHY THIS EXISTS. `displayPath` (`risk-paths.ts:463`) renders every in-project target
  * project-relatively (`./corpus/.pi/x`) and every home-external one home-relatively (`~/x`), and those
  * display strings are what the gate hands the grant stores as entities. A user words a permission
  * absolutely (`/home/u/dev/pm/`). `expandHome` closed the `~` half of that gap and nothing closed the
@@ -336,10 +564,52 @@ export function verifyGrant(opts: {
 	else if (appearsIn(opts.ledgerQuotes)) source = "ledger"
 	else return no("quote not found verbatim in any user message")
 
-	// 2. Forbidden targets veto everything they match.
+	// 2. The model's `effects` must cover every effect of the pending action.
+	//
+	// This is the check that replaces the verb-in-quote tables: the replacing field landed and was measured
+	// first, so the tables could go. The question "does this sentence authorise deleting,
+	// as opposed to naming the thing deleted?" is a question about meaning, and meaning is the model's.
+	// Coverage is by KIND GROUP, the same map the ledger matches on, so `cluster_mutation` and
+	// `container_mutation` answer for each other and `delete_data` never answers for either.
+	//
+	// Empty or missing effects is "the model named no authorised action type" and grants NOTHING — never a
+	// guess from the category, never a wildcard. What garbage costs here is always the same one
+	// thing: the verdict comes back `no`, the gate prompts, and the model's transcript call has already been
+	// made. A wrong-but-covered effect is no worse than the old verb table's wrong-but-matched verb, and
+	// unlike the table it cannot be satisfied by a word that happens to appear in the sentence.
+	// The same direction table the stores use (a sentence that authorises editing a place also
+	// authorises reading there). Category-only here, because an effect list carries no value to compare; the
+	// one direction that needs a target — the single-file delete — is checked after step 4, where the
+	// matched targets are known.
+	//
+	// `delete-gives-write` is NOT applied to this side, and that asymmetry is deliberate: an EFFECT list is the
+	// model's answer to "what does this sentence authorise", so a sentence that authorised only deleting does
+	// not authorise copying the remains out. The ledger applies it for a different reason — a delete grant over
+	// a folder really does contain writing inside it — and neither reading is the other's consequence.
 	const segments = category.split("+").filter((s) => norm(s))
-	const pending = entities.filter((e) => e.kind === "target").map((e) => e.value)
-	const checked = pending.length ? pending : entities.map((e) => e.value)
+	const rawEffects = Array.isArray(extraction.effects) ? extraction.effects : []
+	const effects = rawEffects.filter((e) => typeof e === "string" && norm(e))
+	if (effects.length === 0) return no("model: the quote names no authorised action type (effects empty)")
+	const directionsFor = (seg: string): GrantDirection[] =>
+		effects
+			.map((e) => categoryDirection(e, seg))
+			.filter((d): d is GrantDirection => d !== undefined && d !== "delete-gives-write")
+	const uncovered = segments.filter((seg) => directionsFor(seg).length === 0)
+	if (uncovered.length > 0) {
+		return no(`quote does not authorise ${uncovered.join(", ")} (effects: ${effects.join(", ")})`)
+	}
+	// Segments the model answered with a WRITE alone (`rm file` under "you can edit /x/"): removable, but only
+	// for a named target that is not the named root itself. See the check after step 4.
+	const deleteFromWriteOnly = segments.filter(
+		(seg) => norm(seg) === "delete_outside" && directionsFor(seg).every((d) => d !== "own" && d !== "delete-gives-write"),
+	)
+
+	// 3. Forbidden targets veto everything they match.
+	// The no-object marker is not a target: an action whose object is its category names nothing a forbid could
+	// be about, and treating the marker as one would let a `*`-valued row veto every targetless action.
+	const named = entities.filter((e) => e.value !== NO_OBJECT_TARGET)
+	const pending = namedTargetValues(entities)
+	const checked = pending.length ? pending : named.map((e) => e.value)
 	const forbidden = (extraction.forbidden_targets ?? []).filter((t) => norm(t))
 	if (forbidden.length > 0) {
 		for (const ent of checked) {
@@ -348,51 +618,59 @@ export function verifyGrant(opts: {
 		}
 	}
 
-	// 3. Every pending entity must be covered by an allowed target.
+	// 4. Every pending entity must be covered by an allowed target.
 	// A compound category is ONE grant covering EVERY effect it names, so every effect must earn its
 	// own evidence. These checks used to key off `category.split("+")[0]`, which made the verdict depend
 	// on which effect mergeDecisions happened to list first: a later effect needing its method verb
-	// demanded nothing, and a bare-verb effect listed first carried an unlocatable companion over the
-	// line. Measured over 3845 distinct commands from real session history
-	// in that sample: 317 compound actions reach this function, 19 skip a required
-	// method verb (12 of them `privilege`), 44 take a bare-verb accept the later segment has not
-	// earned. Monotone by construction: this can only refuse more, never less.
+	// demanded nothing, and a bare-verb effect listed first carried an unlocatable companion over the line.
+	// Measured over 3845 distinct commands from real session history: 317 compound actions reach this function
+	// and 19 skipped a required method verb — 12 of them `privilege` behind a lax first effect. (The same audit
+	// counted 44 bare-verb accepts on the branch this replaced; the per-segment rule below is what took its
+	// place.) Monotone by construction: this can only refuse more, never less.
 	const allowed = (extraction.allowed_targets ?? []).filter((t) => norm(t))
+	const matches: Array<{ entity: string; target: string }> = []
 	if (checked.length > 0 && allowed.length > 0) {
-		const matches: Array<{ entity: string; target: string }> = []
 		for (const ent of checked) {
 			const hit = allowedTargetFor(segments, ent, allowed, space)
 			if (!hit) return no(`target "${ent}" not named by the user (allowed: ${allowed.join(", ") || "none"})`)
 			matches.push({ entity: ent, target: hit })
 		}
-		for (const seg of segments) {
-			if (!METHOD_VERB_REQUIRED.has(seg)) continue
-			const verbRe = BARE_VERB_CATEGORIES[seg]
-			if (verbRe && !verbRe.test(q)) {
-				return no(`user named the target but not the method (${seg}); quote lacks the action verb`)
+	}
+
+	// Target half of the single-file-delete direction: a write sentence authorises removing a FILE inside what it
+	// names, never the named place itself. Without a matched target there is nothing to compare, and "the folder
+	// you may edit" would quietly become "the folder you may delete" — the one reading the direction excludes, so
+	// it costs a prompt instead.
+	if (deleteFromWriteOnly.length > 0) {
+		if (matches.length === 0) {
+			return no("a write authorises no delete without a target the user named (never the granted folder itself)")
+		}
+		for (const m of matches) {
+			if (sameGrantRoot(m.target, m.entity, space)) {
+				return no(`a write authorises removing a file inside "${m.target}", not "${m.entity}" itself (never the granted root)`)
 			}
 		}
-		return { granted: true, reason: `user authorised: ${matches.map((m) => `${m.entity}←"${m.target}"`).join(", ")}`, matches, source }
 	}
 
-	// 4. No named targets — bare-verb categories only, and the quote itself must carry the verb.
-	if (allowed.length === 0) {
-		// Every effect must be bare-verb grantable. An effect with no bare-verb form (write_outside:
-		// content without a location is not an instruction) blocks the whole compound — fail-safe and
-		// deliberate, not a gap to widen.
-		for (const seg of segments) {
-			const verbRe = BARE_VERB_CATEGORIES[seg]
-			if (!verbRe) return no(`effect "${seg}" (of ${category}) requires the user to name the target`)
-			if (!verbRe.test(q)) return no(`quote does not contain the action verb for "${seg}"`)
-		}
-		return { granted: true, reason: `user instruction covers the action ("${extraction.quote.slice(0, 60)}")`, matches: [], source }
-	}
-
-	// allowed non-empty but the action has no entities: accept only with the verb in the quote.
+	// 5. METHOD_VERB_REQUIRED: naming the entity is not approving the method. Kept by measurement — it is the
+	// only thing between "ripgrep is missing from this box, sort that out" and `apt-get install ripgrep` (see
+	// `DOING_VERB_EVIDENCE` above for why). It runs on both shapes of the verdict, which it always effectively
+	// did: for a targetless action the branch this replaced asked the same four categories for the same words.
+	// The wording of that refusal is unchanged from the run that measured it, so before/after comparisons stay valid.
 	for (const seg of segments) {
-		const verbRe = BARE_VERB_CATEGORIES[seg]
-		if (!verbRe) return no(`effect "${seg}" (of ${category}) has no bare-verb form and the action names no target`)
-		if (!verbRe.test(q)) return no(`quote does not contain the action verb for "${seg}"`)
+		if (!METHOD_VERB_REQUIRED.has(seg)) continue
+		const verbRe = DOING_VERB_EVIDENCE[seg]
+		if (verbRe && !verbRe.test(q)) {
+			return no(`user named the target but not the method (${seg}); quote lacks the action verb`)
+		}
 	}
-	return { granted: true, reason: `user instruction covers the action`, matches: [], source }
+
+	// 6. Nothing more to prove. When the sentence named no target (or the action has none), step 2 is the
+	// whole evidence that it was an instruction about THIS kind of action at all — that is what the
+	// bare-verb table used to claim by finding a word. `write_outside` had no entry there, so a compound
+	// naming it could never be answered without a target; now the model's own effect list decides.
+	if (matches.length === 0) {
+		return { granted: true, reason: `user instruction covers the action (${effects.join(", ")})`, matches, source }
+	}
+	return { granted: true, reason: `user authorised: ${matches.map((m) => `${m.entity}←"${m.target}"`).join(", ")}`, matches, source }
 }

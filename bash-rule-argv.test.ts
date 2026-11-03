@@ -79,12 +79,22 @@ describe("prefix rules (`:*`) keep today's meaning, with no silent widening", ()
 		expect(covers("git status:*", ["git"])).toBe(false)
 	})
 
-	it("do not cover the same invocation behind xargs — a deliberate narrowing", () => {
-		// The text matcher lets `git status:*` cover `xargs git status …`, because it matched strings
-		// and had an explicit allowance for the `xargs ` prefix. Here the argv would have to start with
-		// the rule's words, and it starts with `xargs` — whose trailing arguments arrive from a pipe at
-		// run time, which is why xargs is on the broad-rule list dangerous-permissions.ts strips.
-		expect(covers("git status:*", ["xargs", "git", "status"])).toBe(false)
+	it("cover the same invocation behind xargs, and only in the `:*` form", () => {
+		// The text matcher has always let `git status:*` cover `xargs git status …`
+		// (`shell-rule-matching.ts`), because it matched strings and carried an explicit `xargs `
+		// allowance. Moving allow onto argv dropped that reading, and the loss bought nothing: a prefix
+		// specifier already covers arbitrary trailing words by construction, so reading it through
+		// `xargs` adds no authority the user did not type. Only `xargs` options that consume no value of
+		// their own are stepped over — an option with a value (`-n 2`, `-I {}`) ends the reading, because
+		// the next words would then be its value and not the command.
+		expect(covers("git status:*", ["xargs", "git", "status"])).toBe(true)
+		expect(covers("git status:*", ["xargs", "-0", "git", "status", "-uno"])).toBe(true)
+		expect(covers("git status:*", ["/usr/bin/xargs", "git", "status"])).toBe(true)
+		expect(covers("git status:*", ["xargs", "-n", "2", "git", "status"])).toBe(false)
+		expect(covers("git status:*", ["xargs", "-I", "{}", "git", "status"])).toBe(false)
+		expect(covers("git status:*", ["xargs"])).toBe(false)
+		// an EXACT specifier is one invocation, and `xargs` adds words to it: unchanged
+		expect(covers("git status", ["xargs", "git", "status"])).toBe(false)
 	})
 })
 
@@ -152,8 +162,10 @@ describe("broad rules, empty specifiers, empty calls", () => {
 
 	it("does not rescue a rule the rule parser could not read as a call", () => {
 		// Text after the closing paren means this is not `Bash(...)` at all but one odd tool name
-		// (permission-rule-parser's documented reading), so it authorises nothing anywhere.
-		expect(bashRuleCoversArgv(ruleFor("Bash(*) "), ["make", "coffee"])).toBe(false)
+		// (permission-rule-parser's documented reading), so it authorises nothing anywhere. Whitespace
+		// after the paren is not text: the parser trims it before deciding where the call ends.
+		expect(bashRuleCoversArgv(ruleFor("Bash(*) trailing"), ["make", "coffee"])).toBe(false)
+		expect(bashRuleCoversArgv(ruleFor("Bash(*) "), ["make", "coffee"])).toBe(true)
 	})
 
 	it("never cover an argv with no words in it", () => {
@@ -243,11 +255,24 @@ describe("strict operands: an exact specifier has to name every word", () => {
 	const strictCovers = (spec: string, argv: string[]): boolean =>
 		bashRuleCoversArgv(ruleFor(`Bash(${spec})`), argv, { strictOperands: true })
 
-	it("refuses a call with a word the rule does not name", () => {
-		expect(strictCovers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "--verbose"])).toBe(false)
+	it("refuses a call with an operand the rule does not name", () => {
+		// The unit of comparison is "every operand", not "every word": a flag that can carry
+		// no value of its own does not void an exact rule, while a second operand or a value-free-looking
+		// cluster still does. `--verbose` names no target, so the delete the user approved is the delete that
+		// runs; `/tmp/z` is a target nobody approved.
+		expect(strictCovers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "--verbose"])).toBe(true)
+		expect(strictCovers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "-v"])).toBe(true)
 		expect(strictCovers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "/tmp/z"])).toBe(false)
 		expect(strictCovers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "extra"])).toBe(false)
-		// the same rule in non-strict mode is the documented loosening, unchanged: fewer words still cover
+		// a flag that can name a path still voids coverage: `-t DIR`, `-f FILE`, `--output=…`
+		expect(strictCovers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "-t", "/tmp/z"])).toBe(false)
+		expect(strictCovers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "--output=/tmp/z"])).toBe(false)
+		expect(strictCovers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "--target=/tmp/z"])).toBe(false)
+		// a fused cluster is refused even when its letters look harmless: one of them may take the next word
+		expect(strictCovers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "-rf"])).toBe(false)
+		// a rule may not name a word the call does not pass
+		expect(strictCovers("rm -rf /tmp/x -v", ["rm", "-rf", "/tmp/x"])).toBe(false)
+		// the same rule in non-strict mode is the documented loosening, unchanged
 		expect(covers("rm -rf /tmp/x", ["rm", "-rf", "/tmp/x", "--verbose"])).toBe(true)
 	})
 
@@ -381,15 +406,43 @@ describe("a redirect target is part of the invocation a rule names", () => {
 	})
 
 	it("stops every target-less specifier from covering a command that redirects", () => {
-		// This is the tightening that makes the tightening above safe. `Bash(echo:*)` covering
-		// `echo hi > ~/.ssh/authorized_keys` is the over-grant AGENTS.md names for the suggestion engine;
-		// here it stops being true of the matcher that has to honour the rule.
+		// The fail-closed default: with no answer about the files, a rule that names none of them covers
+		// nothing that redirects. `Bash(echo:*)` reaching `echo hi > ~/.ssh/authorized_keys` is the over-grant
+		// AGENTS.md names for the suggestion engine, and a caller that says nothing gets that refusal.
 		for (const op of [">", ">>", "<"]) {
 			const targets = [t(op, "/tmp/out.txt")]
 			for (const spec of ["echo hi", "echo hi:*", "echo *", "echo hi *", "git * main"]) {
 				expect(bashRuleCoversArgv(ruleFor(`Bash(${spec})`), ["echo", "hi"], { targets }), `${spec} ${op}`).toBe(false)
 			}
 		}
+	})
+
+	it("covers the same command when the caller answers for the file instead", () => {
+		// The caller's half of the contract: the rule describes the words, the caller describes the place. Both
+		// specifier shapes that name no file take the answer — an exact one, a `:*` prefix and a glob —
+		// and the answer is per target, so `Bash(echo *)` with two files needs both cleared.
+		const allowed = () => true
+		const refused = () => false
+		for (const spec of ["echo hi", "echo hi:*", "echo *", "echo hi *"]) {
+			const rule = ruleFor(`Bash(${spec})`)
+			expect(bashRuleCoversArgv(rule, ["echo", "hi"], { targets: [t(">", "/tmp/out.txt")], targetAllowed: allowed }), spec).toBe(true)
+			expect(bashRuleCoversArgv(rule, ["echo", "hi"], { targets: [t(">", "/tmp/out.txt")], targetAllowed: refused }), spec).toBe(false)
+		}
+		// Per target, counted: one cleared file does not carry a second.
+		expect(
+			bashRuleCoversArgv(ruleFor("Bash(echo:*)"), ["echo", "hi"], {
+				targets: [t(">", "/tmp/a"), t(">", "/tmp/b")],
+				targetAllowed: (target) => target.target === "/tmp/a",
+			}),
+		).toBe(false)
+		// …and a rule that NAMES a file is still compared to it, never excused by the caller's answer: the
+		// clause is what the user approved.
+		expect(
+			bashRuleCoversArgv(ruleFor("Bash(echo hi > /tmp/other.txt)"), ["echo", "hi"], {
+				targets: [t(">", "/tmp/a")],
+				targetAllowed: allowed,
+			}),
+		).toBe(false)
 	})
 
 	it("leaves the tool-wide rule alone, because it is not a reading of one approval", () => {

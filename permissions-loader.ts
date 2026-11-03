@@ -23,6 +23,7 @@ import {
 	type PermissionBehavior,
 	type PermissionRule,
 	type PermissionsConfig,
+	KNOWN_RULE_TOOLS,
 	mergePermissionRules,
 	rulesFromPermissionsConfig,
 } from "./permissions.ts"
@@ -103,11 +104,53 @@ function loadProjectPermissions(
 }
 
 export function loadMergedPermissionRules(cwd: string): PermissionRule[] {
-	return mergePermissionRules(
+	const rules = mergePermissionRules(
 		loadGlobalPermissions(),
 		loadProjectPermissions(cwd, false),
 		loadProjectPermissions(cwd, true),
 	)
+	warnAboutDeadRules(rules)
+	return rules
+}
+
+/**
+ * Rules whose tool name is not one this extension can match, and which therefore never fire.
+ *
+ * A rule is a line in a JSON file that someone edited by hand, so a typo, a lost closing paren
+ * (`Bash(npm test) ` before the parser trimmed it) or a tool name ported from another product leaves a rule
+ * that reads as active and matches nothing. Silence is the worst answer: the user believes the command is
+ * allowed and the gate asks again. This is the list, for a caller that can show it (`/permissions` is the
+ * natural place, and `loadMergedPermissionRules` is where index.ts would pass it on).
+ */
+export function deadPermissionRules(rules: PermissionRule[]): PermissionRule[] {
+	return rules.filter((rule) => !KNOWN_RULE_TOOLS.has(rule.ruleValue.toolName))
+}
+
+/**
+ * The one notice this loader emits about its own input: `console.warn` is the channel the read and write
+ * failures above already use, and index.ts has no listener for loader problems to hand it to.
+ *
+ * Once per unknown tool name per process, keyed on that name: a file with ten rules under one dead tool is
+ * one mistake, and a warning printed on every rule reload (which the approval path triggers) is noise a user
+ * learns to ignore. {@link resetDeadRuleWarnings} clears the memory for tests.
+ */
+const warnedDeadTools = new Set<string>()
+
+function warnAboutDeadRules(rules: PermissionRule[]): void {
+	for (const rule of deadPermissionRules(rules)) {
+		const tool = rule.ruleValue.toolName
+		if (warnedDeadTools.has(tool)) continue
+		warnedDeadTools.add(tool)
+		console.warn(
+			`[adaptive-acl] permission rule names no tool this extension can match: "${permissionRuleValueToString(rule.ruleValue)}" — ` +
+				`the tool is \`${tool}\`, and only ${[...KNOWN_RULE_TOOLS].join(", ")} are matched. The rule never fires.`,
+		)
+	}
+}
+
+/** For tests: forget which dead tool names have already been warned about. */
+export function resetDeadRuleWarnings(): void {
+	warnedDeadTools.clear()
 }
 
 function normalizeRuleString(rule: string): string {

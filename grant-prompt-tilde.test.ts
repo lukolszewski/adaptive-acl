@@ -11,15 +11,16 @@
  *    machine those are unrelated strings, and it answered "not authorised" with an
  *    empty quote even though the grant was in the very message list it was given.
  *
- * 2. An action our category table cannot name. It is stored under a `*action*`
- *    label, and `compatible()` treats only bare `"*"` as a wildcard — so the grant
- *    is recorded and covers nothing, which is indistinguishable from never having
- *    been granted.
+ * 2. An action the extraction model cannot put in the enum. It used to be stored under a `*action*`
+ *    label built from its display text, and `compatible()` treats only bare `"*"` as a wildcard — so the
+ *    grant was recorded, covered nothing, and was indistinguishable from never having been granted.
+ *    Such a row now registers NOTHING (the word list that built the label is deleted) and the only
+ *    trace is `extractionStats.unmapped`, which is what this file's second block pins.
  */
 import { describe, expect, it } from "vitest"
 import { homedir } from "node:os"
 import { absolutize, buildGrantUserPrompt } from "./model-client.ts"
-import { eventsFromExtraction, extractionStats, mapActionToCategory } from "./auth-ledger.ts"
+import { eventsFromExtraction, extractionStats } from "./auth-ledger.ts"
 
 const TARGET = { kind: "target" as const, value: "~/.pi/agent/adaptive-acl.json" }
 const QUOTE = "I allow you to read /home/u/.pi config contents"
@@ -58,12 +59,28 @@ describe("the grant question cannot hide behind a tilde", () => {
 })
 
 describe("a grant that cannot register is visible", () => {
-	it("'read files' maps now — it used to fall through and register nothing", () => {
-		// Regression pin for the hole this closed: ACTION_MAP had no read
-		// row at all, so a user's explicit folder read became the inert label `*read files*`.
-		// Asserting the CLOSED hole, and that the secret row still wins by ordering.
-		expect(mapActionToCategory("read files")).toBe("read_only")
-		expect(mapActionToCategory("read secret files")).toBe("read_secret")
+	it("a read sentence registers under the model's category, never one read off its label", () => {
+		// Regression pin for the defect where the English word list had no read row at all, so a user's
+		// explicit folder read became the inert label `*read files*`. That table is deleted, so no ordering
+		// is left to get wrong: the enum value IS the category and the label is a display string, which is
+		// what the extraction prompt has always said. Recorded rows below are a model's answers for the same
+		// messages.
+		const events = eventsFromExtraction(
+			{ grants: [{ action: "read config files", category: "read_only", kind: "scope", scope: "named", includesSecrets: false, targets: ["/home/u/.pi"], quote: QUOTE }], revocations: [] } as never,
+			"m1",
+			1,
+			QUOTE,
+		)
+		expect(events.map((e) => `${e.category}:${e.kind}:${e.value}`)).toEqual(["read_only:scope:/home/u/.pi/"])
+		// A secret read is a different category because the MODEL named it — recorded, "do not read
+		// ~/.kube/config.json" comes back `read_secret`, whatever the label contains.
+		const secret = eventsFromExtraction(
+			{ grants: [], revocations: [{ action: "read config file", category: "read_secret", scope: "named", targetClass: "none", targets: ["~/.kube/config.json"], quote: "do not read ~/.kube/config.json" }] } as never,
+			"m2",
+			2,
+			"do not read ~/.kube/config.json",
+		)
+		expect(secret.map((e) => e.category)).toEqual(["read_secret"])
 	})
 
 	it("counts the unmapped action and keeps its wording", () => {
@@ -76,14 +93,16 @@ describe("a grant that cannot register is visible", () => {
 		)
 		expect(extractionStats.unmapped).toBe(before + 1)
 		expect(extractionStats.lastUnmapped).toBe("frobnicate widgets")
-		// the recorded label can never match a real pending category
-		expect(events.some((e) => e.category === "*frobnicate widgets*")).toBe(true)
+		// The invented `*frobnicate widgets*` row is gone. A row whose category was guessed from a
+		// display label could never match a pending action anyway, so it showed up in `/grants` as authority
+		// the gate did not have. The honest shape is no row plus the counter above, which costs one prompt.
+		expect(events).toEqual([])
 	})
 
 	it("counts a mapped action as mapped", () => {
 		const before = extractionStats.mapped
 		eventsFromExtraction(
-			{ grants: [{ action: "delete the build dir", targets: ["/home/u/proj/build"], quote: "delete /home/u/proj/build" }], revocations: [] } as never,
+			{ grants: [{ action: "delete files", category: "delete_recursive", kind: "entity", scope: "named", includesSecrets: false, targets: ["/home/u/proj/build"], quote: "delete /home/u/proj/build" }], revocations: [] } as never,
 			"m2",
 			2,
 			"delete /home/u/proj/build",

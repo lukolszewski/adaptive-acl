@@ -14,9 +14,12 @@
  * never by the shape of the string, parse both sides of the match with it, and treat
  * an unparseable side as `undefined` so the caller falls back to the old string rule.
  *
- * Shape sniffing is what that rule exists to prevent, so `grammarFor` is the only
- * dispatcher here and every function below is pure: no fs, no pi, nothing else from
- * this tree.
+ * Shape sniffing is what was rejected for CHOOSING a grammar, so `grammarFor` is the only dispatcher here
+ * and every function below is pure: no fs, no pi, nothing else from this tree.
+ *
+ * This is also the one place that knows a bucket is not a directory: {@link isObjectStoreUri} and
+ * the cross-space guard inside {@link coversByGrammar} sit on the single call every matcher makes, so a
+ * category rename cannot make a folder row reach a cloud object.
  */
 
 /** A git ref grant: `origin/feature/x`, `origin/*`, `refs/heads/x`, `HEAD:x`, `*`. */
@@ -43,7 +46,7 @@ export type ImageRef = {
 type TargetGrammar = "vcs" | "image"
 
 /**
- * Mirrors `PROTECTED_BRANCH_RE` (`risk-handlers.ts:555`) — the same list the
+ * Mirrors `PROTECTED_BRANCH_RE` (`risk-handlers.ts:1063`) — the same list the
  * layer-0 `never` for force-pushing a protected branch uses. Kept as a copy rather than
  * an import so this module stays dependency-free; the two must stay in sync.
  */
@@ -64,6 +67,109 @@ const GRAMMARS = new Map<string, TargetGrammar>([
 /** One category segment — callers split compound categories on `+` themselves. */
 export function grammarFor(category: string): "vcs" | "image" | undefined {
 	return GRAMMARS.get(category.trim())
+}
+
+// ------------------------------------------------------------- object storage
+
+/**
+ * An object-storage URI, recognised by SHAPE (scheme, or the account-host form) and never by a tool name:
+ * `gs://bucket/prefix`, `s3://bucket/key` (and the Hadoop `s3a`/`s3n` spellings), Azure blob URLs and the GCS
+ * object URL. Layer 0 imports the same predicate to decide that a verb acted on DATA in a store
+ * (`risk-handlers.ts`), so the two cannot drift.
+ */
+const OBJECT_URI_RE = /^(?:(?:gs|s3[an]?|azure-container|abfs)s?:\/\/[^/\s]+|https?:\/\/[^/\s]*(?:\.blob(?:\.core)?\.windows\.net|\.blob\.dfs\.windows\.net|storage\.googleapis\.com)[/:])[^\s]*$/i
+
+export function isObjectStoreUri(value: string): boolean {
+	return OBJECT_URI_RE.test(value.trim())
+}
+
+/**
+ * The store one object-storage address points at, and how far inside it it reaches.
+ *
+ * `bucket` is the store; `key` is the part after it, so `s3://archive/reports/2024.csv` is the store
+ * `archive` and the key `reports/2024.csv`. The Azure/GCS HTTP forms put the account in the authority and the
+ * CONTAINER in the first path segment, so their store is one level later — the same reading
+ * `risk-handlers.ts` uses to decide that a URI names an object rather than a store.
+ */
+export type ObjectStoreRef = { scheme: string; bucket: string; key?: string }
+
+/** Bucket / container names: the DNS-ish alphabet the three big stores all accept. Machine syntax, checked
+ *  against a stored VALUE (never against a sentence), and the reason a bare word like `archive` can be read
+ *  as a store while `leave that folder alone` cannot. */
+const BUCKET_NAME_RE = /^[a-z0-9][a-z0-9._-]{1,62}$/i
+
+/** Read one side of an object-store match. `undefined` for anything that is not an object address. */
+export function parseObjectStoreTarget(value: string): ObjectStoreRef | undefined {
+	const s = value.trim()
+	if (!s) return undefined
+	const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(s)
+	if (scheme) {
+		if (!isObjectStoreUri(s)) return undefined
+		const rest = s.slice(s.indexOf("//") + 2)
+		const segments = rest.split("/").filter((p) => p !== "")
+		// `https://<account>.blob.core.windows.net/<container>/<blob>` names its store one level deeper than
+		// `s3://<bucket>/<key>`; with no level left the URL names an account, which is not a store.
+		const storeAt = /^https?:\/\//i.test(s) ? 1 : 0
+		const bucket = segments[storeAt]
+		if (bucket === undefined) return undefined
+		const key = segments.slice(storeAt + 1).join("/")
+		return { scheme: scheme[1]!.toLowerCase(), bucket, ...(key ? { key } : {}) }
+	}
+	// A store named in one word — what a user types, and what a row stores when the sentence said
+	// "the archive bucket" and nothing else.
+	if (s.includes("/") || s.includes(":")) return undefined
+	return BUCKET_NAME_RE.test(s) ? { scheme: "", bucket: s } : undefined
+}
+
+/**
+ * Does a stored row reach this object address?
+ *
+ * `archive` covers `s3://archive/anything`; `s3://archive/reports/` covers the keys under that prefix and
+ * nothing else; a row naming a different store covers nothing here. `undefined` means "this pair is not an
+ * object-store pair" — the caller keeps whatever rule it had, which is why a row about a local directory can
+ * never be answered here (the cross-space guard above already refused the path/URI pair, and a plain path is
+ * not an object address).
+ *
+ * A prefix ends at a `/`: `s3://archive/dev` does not reach `s3://archive/development/x`, the same boundary
+ * rule the branch glob and the path scope use.
+ */
+export function objectStoreCovers(rowValue: string, pendingValue: string): boolean | undefined {
+	const pending = parseObjectStoreTarget(pendingValue)
+	if (!pending) return undefined
+	const row = parseObjectStoreTarget(rowValue)
+	if (!row) return undefined
+	if (row.bucket.toLowerCase() !== pending.bucket.toLowerCase()) return false
+	if (row.key === undefined) return true
+	if (pending.key === undefined) return false
+	const prefix = row.key.endsWith("/") ? row.key : `${row.key}/`
+	return pending.key === row.key || pending.key.startsWith(prefix)
+}
+
+/** A value that says "a file on this machine": a leading `/`, `./`, `../` or `~/`. A bare word is neither a
+ *  path nor a URI — people name a bucket prefix that way (`dev/`) — so it is left to the component rule. */
+function isExplicitPath(value: string): boolean {
+	const s = value.trim()
+	return s.startsWith("/") || s.startsWith("./") || s.startsWith("../") || s.startsWith("~/") || s === "." || s === ".."
+}
+
+/**
+ * A bucket and a directory are different places, and no grammar in this module can equate them.
+ *
+ * The bucket verbs were moved onto the effect words, and `delete_data` is now shared by a local data-file
+ * delete and a bucket-object delete. Sharing the NAME must not mean sharing the target space: the component
+ * matcher in `grant-verify.ts` compares `/`-separated runs, so a folder row `./backups/` would otherwise
+ * "cover" `s3://acme-data/backups/x.csv` — a local approval buying a cloud delete. Every matcher consults
+ * this function before its string rule, so the verdict is stated once and applies to all of them.
+ *
+ * Only a pair that is provably cross-space is answered: one side an object URI, the other an explicit
+ * filesystem path. Anything else (`dev/` against `s3://acme-data/dev/`, which is the shape a model's own
+ * `allowed_targets` really has) stays `undefined` and keeps the rule it always had.
+ */
+function crossSpaceVerdict(rowValue: string, pendingValue: string): boolean | undefined {
+	const rowUri = isObjectStoreUri(rowValue)
+	const pendingUri = isObjectStoreUri(pendingValue)
+	if (rowUri === pendingUri) return undefined
+	return isExplicitPath(rowUri ? pendingValue : rowValue) ? false : undefined
 }
 
 // ------------------------------------------------------------------ shared bits
@@ -325,6 +431,10 @@ export function imageCovers(rowValue: string, pendingValue: string): boolean | u
 // ------------------------------------------------------------------ dispatchers
 
 export function coversByGrammar(category: string, rowValue: string, pendingValue: string): boolean | undefined {
+	// The spaces are checked before any grammar: a bucket row can never cover a local path, whatever the
+	// category's own reading of the pair would have said.
+	const cross = crossSpaceVerdict(rowValue, pendingValue)
+	if (cross !== undefined) return cross
 	const grammar = grammarFor(category)
 	if (grammar === "vcs") return vcsCovers(rowValue, pendingValue)
 	if (grammar === "image") return imageCovers(rowValue, pendingValue)

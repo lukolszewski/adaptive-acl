@@ -131,21 +131,21 @@ describe("git push resolves the branch it writes to", () => {
 	})
 })
 
-describe("an artifact push is one intent with two names", () => {
-	it.each(["docker", "podman", "nerdctl"])("%s push asks as container_mutation AND network_send", (bin) => {
+describe("an artifact push is an upload", () => {
+	// A push mutates no container. It reads an artifact and sends it to a registry, so layer 0 names the
+	// effect it is: `network_send` on the image ref. Recorded before the change: models answered the push as
+	// an upload and were over-blocked because the pending row also demanded a container half.
+	it.each(["docker", "podman", "nerdctl"])("%s push asks as network_send on the ref", (bin) => {
 		const d = verdict(`${bin} push myrepo/app:1.0`)
 		expect(d.tier, d.reason).toBe("ask")
-		expect(d.category).toBe("container_mutation+network_send")
+		expect(d.category).toBe("network_send")
 		expect(ents(d)).toEqual(["target:myrepo/app:1.0", "scope:myrepo/app"])
 		expect(d.description).toContain(`${bin} push myrepo/app:1.0`)
 	})
 
-	it("puts both rows on the same raw command", () => {
+	it("is one row on the raw command, and names no container effect", () => {
 		const d = verdict("docker push myrepo/app:1.0")
-		expect(d.segments.map((s) => [s.tier, s.category])).toEqual([
-			["ask", "container_mutation"],
-			["ask", "network_send"],
-		])
+		expect(d.segments.map((s) => [s.tier, s.category])).toEqual([["ask", "network_send"]])
 		expect(new Set(d.segments.map((s) => s.command))).toEqual(new Set(["docker push myrepo/app:1.0"]))
 	})
 
@@ -169,14 +169,14 @@ describe("an artifact push is one intent with two names", () => {
 	it("invents no target when no ref was given", () => {
 		const d = verdict("docker push")
 		expect(d.tier).toBe("ask")
-		expect(d.category).toBe("container_mutation+network_send")
+		expect(d.category).toBe("network_send")
 		expect(d.entities).toEqual([])
 	})
 
 	it("helm push names the oci ref, without its scheme", () => {
 		const d = verdict("helm push mychart-0.1.0.tgz oci://registry.example.com/charts")
 		expect(d.tier, d.reason).toBe("ask")
-		expect(d.category).toBe("container_mutation+network_send")
+		expect(d.category).toBe("network_send")
 		expect(ents(d)).toEqual(["target:registry.example.com/charts", "scope:registry.example.com/charts"])
 		expect(d.description).not.toContain("oci://")
 	})
@@ -184,18 +184,23 @@ describe("an artifact push is one intent with two names", () => {
 	it("oras push names the ref it publishes", () => {
 		const d = verdict("oras push localhost:5000/hello:v1")
 		expect(d.tier, d.reason).toBe("ask")
-		expect(d.category).toBe("container_mutation+network_send")
+		expect(d.category).toBe("network_send")
 		expect(ents(d)).toEqual(["target:localhost:5000/hello:v1", "scope:localhost:5000/hello"])
 	})
 
 	it("does not invent a `gh cr push` — that is not a gh command", () => {
 		const d = verdict("gh cr push myrepo/app")
 		expect(d.category).not.toContain("container_mutation")
-		expect(d.category).not.toBe("container_mutation+network_send")
+		expect(d.category).not.toBe("network_send")
 	})
 
 	it("leaves the container verbs that are not a publish alone", () => {
-		expect(verdict("docker pull myrepo/app:1.0").tier).toBe("allow")
+		// A pull is a read of a registry, so it prompts as a READ — what it must not become is a
+		// publish. The category is the thing this test owns: `network_send` here would put a download in the same
+		// row class as the upload this file is about.
+		const pull = verdict("docker pull myrepo/app:1.0")
+		expect(pull.tier).toBe("ask")
+		expect(pull.category).toBe("read_only")
 		expect(verdict("docker rmi app:prod").category).toBe("container_mutation")
 		expect(verdict("helm uninstall web -n prod").category).toBe("cluster_mutation")
 	})
@@ -237,7 +242,10 @@ describe("pip asks only when it can leave the project env", () => {
 		["pip install -e .", "allow/run_project_code", "allow/run_project_code", "allow/run_project_code"],
 		// not installs
 		["pip uninstall httpx", "ask/package_system", "ask/package_system", "ask/package_system"],
-		["pip list", "allow/read_only", "allow/read_only", "allow/read_only"],
+		// reads of the environment: a project virtualenv is the repo's own files (allow), the interpreter the
+		// machine runs on is not (ask read_only) — hence `env set`, which is what says a venv is active.
+		["pip list", "ask/read_only", "allow/read_only", "ask/read_only"],
+		[".venv/bin/pip list", "ask/read_only", "allow/read_only", "allow/read_only"],
 	]
 
 	it.each(rows)("%s", (cmd, noEnv, envSet, onDisk) => {

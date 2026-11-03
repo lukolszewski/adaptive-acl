@@ -7,7 +7,9 @@
  *
  *   - **allow** is argv matching. Layer 0 (`bash-audit.ts` → the walker) produces the legs of the
  *     command and `bash-rule-argv.ts` asks whether the words a rule names are those legs' words — and,
- *     for a leg that redirects, whether the rule names the file it writes. A
+ *     for a leg that redirects, whether the file it writes is somewhere this session is allowed to
+ *     write at all (the rule may name it, or the redirect target may already be an allowed place:
+ *     {@link redirectAuthority}). A
  *     command layer 0 will not vouch for has no argv, so no rule can cover it and it goes to the prompt;
  *     and where the verdict says the command's risk is the targets its operands name, an exact rule only
  *     covers the invocation it names — no extra target, no added flag;
@@ -30,7 +32,17 @@ import {
 	suggestBashAllowRuleSet,
 } from "./bash-permission-match.ts"
 import { bashRuleView, envChangesExecution, type BashLeg, type BashRuleView } from "./bash-audit.ts"
-import { bashRuleCoversArgv } from "./bash-rule-argv.ts"
+import { bashRuleCoversArgv, type RedirectTarget } from "./bash-rule-argv.ts"
+import { evaluateToolCall } from "./risk-policy.ts"
+import { grantsCover, type GrantStore } from "./session-grants.ts"
+import {
+	ledgerCovers,
+	namedForbidCovers,
+	readOnlyActive,
+	readOnlyLiftedByGrant,
+	type Ledger,
+} from "./auth-ledger.ts"
+import { resolveInheritedPermissionMode } from "./mode-inherit.ts"
 import {
 	pathToolMatchesRuleContent,
 	suggestPathAllowRule,
@@ -60,6 +72,31 @@ export type PermissionVerdict =
 	| { behavior: "allow"; rule: string; source: PermissionRuleSource }
 	| { behavior: "passthrough" }
 
+/**
+ * The session state that decides whether a redirect target is a place a direct `write` / `read` of it
+ * would be allowed.
+ *
+ * A rule is a file and the two questions above are answers about a file; this is the rest of the
+ * answer, and it lives in the session: an approval given at a prompt, a sentence that granted (or
+ * revoked) something, the read-only posture, the mode. `evaluateToolPermission` is handed none of that
+ * by its callers today, so it is handed over here instead of being guessed at. Leaving it out is the
+ * fail-closed reading and still the useful one: a `Write(…)`/`Edit(…)`/`Read(…)` allow rule naming the
+ * target, or the mode's own write area (the project, a temp directory, `/dev/null`), still covers it.
+ */
+export type RedirectAuthority = {
+	/** Session grants: the store the gate consults first when a write is not allowed outright. */
+	grants?: GrantStore
+	/** The authorisation ledger: long-range grants, named forbids and the read-only posture. */
+	ledger?: Ledger
+	/**
+	 * The live mode. Only `plan` changes the answer, and it does so by refusing: plan mode's only write
+	 * area is the plan file, which this layer must not name. Omitted, the process-published mode is read
+	 * (`mode-inherit.ts`, the plugin's live-state channel) — so a caller that passes nothing still cannot
+	 * write through a rule while the session is in plan mode.
+	 */
+	mode?: string
+}
+
 export interface PermissionsConfig {
 	allow?: string[]
 	deny?: string[]
@@ -79,6 +116,15 @@ const PI_TO_CC_TOOL: Record<string, string> = {
 export function mapPiToolToCcTool(toolName: string): string | null {
 	return PI_TO_CC_TOOL[toolName] ?? null
 }
+
+/**
+ * The tool names a rule can be about: the spellings `mapPiToolToCcTool` produces, and nothing else.
+ *
+ * A rule naming anything else (`Bash(npm test)` with its closing paren lost to a trailing space, a
+ * `Grep(…)` ported from a Claude Code settings file) is a line that looks active and matches nothing at
+ * all — the failure `permissions-loader.ts` warns about when it loads one.
+ */
+export const KNOWN_RULE_TOOLS: ReadonlySet<string> = new Set(Object.values(PI_TO_CC_TOOL))
 
 export function rulesFromPermissionsConfig(
 	config: PermissionsConfig,
@@ -194,10 +240,24 @@ function ruleMatchesToolCall(
  *   - strict operands where the verdict says the command's risk is the targets it names: there a rule
  *     has to name every word the call passes, so an approval written for one target cannot be spent on
  *     another (`bash-audit.ts` owns the category table; `bash-rule-argv.ts` owns the matching);
- *   - the redirect targets of each leg (`leg.targets`), which narrow every specifier: a rule that does
- *     not name the file a command writes does not cover that command. Strictness there is not a category
- *     question — `echo hi > ./notes.txt` and `echo hi > ~/.ssh/authorized_keys` are one argv apart, and
- *     the category is what the target *is*, so the answer cannot depend on it.
+ *   - the redirect targets of each leg (`leg.targets`), which decide for every specifier whether the rule
+ *     may speak for a file at all. Two ways a target is cleared, and only two: the rule names it
+ *     (`Bash(echo hi > /tmp/out.txt)`), or a direct `write`/`read` of it would be allowed anyway —
+ *     {@link redirectAuthority}. The second is what makes `Bash(make:*)` cover `make > build.log`: a
+ *     project write needs no approval, so the redirect adds no authority the user did not already have.
+ *     It is not a category question — `echo hi > ./notes.txt` and `echo hi > ~/.ssh/authorized_keys` are
+ *     one argv apart, and the category is what the target *is* — so the check is the path's, not the
+ *     command's:
+ *
+ *       · an output redirect is cleared only when a `write` call on that path would go through without
+ *         asking: an `Edit(…)`/`Write(…)` allow rule, a file or folder write grant, or the mode's own
+ *         write area;
+ *       · an input redirect is a read, and needs what a `read` call needs — which a secret still does
+ *         not have without its own authority;
+ *       · `/dev/null` and descriptor dups are not special cases here: the first is allowed by the same
+ *         table as any other inert sink, the second never reaches this code (`fileTargetsOf`);
+ *       · a runtime target (`> $f`), a secret, live config, or anywhere the allowed area stops is not
+ *         cleared — the command goes back to the gate, which judges the target itself.
  *
  * One verdict per call, and one refusal order: the floor is checked first because it is the cheapest
  * answer and the one that outranks every rule.
@@ -208,6 +268,7 @@ function bashAllowRulesCoverCommand(
 	command: string,
 	rules: PermissionRule[],
 	cwd: string,
+	authority?: RedirectAuthority,
 ): { rules: string[]; source: PermissionRuleSource } | null {
 	const allowRules = rules.filter((r) => r.behavior === "allow")
 	if (allowRules.length === 0) return null
@@ -223,6 +284,7 @@ function bashAllowRulesCoverCommand(
 	if (!view.proven) return null
 	if (view.floored) return null
 
+	const targetAllowed = redirectAuthority(cwd, rules, authority)
 	const covered: string[] = []
 	let source: PermissionRuleSource | undefined
 	for (const leg of view.legs) {
@@ -230,7 +292,7 @@ function bashAllowRulesCoverCommand(
 		if (spellings.length === 0) return null
 		// One coverage question per leg: the strictness flag is the command's (the verdict is not labelled
 		// per leg) and the targets are the leg's (a compound's second clause writes a different file).
-		const coverage = { strictOperands: view.strictOperands, targets: leg.targets }
+		const coverage = { strictOperands: view.strictOperands, targets: leg.targets, targetAllowed }
 		const hit = allowRules.find((r) => spellings.some((argv) => bashRuleCoversArgv(r, argv, coverage)))
 		if (!hit) return null
 		covered.push(`${leg.text} \u2190 ${permissionRuleValueToString(hit.ruleValue)}`)
@@ -260,7 +322,9 @@ function bashAllowRulesCoverCommand(
 function legSpellings(leg: BashLeg): string[][] {
 	if (leg.argv.length === 0) return []
 	if (leg.opaque) return []
-	if (leg.envNames.some(envChangesExecution)) return []
+	// The pair, not just the name: `PAGER=cat` sets a variable and still runs the command (`bash-audit.ts`
+	// {@link envChangesExecution} decides which values are neutral).
+	if (leg.env.some((e) => envChangesExecution(e.name, e.value))) return []
 	const out: string[][] = []
 	const seen = new Set<string>()
 	for (const argv of leg.inner ? [leg.argv, leg.withAssignments, leg.inner] : [leg.argv, leg.withAssignments]) {
@@ -272,11 +336,110 @@ function legSpellings(leg: BashLeg): string[][] {
 	return out
 }
 
+/**
+ * A redirect target, asked the question a direct `write` / `read` tool call on that same path asks.
+ *
+ * The order is the one a real call walks, which is why it is stated once here:
+ *
+ *   1. **the configured rules** — the path tool's own channel, so a `Write(src/**)` or `Read(~/.gnupg/)`
+ *      allow covers it, and a `Write(…)` ask or deny withholds it;
+ *   2. **the mode** — plan mode writes one file, and naming it from here would be inventing a second
+ *      copy of that decision, so a write target is simply not cleared in plan mode;
+ *   3. **the gate's own sync answer** for a direct call ({@link pathAuthorityAllows}): the mode's default
+ *      write area (project, temp), or a stored grant / ledger row / posture that the gate would honour.
+ *      No model call is made here — this runs inside the `tool_call` hook on the hottest path there is —
+ *      so "the gate would have asked the classifier" is not an answer this layer may give.
+ */
+function redirectAuthority(
+	cwd: string,
+	rules: PermissionRule[],
+	authority: RedirectAuthority | undefined,
+): (target: RedirectTarget) => boolean {
+	// A leg is asked about the same file once per spelling per candidate rule; the answer cannot change
+	// inside one call, and `classifyPath` + `decideWrite` should not be paid for each of them.
+	const seen = new Map<string, boolean>()
+	return (target) => {
+		const key = `${target.op}\u0000${target.target}`
+		const known = seen.get(key)
+		if (known !== undefined) return known
+		const answer = resolveRedirectTarget(target, cwd, rules, authority)
+		seen.set(key, answer)
+		return answer
+	}
+}
+
+/** One target, the one question: a direct `write` / `read` of this file, allowed or not? */
+function resolveRedirectTarget(
+	target: RedirectTarget,
+	cwd: string,
+	rules: PermissionRule[],
+	authority: RedirectAuthority | undefined,
+): boolean {
+	const kind = redirectToolOf(target)
+	// 1. the same function a direct write/read call goes through, over the same rule set
+	const byRule = evaluateToolPermission(kind, { path: target.target }, cwd, rules)
+	if (byRule.behavior === "allow") return true
+	if (byRule.behavior !== "passthrough") return false
+	// 2. plan mode's write area is the plan file; a redirect is not how it gets named.
+	if (kind === "write" && (authority?.mode ?? resolveInheritedPermissionMode()) === "plan") return false
+	// 3. everything the gate's tables and stores say about this exact path, without the model
+	return pathAuthorityAllows(kind, target.target, cwd, authority)
+}
+
+/** Which tool call a redirect is: `<` and `<&` read a file, every other operator writes one. */
+function redirectToolOf(target: RedirectTarget): "write" | "read" {
+	return target.op === "<" || target.op === "<&" ? "read" : "write"
+}
+
+/**
+ * Would a direct `write` / `read` of this path run without asking, as far as code can tell?
+ *
+ * This is the synchronous half of `runGate` for one call (`gate.ts`), in the same order and with the same
+ * predicates: tier `allow` (with the user-forbid override), tier `never` refused outright, and tier `ask`
+ * answered only by the session grants, then the ledger, then the read-only posture. The one thing it does
+ * not do is the model call, because there is no endpoint here and because a rule must never be the thing
+ * that spends one.
+ *
+ * The policy is built the way `bash-audit.ts` builds the one layer 0 already used for this command —
+ * `project: cwd` — so a target is classified against the same root the gate's `gatePolicy` carries.
+ */
+function pathAuthorityAllows(
+	kind: "write" | "read",
+	raw: string,
+	cwd: string,
+	authority: RedirectAuthority | undefined,
+): boolean {
+	const home = homedir()
+	const project = cwd
+	const ledger = authority?.ledger
+	const policy = evaluateToolCall(kind, { path: raw }, { cwd, project, home, env: process.env })
+	if (policy.tier === "allow") {
+		// `do not touch /x` binds even where the tables would let the write go through, which is the
+		// override the gate applies before it returns its own allow.
+		return namedForbidCovers(ledger ?? null, policy.entities, home, project, policy.category) === null
+	}
+	if (policy.tier !== "ask") return false
+	if (authority?.grants) {
+		if (grantsCover(authority.grants, policy.category, policy.entities, home, project).covered) return true
+	}
+	if (ledger) {
+		const lv = ledgerCovers(ledger, policy.category, policy.entities, home, project)
+		if (lv.forbidden) return false
+		if (lv.covered) return true
+		// A posture is a user instruction, not a default: it holds here exactly as it holds at the gate.
+		// Read categories are exempt by definition, so only a write can be stopped by it.
+		const ro = readOnlyActive(ledger)
+		if (ro && kind === "write" && !readOnlyLiftedByGrant(ledger, policy.category, policy.entities, ro.seq, home, project)) return false
+	}
+	return false
+}
+
 export function evaluateToolPermission(
 	toolName: string,
 	input: Record<string, unknown>,
 	cwd: string,
 	rules: PermissionRule[],
+	authority?: RedirectAuthority,
 ): PermissionVerdict {
 	const ccTool = mapPiToolToCcTool(toolName)
 	if (!ccTool) {
@@ -299,7 +462,7 @@ export function evaluateToolPermission(
 	if (ccTool === "Bash") {
 		// Allow on argv — and only here. Anything this refuses (an unproven command, an opaque leg, the
 		// never floor) falls to the gate, which has the tables, grants and model to judge it.
-		const all = bashAllowRulesCoverCommand(String(input.command ?? ""), rules, cwd)
+		const all = bashAllowRulesCoverCommand(String(input.command ?? ""), rules, cwd, authority)
 		if (!all) return { behavior: "passthrough" }
 		return { behavior: "allow", rule: all.rules.join("; "), source: all.source }
 	}
@@ -328,7 +491,7 @@ export type AllowRuleSet = {
  *
  * One rule per command leg, so an approval on a compound authorises exactly the compound that was
  * shown — not just its first clause. Destructive verbs contribute an exact rule rather than a prefix,
- * and a leg that no rule can describe (a redirect, a here-document, a run-time value) contributes nothing.
+ * and a leg that no rule can describe (a here-string, a run-time value) contributes nothing.
  *
  * For bash the set is then checked against the very matcher that will have to honour it
  * ({@link bashAllowRulesCoverCommand}) and withheld when it would not: an offer that stores a rule which
@@ -369,7 +532,7 @@ function suggestBashRules(command: string, cwd: string): AllowRuleSet {
 		rules: [],
 		persistable: false,
 		reason:
-			"no rule would cover this command again (a here-document body, a run-time value, or a step that is never auto-approved)",
+			"no rule would cover this command again (a here-string, a run-time value, or a step that is never auto-approved)",
 	}
 }
 
@@ -433,8 +596,11 @@ export function formatMergedRulesForDisplay(rules: PermissionRule[]): string {
 		if (!subset.length) continue
 		lines.push(`${behavior}:`)
 		for (const r of subset) {
+			// A rule whose tool this extension cannot match never fires; `/permissions` is where a user looks
+			// when a rule they wrote does nothing, so it says so there (the loader also warns once on load).
+			const dead = KNOWN_RULE_TOOLS.has(r.ruleValue.toolName) ? "" : "  ← no such tool: this rule never fires"
 			lines.push(
-				`  [${r.source}] ${permissionRuleValueToString(r.ruleValue)}`,
+				`  [${r.source}] ${permissionRuleValueToString(r.ruleValue)}${dead}`,
 			)
 		}
 	}

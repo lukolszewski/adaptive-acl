@@ -147,28 +147,33 @@ describe("the category enum is authoritative, and unverifiable values die", () =
 		expect(GRANT_CATEGORY_VALUES).toContain("other")
 	})
 
-	it('"other" falls through to the legacy table rather than matching nothing silently', () => {
+	it('"other" registers nothing and is counted, never recovered from the label', () => {
 		const quote = "you can push to the remote"
 		const other: GrantsOnly = {
-			grants: [{ action: "push to remote", category: "other", kind: "entity", includesSecrets: false, targets: [], quote }],
+			grants: [{ action: "push to remote", category: "other", kind: "entity", scope: "named", includesSecrets: false, targets: [], quote }],
 		}
 		fold(other, quote)
-		// The only assertions that matter here: "other" is not treated as a category, and the
-		// recovery is attributed to the word list so it is visible in /classifier-status.
+		// The word list is deleted, so there is no recovery to attribute: "other" names no capability,
+		// the row registers nothing, and the only trace is the counter /classifier-status prints.
 		expect(extractionStats.fromSchema).toBe(0)
-		expect(extractionStats.legacyWordList).toBe(1)
+		expect(extractionStats.legacyWordList).toBe(0)
+		expect(extractionStats.unmapped).toBe(1)
 	})
 })
 
-describe("the legacy word list is a counted fallback, not the authorisation path", () => {
-	it("still works when the endpoint returns no category at all", () => {
+describe("the word list is gone: a missing category registers nothing, counted", () => {
+	it("registers nothing when the endpoint returns no category at all", () => {
 		const quote = "you can delete files under /var/tmp/jobs/"
 		const legacy: GrantsOnly = {
 			grants: [{ action: "delete files", targets: ["/var/tmp/jobs/"], quote }],
 		}
-		expect(covers(legacy, quote, "delete_outside", "/var/tmp/jobs/a.txt")).toBe(true)
+		// The row that used to be recovered from the English action table now registers nothing: the
+		// cost is the prompt the user would have got anyway, and the benefit is that a display label is
+		// never authority again.
+		expect(covers(legacy, quote, "delete_outside", "/var/tmp/jobs/a.txt")).toBe(false)
 		expect(extractionStats.fromSchema).toBe(0)
-		expect(extractionStats.legacyWordList).toBe(1)
+		expect(extractionStats.unmapped).toBe(1)
+		expect(extractionStats.legacyWordList).toBe(0)
 	})
 
 	it("and is preferred AGAINST when a real enum value is present", () => {

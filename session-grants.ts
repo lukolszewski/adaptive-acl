@@ -12,7 +12,7 @@
  */
 
 import type { Entity } from "./risk-policy.ts"
-import { canonicalPath, entityMatchesTarget, expandHome } from "./grant-verify.ts"
+import { NO_OBJECT_TARGET, canonicalPath, entityMatchesTarget, expandHome, grantAnswersSegment, grantDirection } from "./grant-verify.ts"
 import { coversByGrammar } from "./target-grammar.ts"
 
 export type SessionGrant = {
@@ -83,6 +83,26 @@ export type GrantRevocation = {
  *  needed for the longest are the cheapest to forget (forgetting one costs at most a
  *  prompt for a re-grant, never a permission). */
 export const MAX_REVOCATIONS = 100
+
+/**
+ * The category that means "every action on the target" — and the one value a GRANT row may never carry.
+ *
+ * A revocation may name every action on one thing ("leave X alone"); a grant may not, because each grant
+ * row is quote-verified and revocable on its own, so a missed grant category costs one prompt while a missed
+ * FORBID category costs an allow. Widening is therefore granted to forbids only, and every door a grant row
+ * comes through refuses the value: the extraction parser (`model-client.parseCategory`, which does not know
+ * it), this file's {@link asGrantRow} and {@link addGrant}, and the matcher (`grantAuthorises` never sees it,
+ * since a row can only reach here if one of those doors let it through).
+ *
+ * Declared here rather than in `auth-ledger.ts` because this module sits below it in the import direction and
+ * both need the same string; `auth-ledger.ts` re-exports it so callers can keep importing one name.
+ */
+export const FORBID_ANY_CATEGORY = "any"
+
+/** Is this category the forbid-only "every action" value? */
+export function isForbidOnlyCategory(category: string): boolean {
+	return category.trim().toLowerCase() === FORBID_ANY_CATEGORY
+}
 
 /** The shape a revocation can be pointed at. `at` is optional because rows written
  *  before revocations existed carry no wall clock, and an undated row is the oldest
@@ -297,6 +317,10 @@ export function asGrantRow(row: unknown): SessionGrant | undefined {
 	if (!g || typeof g !== "object") return undefined
 	if (typeof g.category !== "string" || !g.category) return undefined
 	if (typeof g.value !== "string" || !g.value) return undefined
+	// `any` is a ban, never a permission. A file that names it on a grant row is either old-format
+	// confusion or somebody's hand-edit, and honouring it would hand back the every-action reach reserved
+	// for forbids. Dropping the row costs the prompts the missing grant would have cost anyway.
+	if (isForbidOnlyCategory(g.category)) return undefined
 	const out: SessionGrant = {
 		category: g.category,
 		value: g.value,
@@ -341,6 +365,8 @@ export function addGrant(
 ): void {
 	if (!value) return
 	for (const seg of categoryOf(category)) {
+		// The every-action value is a forbid's, never a session grant's — see `FORBID_ANY_CATEGORY`.
+		if (isForbidOnlyCategory(seg)) continue
 		const held = store.grants.find((g) => g.category === seg && g.value === value && g.kind === kind)
 		if (held) {
 			if (durable) held.durable = true
@@ -392,6 +418,12 @@ function scopeCovers(category: string, scopeValue: string, entity: string, home?
  * Checking only the first segment let a stored `write_outside` stand in for `write_outside+perm_change`,
  * i.e. a content permission silently authorising a privilege change. Requiring all segments is
  * strictly narrower than before, so it can only ever cost an extra prompt - never buy a false allow.
+ *
+ * "Its own grant" means a row the direction table (`grant-verify.ts`) accepts for that segment, not a row whose
+ * category is the same string: a prompt approval of a write is also the read and the single-file delete inside
+ * what it names, and a row filed under a compound carries each of its halves. Matching
+ * exact category equality here would make the store refuse what the ledger grants, and the store is consulted
+ * FIRST - the two must answer the same question the same way.
  */
 export function grantsCover(
 	store: GrantStore,
@@ -400,20 +432,81 @@ export function grantsCover(
 	home?: string,
 	project?: string,
 ): { covered: boolean; by: string[] } {
-	const targets = entities.filter((e) => e.kind === "target").map((e) => e.value)
+	const targets = pendingTargets(entities)
 	const segments = categoryOf(category)
 	if (targets.length === 0 || segments.length === 0) return { covered: false, by: [] }
 	const by: string[] = []
 	for (const seg of segments) {
-		const relevant = store.grants.filter((g) => g.category === seg)
+		const relevant = store.grants.filter((g) => rowIsAbout(g.category, seg))
 		if (relevant.length === 0) return { covered: false, by: [] }
 		for (const t of targets) {
-			const hit = relevant.find((g) => rowCoversTarget(seg, g, t, home, project))
+			const hit = relevant.find((g) => rowAnswers(g, seg, t, home, project))
 			if (!hit) return { covered: false, by: [] }
 			by.push(hit.value)
 		}
 	}
 	return { covered: true, by }
+}
+
+/** Does this stored row answer one pending segment for one target? `grantsCover` and the explanation both ask
+ *  it, so `/grants explain` can never promise a coverage the gate would refuse. */
+function rowAnswers(row: SessionGrant, segment: string, target: string, home?: string, project?: string): boolean {
+	return grantAnswersSegment({
+		grant: row,
+		pendingSegment: segment,
+		target,
+		covers: () => rowCoversTarget(segment, row, target, home, project),
+		space: { home, project },
+	})
+}
+
+/**
+ * The targets a pending action is matched on.
+ *
+ * A targetless ask is matched on {@link NO_OBJECT_TARGET}: its object IS its category (`su`, an interactive
+ * shell, a bare `systemctl`), so the only row that can answer it is the one a prompt stored for exactly that
+ * shape — `{category, "*"}`. Substituting here rather than only in layer 0 keeps the rule true for every
+ * pending that arrives without a target, whatever produced it.
+ *
+ * Only a pending with NO entities at all is targetless. One that carries a touched path or a scope has an
+ * object (the transcript verdict's fallback matches those the same way), so it gets no marker: the marker must
+ * never stand in for an object the gate could see.
+ *
+ * Nothing is widened by it either: a row naming a value does not match the marker (`entityMatchesTarget`), and
+ * an action that names a target never sees the marker at all.
+ */
+function pendingTargets(entities: Entity[]): string[] {
+	const named = entities.filter((e) => e.kind === "target").map((e) => e.value)
+	if (named.length > 0) return named
+	return entities.length === 0 ? [NO_OBJECT_TARGET] : []
+}
+
+/** The targets a pending action names, as written. */
+function statedTargets(entities: Entity[]): string[] {
+	return entities.filter((e) => e.kind === "target").map((e) => e.value)
+}
+
+/** May this stored row be asked about this pending segment at all?
+ *
+ * The row's own category, exactly — plus every direction the table in `grant-verify.ts` names. The exact-category
+ * half is kept rather than widened to a kind group: this store's rows are what the user approved at a PROMPT, the
+ * prompt names one category, and a `delete_recursive` approval answering a `delete_outside` action (or a
+ * `write_sensitive` row answering a `write_outside` one) is a widening nobody asked for. The ledger keeps its
+ * group rule because its rows come from sentences whose category the model chose; here the category is the
+ * user's own answer to a yes/no question.
+ *
+ * "Plus every direction" is not a wider rule, it is the SAME rule: `grantDirection` is what the ledger applies,
+ * and the session store is consulted FIRST, so a direction missing here made a clicked approval weaker than the
+ * same sentence spoken (`delete-gives-write` was the one missing, and it is the direction the gate itself
+ * applies — a delete grant contains writing inside it). Listing the directions by hand is how that drift
+ * happens, so every non-`own` answer is admitted: `own` alone keeps the same-category refusal for the delete
+ * kinds, which is the part this function exists for.
+ */
+function rowIsAbout(rowCategory: string, segment: string): boolean {
+	const direction = grantDirection(rowCategory, segment)
+	if (direction === undefined) return false
+	if (direction === "own") return rowCategory === segment
+	return true
 }
 
 /**
@@ -438,13 +531,17 @@ export function explainGrantsCover(
 	home?: string,
 	project?: string,
 ): string[] {
-	const targets = entities.filter((e) => e.kind === "target").map((e) => e.value)
+	// The stated targets, not the marker substitution: a caller that hands in no targets at all is asking about
+	// an action with no object, and "nothing to match" is the honest answer to exactly that. A targetless action
+	// arriving from the gate carries the marker as its target, so it is explained against the marker like any
+	// other target.
+	const targets = statedTargets(entities)
 	const segments = categoryOf(category)
 	if (segments.length === 0) return [`no category to explain`]
 	if (targets.length === 0) return [`nothing to match: the action names no target`]
 	const lines: string[] = []
 	for (const seg of segments) {
-		const rows = store.grants.filter((g) => g.category === seg)
+		const rows = store.grants.filter((g) => rowIsAbout(g.category, seg))
 		if (rows.length === 0) {
 			lines.push(`segment ${seg} has no rows`)
 			continue
@@ -452,11 +549,11 @@ export function explainGrantsCover(
 		for (const row of rows) {
 			const covers: string[] = []
 			const misses: string[] = []
-			for (const t of targets) (rowCoversTarget(seg, row, t, home, project) ? covers : misses).push(t)
+			for (const t of targets) (rowAnswers(row, seg, t, home, project) ? covers : misses).push(t)
 			if (covers.length > 0) {
-				lines.push(`row ${seg} "${row.value}" (${row.kind}): covers ${covers.join(", ")}`)
+				lines.push(`row ${row.category} "${row.value}" (${row.kind}): covers ${covers.join(", ")}`)
 			} else {
-				lines.push(`rejected: ${seg} "${row.value}" (${row.kind}) — covers none of: ${misses.join(", ")}`)
+				lines.push(`rejected: ${row.category} "${row.value}" (${row.kind}) — covers none of: ${misses.join(", ")}`)
 			}
 		}
 	}

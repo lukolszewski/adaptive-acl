@@ -157,7 +157,7 @@ export interface ClassifierConfig {
 	/** Backfill cap: only the newest N user messages are ever extracted (default 400). */
 	ledgerBackfillLimit?: number
 	/** The model's context window in tokens; every classifier call is sized to fit it;
-	 *  default 4096 — what `gate-model` is served with. */
+	 *  default 4096. */
 	contextTokens?: number
 	/** Copilot-only behaviour (answer reserve, thinking effort, allowance cap, Auto session), always filled by
 	 *  {@link resolveClassifierConfig}. Read ONLY on a `github-copilot/…` endpoint — nothing on the

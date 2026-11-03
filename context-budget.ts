@@ -5,7 +5,7 @@
  *
  * How big a classifier call is allowed to be — the one place that knows.
  *
- * `gate-model` is served with a **4 096-token context** and that number is fixed by the user, so a
+ * A small local classifier is typically served with a **4 096-token context**, fixed by the user, so a
  * request has to be sized to fit *before* it leaves the process. The gates used to cap their
  * history in characters (15 000 of them), which has no relationship at all to a token window: a
  * long session produced a 5 662-token request from 15 000 characters and the server answered
@@ -25,7 +25,7 @@
  * model sees a gap in the conversation it has no way to know about.
  */
 
-/** What `gate-model` is served with. Not a guess and not negotiable at runtime: no probing. */
+/** The default window when none is configured. Not a guess and not negotiable at runtime: no probing. */
 export const DEFAULT_CONTEXT_TOKENS = 4096
 
 /** Characters per token, pessimistic. Measured 2.65 on the request that overflowed. */

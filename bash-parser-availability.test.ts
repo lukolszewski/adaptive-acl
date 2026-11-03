@@ -40,6 +40,16 @@ async function freshParser(): Promise<typeof import("./bash-parser.ts")> {
 	return (await import("./bash-parser.ts")) as typeof import("./bash-parser.ts")
 }
 
+/**
+ * Every test here compiles the grammar from scratch, because `vi.resetModules()` drops the module that holds the
+ * one-time init. Measured over repeated isolated runs of this file, the per-run test time is bimodal: usually
+ * ~0.55 s, occasionally 5 s and once 8.4 s, which is the wasm instantiate racing the transform of the same
+ * module. vitest's 5 s default is therefore INSIDE the tail, so the same test fails at random — the failure
+ * lands on whichever test happened to be running, not on any particular assertion. Budget, not assertion: what
+ * these tests claim is unchanged, only the time they are allowed to take to say it.
+ */
+const GRAMMAR_LOAD_TIMEOUT = 20_000
+
 /** The `.wasm` files that sit next to `bash-parser.ts` — the packaged layout's only source for the grammar. */
 function grammarBesideModule(): string[] {
 	const dir = path.join(HERE, GRAMMAR_DIR)
@@ -142,7 +152,7 @@ function askWhileDown(audit: typeof import("./bash-audit.ts"), policy: typeof im
 	}
 }
 
-describe("bashParserStatus: availability is observable", () => {
+describe("bashParserStatus: availability is observable", { timeout: GRAMMAR_LOAD_TIMEOUT }, () => {
 	it("walks untried -> initialising -> ready, and is available only in the last", async () => {
 		const mod = await freshParser()
 
@@ -189,7 +199,7 @@ describe("bashParserStatus: availability is observable", () => {
 	})
 })
 
-describe("packaged layout: the grammar has to resolve from the artifact", () => {
+describe("packaged layout: the grammar has to resolve from the artifact", { timeout: GRAMMAR_LOAD_TIMEOUT }, () => {
 	it("ships the grammar at the exact path the shipped module probes", () => {
 		const manifest = JSON.parse(readText(MANIFEST)) as { files?: string[] }
 		const patterns = manifest.files ?? []
@@ -259,28 +269,36 @@ describe("packaged layout: the grammar has to resolve from the artifact", () => 
 	})
 })
 
-describe("blast radius: an unavailable analyzer stops deciding, for every command", () => {
+describe("blast radius: an unavailable analyzer stops deciding, for every command", { timeout: GRAMMAR_LOAD_TIMEOUT }, () => {
 	/**
 	 * The hazard, pinned so nobody "fixes" it by defaulting to allow: with no parser, layer 0 cannot clear even a
 	 * `cat` of one literal file. The fix is to make that observable (this file) — never to let an unanalyzed
 	 * command through.
 	 */
-	it("turns a literal cat from allow/read_only into unknown/unproven_structure + parser-unavailable", async () => {
+	it("turns a literal cat's verdict into no verdict at all + parser-unavailable", async () => {
 		const parser = await freshParser()
 		const audit = (await import("./bash-audit.ts")) as typeof import("./bash-audit.ts")
 		const policy = (await import("./risk-policy.ts")) as typeof import("./risk-policy.ts")
 
 		await parser.initBashParser()
 		const withParser = askWhileDown(audit, policy, LITERAL_READ)
-		expect(withParser.decision.tier).toBe("allow")
+		// `/tmp` is outside the project for READS, so the layer-0 answer for `cat /tmp/x` is a
+		// prompt rather than a free pass. The property this test exists for is unchanged: with a grammar the
+		// command gets a VERDICT, without one it gets no verdict at all.
+		expect(withParser.decision.tier).toBe("ask")
 		expect(withParser.decision.category).toBe("read_only")
 		expect(withParser.audit.proven).toBe(true)
 
 		// The steady state of a grammar that never loaded: disposed, so nothing is in flight and nothing is live.
 		parser.disposeBashParser()
 		const down = askWhileDown(audit, policy, LITERAL_READ)
-		expect(down.decision.tier).toBe("unknown")
-		expect(down.decision.category).toBe("unproven_structure")
+		// The tier moved: the lexer already gates an outside read, and an unverified structure must not
+		// make a command CHEAPER than the tables decided — nor is it widened to `unknown`, because a classifier can
+		// wave an `unknown` through while an `ask` needs a human. What the missing grammar costs is the VERDICT:
+		// `proven` false, and the denial says the analyzer is what failed, not a rule.
+		expect(down.decision.tier).toBe("ask")
+		expect(down.decision.tier).not.toBe("allow")
+		expect(down.decision.category).toBe("read_only")
 		expect(down.decision.segments.some((s) => s.description.includes(parser.PARSER_UNAVAILABLE_REASON))).toBe(true)
 		expect(down.audit).toEqual({ proven: false, reason: parser.PARSER_UNAVAILABLE_REASON })
 		expect(down.view).toEqual({ proven: false, reason: parser.PARSER_UNAVAILABLE_REASON })
@@ -325,7 +343,7 @@ describe("blast radius: an unavailable analyzer stops deciding, for every comman
 	})
 })
 
-describe("refusal wording: who is at fault", () => {
+describe("refusal wording: who is at fault", { timeout: GRAMMAR_LOAD_TIMEOUT }, () => {
 	it("says the analyzer is down instead of blaming the command", async () => {
 		const audit = (await import("./bash-audit.ts")) as typeof import("./bash-audit.ts")
 		const parser = await freshParser()
@@ -344,7 +362,7 @@ describe("refusal wording: who is at fault", () => {
 	})
 })
 
-describe("the advice a denial carries follows the cause (D54 §1 x D56)", () => {
+describe("the advice a denial carries follows the cause", { timeout: GRAMMAR_LOAD_TIMEOUT }, () => {
 	/**
 	 * One module owns the analyzer-down sentence in `risk-policy.ts`, another owns which advice a denial prints and picks it by
 	 * reading the §12 id out of the segment description. Each half passes alone, so the seam is what breaks: paraphrase

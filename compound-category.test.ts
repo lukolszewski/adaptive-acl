@@ -16,6 +16,11 @@ import { evaluateBash, type PolicyOptions } from "./risk-policy.ts";
 // Fix shape: requirements use a UNION over segments (any delete arms the verb gate),
 // exemptions use an INTERSECTION (all must be exempt). Both are monotone, so the
 // change cannot loosen anything.
+//
+// The verb gate this file's middle describe used to exercise is gone — a row reaches only its
+// own kind group, so the ORDER property below is now about segment coverage, not about which
+// half armed the word check. The order-independence is still the thing being pinned; only the
+// expected verdicts changed.
 
 const opts: PolicyOptions = { cwd: "/tmp/proj", fs: false };
 
@@ -48,7 +53,7 @@ describe("compoundHas / compoundAll are order-independent", () => {
 	});
 });
 
-describe("delete-verb gate no longer depends on segment order", () => {
+describe("a delete segment inside a granted scope, in either order", () => {
 	// Real entities from the real analyzer, not hand-built fixtures.
 	const verdicts = evaluateBash("mv /x/x/a /x/x/b", opts);
 	const entities = verdicts.entities;
@@ -59,39 +64,54 @@ describe("delete-verb gate no longer depends on segment order", () => {
 	});
 
 	for (const category of ["write_outside+delete_outside", "delete_outside+write_outside"]) {
-		it(`${category}: a write grant alone cannot authorise the delete half`, () => {
+		it(`${category}: a write grant answers the single-file delete half`, () => {
 			const ledger = createLedger();
 			ledger.grants.push(grant("put the files under /x/x"));
 			const v = ledgerCovers(ledger, category, entities);
-			expect(v.covered, `order ${category} must require the delete verb`).toBe(false);
+			expect(v.covered, `order ${category}: a single-file delete inside the granted scope`).toBe(true);
 		});
 
-		it(`${category}: a quote naming the action still authorises it`, () => {
+		it(`${category}: …and the quote's wording is still not what answers it`, () => {
+			// This pair used to be refused outright: "a delete needs a row the model filed under a delete
+			// category". Exactly ONE shape of it is now open, as a rule about the category and the target —
+			// removing a single file is part of editing it, and `mv` is delete+write — so a `write_outside`
+			// row over /x/x/ answers the `delete_outside` half.
+			//
+			// What is still NOT true, and is the reason this is not a word list in disguise: the sentence buys
+			// nothing a category rule did not already give it. A recursive delete under the same row and the
+			// same words is refused (asserted here, and once more in the exclusions below).
 			const ledger = createLedger();
 			ledger.grants.push(grant("rm everything under /x/x"));
 			expect(ledgerCovers(ledger, category, entities).covered).toBe(true);
+			expect(ledgerCovers(ledger, "delete_recursive", entities).covered).toBe(false);
 		});
 	}
 
-	it("a quote naming the move authorises the move-produced delete half", () => {
-		// mv/move/rename are what actually produce the delete_outside half of a move,
-		// so they have to satisfy the gate that half arms.
+	it("a quote naming the move is no longer what decides the move's delete half", () => {
+		// mv/move/rename used to satisfy the delete-verb gate from the quote text, and that read is gone.
+		// The verdict now comes from the category rule whether or not the sentence says "move", and the
+		// three excluded cases are refused whatever it says.
 		const ledger = createLedger();
 		ledger.grants.push(grant("move the config under /x/x"));
 		expect(ledgerCovers(ledger, "delete_outside+write_outside", entities).covered).toBe(true);
 		expect(ledgerCovers(ledger, "write_outside+delete_outside", entities).covered).toBe(true);
+		expect(ledgerCovers(ledger, "delete_recursive", entities).covered).toBe(false);
+		expect(ledgerCovers(ledger, "delete_data", entities).covered).toBe(false);
 	});
 
-	it("a quote with no destructive verb still does not", () => {
+	it("a quote that names nothing at all gets the same verdict: the quote is not the evidence", () => {
+		// The row's category and the target are. A sentence about keeping things where they are would never have
+		// earned the row in the first place — the extraction prompt and the verbatim quote check own that end.
 		const ledger = createLedger();
 		ledger.grants.push(grant("keep the config where it is"));
-		expect(ledgerCovers(ledger, "delete_outside+write_outside", entities).covered).toBe(false);
+		expect(ledgerCovers(ledger, "delete_outside+write_outside", entities).covered).toBe(true);
+		expect(ledgerCovers(ledger, "delete_recursive", entities).covered).toBe(false);
 	});
 
-	it("delete-only verbs satisfy the gate", () => {
-		// These words can only ever accompany a deletion, so unlike `move` they add no
-		// ordinary-English false-positive path. Pinned so a future tidy-up does not drop
-		// them and re-create an unsatisfiable gate for rmdir/unlink/trash/shred.
+	it("delete-flavoured wording buys no RECURSIVE delete, whatever it says", () => {
+		// These words used to be the strongest entries in the delete-verb table, and they still buy nothing a
+		// category rule does not: the single-file verdict is identical for every one of them, and a recursive
+		// delete under a content row stays refused.
 		for (const quote of [
 			"unlink the socket under /x/x",
 			"rmdir the old folder under /x/x",
@@ -101,17 +121,32 @@ describe("delete-verb gate no longer depends on segment order", () => {
 			const ledger = createLedger();
 			ledger.grants.push(grant(quote));
 			expect(ledgerCovers(ledger, "delete_outside+write_outside", entities).covered, quote).toBe(true);
+			expect(ledgerCovers(ledger, "delete_recursive", entities).covered, quote).toBe(false);
 		}
 	});
 
-	it("accepted trade-off: the word 'move' alone satisfies the verb requirement", () => {
-		// Pinned on purpose. "move" is ordinary English, so an unrelated grant quote
-		// that happens to target this path can satisfy the delete-verb check. The
-		// remaining bound is valueCovers on the grant target, not the wording. If this
-		// ever needs tightening, tighten the verb-to-category binding, not the gate.
+	it("the recorded 'move' trade-off is gone: ordinary English decides nothing", () => {
+		// Kept as the same pin, with the verdict the category rule gives it: a sentence containing
+		// "move" behaves exactly like one that contains no destructive word at all, so a re-added word list
+		// shows up here as a differing verdict.
 		const ledger = createLedger();
 		ledger.grants.push(grant("move on to the next step"));
 		expect(ledgerCovers(ledger, "delete_outside+write_outside", entities).covered).toBe(true);
+		expect(ledgerCovers(ledger, "delete_recursive", entities).covered).toBe(false);
+	});
+
+	it("the three refusals that remain: recursive, data, and the granted folder itself", () => {
+		const ledger = createLedger();
+		ledger.grants.push(grant("put the files under /x/x"));
+		// A file INSIDE the scope is removable…
+		expect(ledgerCovers(ledger, "delete_outside", [{ kind: "target", value: "/x/x/a" }] as never).covered).toBe(true);
+		// …the folder the row was granted over is not.
+		expect(ledgerCovers(ledger, "delete_outside", [{ kind: "target", value: "/x/x" }] as never).covered).toBe(false);
+		// A file grant removes that file, not its sibling.
+		const oneFile = createLedger();
+		oneFile.grants.push({ ...grant("put the file at /x/x/a"), value: "/x/x/a", kind: "entity" });
+		expect(ledgerCovers(oneFile, "delete_outside", [{ kind: "target", value: "/x/x/a" }] as never).covered).toBe(true);
+		expect(ledgerCovers(oneFile, "delete_outside", [{ kind: "target", value: "/x/x/b" }] as never).covered).toBe(false);
 	});
 
 	it("both orders reach the same verdict", () => {
@@ -125,11 +160,10 @@ describe("delete-verb gate no longer depends on segment order", () => {
 		expect(a).toBe(b);
 	});
 
-	it("the delete-verb gate is still category-wide now that segments are matched separately", () => {
-		// Per-segment matching means each half CAN be answered by its own row. That is not the same as
-		// each half getting its own verb gate: the delete gate is computed over the whole pending
-		// (`compoundHas`, unchanged), so a row whose sentence never mentioned destruction cannot answer
-		// any segment of a pending that destroys.
+	it("every segment of a compound is answered by its own row, with no category-wide verb gate", () => {
+		// Per-segment matching, and now per-segment AUTHORITY: the delete gate that used to be computed
+		// over the whole pending (`compoundHas`) is deleted, so a compound is covered when each half has
+		// a row in its own kind group. No row is any longer asked for a destructive word.
 		const rows = (rowsIn: Array<{ category: string; quote: string }>) => {
 			const ledger = createLedger();
 			rowsIn.forEach((r, i) => {
@@ -146,9 +180,10 @@ describe("delete-verb gate no longer depends on segment order", () => {
 		};
 		const oneTarget = [{ kind: "target", value: "/x/x/a" }] as never;
 
-		// The isolation: only the `perm_change` row can answer the chmod half (privilege is never
-		// reached from another group), and its sentence carries no destructive verb. Under a
-		// per-segment gate this compound would be covered; category-wide, it is not.
+		// Two rows, each in its own kind group, answer the two halves — this used to be refused because
+		// neither sentence was about the other half's destruction. Coverage still needs BOTH rows: the
+		// perm_change row cannot answer the delete half and the delete row cannot answer the chmod half
+		// (the next assertion). Direction is pinned, only its polarity moved.
 		expect(
 			ledgerCovers(
 				rows([
@@ -158,11 +193,10 @@ describe("delete-verb gate no longer depends on segment order", () => {
 				"perm_change+delete_outside",
 				oneTarget,
 			).covered,
-		).toBe(false);
+		).toBe(true);
 
-		// A single destructive row is not enough either: the chmod half still needs a row that answers
-		// the privilege group, and only a sentence naming the destruction is allowed to answer anything
-		// under this pending.
+		// A single destructive row is not enough: the chmod half still needs a row in the privilege
+		// group, and no row reaches across kind groups.
 		expect(
 			ledgerCovers(
 				rows([{ category: "delete_outside", quote: "rm /x/x/a whenever you like" }]),
@@ -170,7 +204,8 @@ describe("delete-verb gate no longer depends on segment order", () => {
 				oneTarget,
 			).covered,
 		).toBe(false);
-		// Both halves present, each row's own sentence naming the destruction: covered.
+		// Both halves present, the first row's sentence now including "rm": same verdict as above, and
+		// the wording is irrelevant to it.
 		expect(
 			ledgerCovers(
 				rows([

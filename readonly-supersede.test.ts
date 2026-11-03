@@ -16,6 +16,11 @@
  *     lift it: it landed as write_outside (kind group fs-write) while the write
  *     classifies as write_sensitive (group secret) because /usr/bin is a
  *     sensitive prefix, and the lift required group equality.
+ *
+ * Every extraction payload below is recorded model output for the message quoted beside it — the same
+ * call the gate makes — because the fields the code now reads (`scope`, `category`, `kind`) only mean what
+ * the model's own answers say they mean. Where a payload is deliberately NOT what the model returns, the
+ * comment says so and it is a garbage-input pin.
  */
 import { describe, expect, it } from "vitest"
 import {
@@ -49,22 +54,28 @@ const TARGET = "/usr/bin/gettemp.py"
 
 describe("read-only posture must not arm on a non-mutation complaint", () => {
 	it("a blanket complaint about searching does NOT arm the posture", () => {
+		// Recorded row, verbatim. The posture is armed by `scope: "everything"` and by nothing else, so a
+		// scoping complaint that the model files as `scope: "category"` under `read_only` cannot lock the
+		// session — which is the defect this file exists for, now closed by a field instead of by three
+		// regexes guessing what the sentence was about.
 		const ev = eventsFromExtraction(
-			{ grants: [], revocations: [{ action: "search home", targets: [], all: true, quote: RO_QUOTE }] },
+			{ grants: [], revocations: [{ action: "search files", category: "read_only", scope: "category", targetClass: "none", targets: [], all: true, quote: RO_QUOTE }] },
 			"m73", 73, RO_QUOTE,
 		)
 		const l = createLedger()
 		applyEvents(l, ev)
 		expect(readOnlyActive(l)).toBeNull()
-		// the sentence is kept for audit, but under an inert `*action*` category
-		// that can never match a gate category
-		expect(l.forbids.length).toBe(1)
-		expect(l.forbids[0]!.category).toMatch(/^\*.*\*$/)
+		expect(l.readOnlyOn).toBeUndefined()
+		// One row, and it is a ban on READING, not a session lock: the sentence named reads, so that is
+		// as far as it reaches. A write in the same path space is untouched.
+		expect(l.forbids).toHaveLength(1)
+		expect(l.forbids[0]!.category).toBe("read_only")
 		expect(ledgerCovers(l, "write_outside", [T("/home/u/notes.md")]).forbidden).toBe(false)
+		expect(ledgerCovers(l, "read_only", [T("/home/u/notes.md")]).forbidden).toBe(true)
 	})
 	it("still ARMS on 'stop, don't run anything risky anymore' (fail-safe kept)", () => {
 		const ev = eventsFromExtraction(
-			{ grants: [], revocations: [{ action: "risky work", targets: [], all: true, quote: "stop, don't run anything risky anymore" }] },
+			{ grants: [], revocations: [{ action: "run risky work", category: "other", scope: "everything", targetClass: "none", targets: [], all: true, quote: "stop, don't run anything risky anymore" }] },
 			"m1", 50, "stop, don't run anything risky anymore",
 		)
 		const l = createLedger()
@@ -73,12 +84,26 @@ describe("read-only posture must not arm on a non-mutation complaint", () => {
 	})
 	it("still ARMS on an explicit read-only instruction", () => {
 		const ev = eventsFromExtraction(
-			{ grants: [], revocations: [{ action: "work", targets: [], all: true, quote: "read only, do not change anything" }] },
+			{ grants: [], revocations: [{ action: "make changes", category: "other", scope: "everything", targetClass: "none", targets: [], all: true, quote: "do not change anything" }] },
 			"m1", 5, "read only, do not change anything",
 		)
 		const l = createLedger()
 		applyEvents(l, ev)
 		expect(readOnlyActive(l)?.seq).toBe(5)
+	})
+	it("a row with no usable width never arms the posture either", () => {
+		// Garbage pin: `scope` missing, junk, or a width this file does not know keeps the
+		// sentence as a defused forbid. The cost is one model call on any older grant; it is never a lock
+		// and never an allow.
+		for (const junk of [undefined, "", "ALL", "everything-ish"]) {
+			const l = createLedger()
+			applyEvents(l, eventsFromExtraction(
+				{ grants: [], revocations: [{ action: "work", category: "other", ...(junk ? { scope: junk } : {}), targetClass: "none", targets: [], quote: "read only, do not change anything" }] },
+				"m1", 5, "read only, do not change anything",
+			))
+			expect(readOnlyActive(l), String(junk)).toBeNull()
+			expect(l.forbids.map((f) => f.category), String(junk)).toEqual(["*unknown*"])
+		}
 	})
 })
 
@@ -138,44 +163,61 @@ describe("a later named permission supersedes the posture (session replay)", () 
 	})
 })
 
-describe("a directory permission covers the directory (not one file)", () => {
+describe("a directory permission covers the directory, and only the model says it does", () => {
 	const WT = "/home/u/dev/wt"
-	const wtQuote = "you are allowed to create a new worktree in /home/u/dev/wt for this"
+	// Recorded for "you can write into /home/u/dev/wt": `kind: "scope"` is the model's own answer, and it
+	// is the ONLY source of a folder permission.
+	const wtQuote = "you can write into /home/u/dev/wt"
+	const wtRow = { action: "write files", category: "write_outside", kind: "scope", scope: "named", includesSecrets: false, targets: [WT], quote: wtQuote }
 
-	it("extracts a scope grant from a location preposition", () => {
-		const ev = eventsFromExtraction(
-			{ grants: [{ action: "write files", targets: [`${WT}/auth-ledger.ts`], quote: wtQuote }], revocations: [] },
-			"m1", 1, wtQuote,
-		)
+	it("extracts the folder from `kind: \"scope\"`, not from a location preposition", () => {
+		const ev = eventsFromExtraction({ grants: [wtRow], revocations: [] }, "m1", 1, wtQuote)
 		const scope = ev.find((e) => e.kind === "scope")
 		expect(scope?.value).toBe(`${WT}/`)
 	})
 	it("and that scope then covers a file never mentioned before", async () => {
 		const l = createLedger()
-		applyEvents(l, eventsFromExtraction(
-			{ grants: [{ action: "write files", targets: [`${WT}/auth-ledger.ts`], quote: wtQuote }], revocations: [] },
-			"m1", 1, wtQuote,
-		))
+		applyEvents(l, eventsFromExtraction({ grants: [wtRow], revocations: [] }, "m1", 1, wtQuote))
 		const r = await runGate("write", { path: `${WT}/brand-new-file.ts`, content: "x" }, { policy: POLICY, ledger: l })
 		expect(r.outcome).toBe("allow-granted")
 	})
+	it("a sentence the model marks `entity` records ONE row, not the folder row the regex invented", () => {
+		// Recorded: "you are allowed to create a new worktree in /home/u/dev/wt for this" comes back
+		// `kind: "entity"` with the folder as its target. The deleted location-preposition rule used to
+		// emit a second, folder-shaped row anyway, so `/grants` showed a scope the user never agreed to.
+		// Measured here rather than asserted from the diff: the entity row still reaches files inside the
+		// folder, because `entityMatchesTarget` matches component runs — so what the deleted rule bought
+		// was a second spelling of the same authority, and what its removal costs is nothing at the gate.
+		const quote = "you are allowed to create a new worktree in /home/u/dev/wt for this"
+		const ev = eventsFromExtraction(
+			{ grants: [{ action: "create worktree", category: "write_outside", kind: "entity", scope: "named", includesSecrets: false, targets: [WT], quote: "create a new worktree in /home/u/dev/wt for this" }], revocations: [] },
+			"m1", 1, quote,
+		)
+		expect(ev.map((e) => `${e.kind}:${e.value}`)).toEqual(["entity:/home/u/dev/wt"])
+		const l = createLedger()
+		applyEvents(l, ev)
+		expect(ledgerCovers(l, "write_outside", [T(`${WT}/brand-new-file.ts`)], "/home/u").covered).toBe(true)
+		expect(ledgerCovers(l, "write_outside", [T(WT)], "/home/u").covered).toBe(true)
+		// …and it is still bounded to that folder: the sibling directory is not behind this row.
+		expect(ledgerCovers(l, "write_outside", [T("/home/u/dev/other/x.ts")], "/home/u").covered).toBe(false)
+	})
 	it("a read permission scopes as a READ, never as a write", () => {
 		const ev = eventsFromExtraction(
-			{ grants: [{ action: "read files", targets: ["/etc/hosts"], quote: "you can read files in /etc" }], revocations: [] },
+			{ grants: [{ action: "read files", category: "read_only", kind: "scope", scope: "named", includesSecrets: false, targets: ["/etc"], quote: "you can read files in /etc" }], revocations: [] },
 			"m1", 1, "you can read files in /etc",
 		)
-		// Updated: reads DO now produce a folder scope (that was the point — "read everything
-		// in /etc" used to record nothing usable). What must never happen is that scope being
-		// a write-shaped row. The semantic guarantee — a read scope cannot authorise a write —
-		// is pinned in grant-extraction-baseline.test.ts against the matcher itself, which is
-		// stronger than pinning the absence of a row here.
+		// Reads DO produce a folder scope (that was the point — "read everything in /etc" used to record
+		// nothing usable). What must never happen is that scope being a write-shaped row. The semantic
+		// guarantee — a read scope cannot authorise a write — is pinned in
+		// grant-extraction-baseline.test.ts against the matcher itself, which is stronger than pinning the
+		// absence of a row here.
 		expect(ev.some((e) => e.kind === "scope")).toBe(true)
 		expect(ev.filter((e) => e.kind === "scope").every((e) => e.category === "read_only")).toBe(true)
 	})
-	it("a named FILE without a location preposition stays a file grant", () => {
+	it("a named FILE with no `kind: \"scope\"` stays a file grant", () => {
 		const ev = eventsFromExtraction(
-			{ grants: [{ action: "write", targets: [`${WT}/one.ts`], quote: `you can write ${WT}/one.ts` }], revocations: [] },
-			"m1", 1, `you can write ${WT}/one.ts`,
+			{ grants: [{ action: "write file", category: "write_project", kind: "entity", scope: "named", includesSecrets: false, targets: [`${WT}/one.ts`], quote: `you can write into ${WT}/one.ts` }], revocations: [] },
+			"m1", 1, `you can write into ${WT}/one.ts`,
 		)
 		expect(ev.some((e) => e.kind === "scope")).toBe(false)
 	})
@@ -228,20 +270,36 @@ describe("temp dirs need no grant, even under read-only posture", () => {
 })
 
 describe("compound permission: 'use sudo to write to that file'", () => {
-	it("records the privilege half alongside the write", () => {
-		const ev = eventsFromExtraction(
-			{
-				grants: [{ action: "write file", targets: [TARGET], quote: GRANT_QUOTE }],
-				revocations: [],
-			},
-			"m77", 77, GRANT_QUOTE,
-		)
-		expect(ev.some((e) => e.type === "grant" && e.category === "privilege" && e.value === TARGET)).toBe(true)
-		expect(ev.some((e) => e.type === "grant" && e.value === TARGET)).toBe(true)
+	// Recorded: the model answers GRANT_QUOTE with ONE ROW PER EFFECT — the write, the elevation, and
+	// the backup the user made a condition. The code used to synthesise the elevation half from
+	// `/\bsudo\b|\bsu -\b|\bas root\b|\belevat\w*/i` run over the quote; that inference (HOW something was
+	// done, read as permission for it) is deleted, and the sibling row is what arrives instead.
+	const recordedGrantRows = [
+		{ action: "write file", category: "write_sensitive", kind: "entity", scope: "named", includesSecrets: false, targets: [TARGET], quote: "apply that fix to /usr/bin/gettemp.py" },
+		{ action: "run with elevated privileges", category: "privilege", kind: "entity", scope: "named", includesSecrets: false, targets: ["sudo"], quote: "I give you permission to use sudo" },
+		{ action: "copy file", category: "read_only", kind: "entity", scope: "named", includesSecrets: false, targets: [TARGET], quote: "providing you make a backup first" },
+	]
+
+	it("records the elevation half as its own row", () => {
+		const ev = eventsFromExtraction({ grants: recordedGrantRows, revocations: [] }, "m77", 77, GRANT_QUOTE)
+		expect(ev.some((e) => e.type === "grant" && e.category === "privilege")).toBe(true)
+		expect(ev.some((e) => e.type === "grant" && e.category === "write_sensitive" && e.value === TARGET)).toBe(true)
+	})
+	it("and does NOT widen the write row into an elevation grant", () => {
+		// What the deleted regex used to add: `privilege` over the FILE, from the method word inside the
+		// quote. The recorded elevation row names the tool (`"sudo"`), which no path target can equal, so
+		// a sudo'd follow-up costs one prompt rather than being auto-allowed off a sentence that named the
+		// file. Reported as an outcome change: the fix belongs to the extraction prompt's "a tool name is
+		// never a name" rule, not to a regex in the matcher's path.
+		const ev = eventsFromExtraction({ grants: recordedGrantRows, revocations: [] }, "m77", 77, GRANT_QUOTE)
+		expect(ev.filter((e) => e.category === "privilege").map((e) => e.value)).toEqual(["sudo"])
+		const l = createLedger()
+		applyEvents(l, ev)
+		expect(ledgerCovers(l, "privilege", [T(TARGET)]).covered).toBe(false)
 	})
 	it("does not invent a privilege grant when sudo was not mentioned", () => {
 		const ev = eventsFromExtraction(
-			{ grants: [{ action: "write file", targets: ["/home/u/proj/a.ts"], quote: "you can write to /home/u/proj/a.ts" }], revocations: [] },
+			{ grants: [{ action: "write file", category: "write_project", kind: "entity", scope: "named", includesSecrets: false, targets: ["/home/u/proj/a.ts"], quote: "you can write to /home/u/proj/a.ts" }], revocations: [] },
 			"m1", 1, "you can write to /home/u/proj/a.ts",
 		)
 		expect(ev.some((e) => e.category === "privilege")).toBe(false)
@@ -259,12 +317,12 @@ describe("a revocation reaches everywhere its grant reached (eval case L-02)", (
 	const revokeQuote = "actually stop - do not delete anything under ~/scratch-data anymore"
 	const grantEvent = () =>
 		eventsFromExtraction(
-			{ grants: [{ action: "delete files", category: "delete_recursive", kind: "scope", includesSecrets: false, targets: ["~/scratch-data"], quote: grantQuote }], revocations: [] } as never,
+			{ grants: [{ action: "delete files", category: "delete_outside", kind: "scope", scope: "named", includesSecrets: false, targets: ["~/scratch-data"], quote: grantQuote }], revocations: [] } as never,
 			"m1", 1, grantQuote,
 		)
 	const revokeEvents = () =>
 		eventsFromExtraction(
-			{ grants: [], revocations: [{ action: "delete files", targets: ["~/scratch-data"], all: false, quote: revokeQuote }] } as never,
+			{ grants: [], revocations: [{ action: "delete files", category: "delete_outside", scope: "named", targetClass: "none", targets: ["~/scratch-data"], all: false, quote: "do not delete anything under ~/scratch-data anymore" }] } as never,
 			"m2", 2, revokeQuote,
 		)
 	const run3: Entity[] = [{ kind: "target", value: "~/scratch-data/run3" }]
@@ -286,5 +344,9 @@ describe("a revocation reaches everywhere its grant reached (eval case L-02)", (
 		const ev = revokeEvents()
 		expect(ev.some((e) => e.type === "forbid" && e.value === "~/scratch-data")).toBe(true)
 		expect(ev.some((e) => e.type === "forbid" && e.value === "~/scratch-data/" && e.kind === "scope")).toBe(true)
+		// Both rows carry the model's category. They used to carry `"*"` — "every category at this path",
+		// inferred from the sentence's verbs — which is why a revocation could outrank a grant the
+		// sentence never spoke about.
+		expect(ev.every((e) => e.category === "delete_outside")).toBe(true)
 	})
 })

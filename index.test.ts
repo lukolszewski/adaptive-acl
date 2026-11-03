@@ -730,12 +730,13 @@ describe("adaptive-acl extension: tool_call gate", () => {
 			expect(result).toBeUndefined()
 		})
 
-		it("allows plain curl GET (v3 gate: network read)", async () => {
+		it("prompts on a plain curl GET (a network read is a read of somebody else's machine)", async () => {
 			await switchMode("auto")
 			const result = await callToolCall("bash", {
 				command: "curl https://example.com",
 			})
-			expect(result).toBeUndefined()
+			expect(result).toMatchObject({ block: true })
+			expect((result as { reason?: string }).reason).toContain("example.com")
 		})
 
 		it("prompts on curl piped into a shell (remote exec)", async () => {
@@ -798,10 +799,11 @@ describe("adaptive-acl extension: tool_call gate", () => {
 			expect(result).toBeUndefined()
 		})
 
-		it("auto-approves read outside cwd for non-sensitive paths", async () => {
+		it("prompts on a read outside the project even for a non-sensitive path", async () => {
 			await switchMode("auto")
 			const result = await callToolCall("read", { path: "/etc/passwd" })
-			expect(result).toBeUndefined()
+			expect(result).toMatchObject({ block: true })
+			expect((result as { reason?: string }).reason).toContain("read outside the project")
 		})
 
 		it("prompts on read of secret-bearing paths", async () => {

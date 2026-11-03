@@ -54,7 +54,9 @@
  * `echo hi > ~/.ssh/authorized_keys` have one argv, so a rule matched on argv alone cannot tell the
  * approved write from the unapproved one. Each leg therefore carries `targets` — every redirect that
  * touches a file, in the canonical form `bash-rule-argv.ts` compares — and `permissions.ts` hands that
- * list to the matcher beside the words. A descriptor dup (`2>&1`) moves no file and is not a target;
+ * list to the matcher beside the words, together with its answer for each one: is this a place a direct
+ * `write` / `read` of it would have been allowed anyway? Two ways a target can be cleared, and the
+ * rule itself naming it is only one of them. A descriptor dup (`2>&1`) moves no file and is not a target;
  * a target the walker could only give as a placeholder makes the whole leg `opaque`, which is refused
  * before a rule is ever consulted.
  *
@@ -86,16 +88,29 @@ export type BashLeg = {
 	inner: string[] | null
 	/** Every variable this leg sets: the walker's own plus any the wrapper peel stepped over. */
 	envNames: string[]
+	/**
+	 * The same variables as `NAME=value` pairs. `envNames` is the question "does this leg set anything at
+	 * all"; this is the one some of those settings need answered, because a pager or an editor configured to
+	 * a display-only program changes no execution whatever its *name* suggests (`bash-audit.ts`
+	 * {@link envChangesExecution}). Pairs rather than a map so a repeated name keeps its last spelling
+	 * visible, and so the wrapper peel can hand them over in the order it walked them.
+	 */
+	env: EnvAssignment[]
 	/** Some value in this leg is only known at run time (§5.10). */
 	opaque: boolean
 	/**
-	 * The files this leg writes or reads through a redirect, canonicalised — the other half of what an
-	 * exact rule has to name. Empty when the leg touches no file: a descriptor dup (`2>&1`) moves bytes
-	 * between descriptors and opens nothing, so naming it in a rule would add authority without adding
-	 * harm, and `>` into a run-time-determined path never gets here at all (the leg is `opaque`).
+	 * The files this leg writes or reads through a redirect, canonicalised — the other half of the question
+	 * a rule has to answer. A rule may name one of them, or the caller may answer that a direct
+	 * `write` / `read` of it was allowed anyway (`permissions.ts`); either way the list is what the
+	 * coverage decision is made over. Empty when the leg touches no file: a descriptor dup (`2>&1`) moves
+	 * bytes between descriptors and opens nothing, so naming it in a rule would add authority without
+	 * adding harm, and `>` into a run-time-determined path never gets here at all (the leg is `opaque`).
 	 */
 	targets: RedirectTarget[]
 }
+
+/** One `NAME=value` a leg sets, as written. */
+export type EnvAssignment = { name: string; value: string }
 
 export type BashAudit =
 	| { proven: true; legs: BashLeg[] }
@@ -190,12 +205,14 @@ export function refusalExplanation(reason: string): string {
 function toLeg(c: AstCommand): BashLeg {
 	const prefix = c.envVars.map((e) => `${e.name}=${e.value}`)
 	const peeled = seeThroughWrappers(c.argv)
+	const env: EnvAssignment[] = [...c.envVars, ...(peeled ? peeled.env : [])]
 	return {
 		text: c.text,
 		argv: c.argv,
 		withAssignments: prefix.length > 0 ? [...prefix, ...c.argv] : c.argv,
 		inner: peeled ? peeled.argv : null,
-		envNames: [...c.envVars.map((e) => e.name), ...(peeled ? peeled.envNames : [])],
+		envNames: env.map((e) => e.name),
+		env,
 		opaque: c.opaque,
 		targets: fileTargetsOf(c.redirects),
 	}
@@ -264,15 +281,18 @@ const COVERAGE_WRAPPERS = new Map<string, WrapperShape>([
 /** The command a wrapper hides, plus the variables the wrapper itself set. Null = not readable. */
 export function seeThroughWrappers(
 	argv: readonly string[],
-): { argv: string[]; envNames: string[] } | null {
+): { argv: string[]; envNames: string[]; env: EnvAssignment[] } | null {
 	let rest: readonly string[] = argv
-	const envNames: string[] = []
+	const env: EnvAssignment[] = []
 	for (let hop = 0; hop < MAX_WRAPPER_HOPS; hop++) {
 		const shape = rest.length > 0 ? shapeOf(rest[0]!) : undefined
-		if (!shape) return hop === 0 ? null : { argv: [...rest], envNames }
+		if (!shape) {
+			if (hop === 0) return null
+			return { argv: [...rest], envNames: env.map((e) => e.name), env }
+		}
 		const stepped = stepOver(rest.slice(1), shape)
 		if (!stepped) return null
-		envNames.push(...stepped.envNames)
+		env.push(...stepped.env)
 		rest = stepped.rest
 	}
 	return null
@@ -287,8 +307,8 @@ function shapeOf(word: string): WrapperShape | undefined {
 function stepOver(
 	args: readonly string[],
 	shape: WrapperShape,
-): { rest: readonly string[]; envNames: string[] } | null {
-	const envNames: string[] = []
+): { rest: readonly string[]; env: EnvAssignment[] } | null {
+	const env: EnvAssignment[] = []
 	let at = 0
 	let optionsDone = false
 	let leadingLeft = shape.leading !== undefined
@@ -304,9 +324,9 @@ function stepOver(
 			at += 1
 			continue
 		}
-		const set = shape.assignments ? assignmentNameOf(arg) : null
+		const set = shape.assignments ? assignmentOf(arg) : null
 		if (set !== null) {
-			envNames.push(set)
+			env.push(set)
 			at += 1
 			continue
 		}
@@ -324,7 +344,7 @@ function stepOver(
 	}
 	// A duration that never appeared (`timeout rm -rf /`) means the command was never located.
 	if (leadingLeft && shape.leading!.required) return null
-	return { rest: args.slice(at), envNames }
+	return { rest: args.slice(at), env }
 }
 
 /** An option word, as opposed to `-` (stdin) or the command itself. */
@@ -341,11 +361,12 @@ function splitOption(word: string): { name: string; inline?: string } {
 	return word.length > 2 ? { name: word.slice(0, 2), inline: word.slice(2) } : { name: word }
 }
 
-const ASSIGNMENT_RE = /^([A-Za-z_][A-Za-z0-9_]*)=/
+const ASSIGNMENT_RE = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/
 
-/** The variable an argument sets (`FOO=1` → `FOO`), or null when it is not an assignment. */
-function assignmentNameOf(arg: string): string | null {
-	return ASSIGNMENT_RE.exec(arg)?.[1] ?? null
+/** The variable an argument sets, with its value (`FOO=1` → `FOO` / `1`), or null when it is not one. */
+function assignmentOf(arg: string): EnvAssignment | null {
+	const match = ASSIGNMENT_RE.exec(arg)
+	return match === null ? null : { name: match[1]!, value: match[2]! }
 }
 
 // ------------------------------------------------------- environment that changes execution
@@ -363,6 +384,9 @@ function assignmentNameOf(arg: string): string | null {
  * rest of the cosmetic set the old safe list carried. Those change output, not execution, and refusing
  * them would mean every `NODE_ENV=test npm test` prompts forever — the rule an "allow always" writes for
  * that command names the command, and an env prefix the matcher cannot see would make it unhonourable.
+ *
+ * The last line is the pager/editor family, and it is the one entry that is decided by the VALUE as well as
+ * the name ({@link envChangesExecution}): `PAGER=cat` runs the command, `PAGER=/bin/rm` does not.
  */
 const EXECUTION_ENV_PREFIXES = ["LD_", "DYLD_", "PI_", "ADAPTIVE_ACL_"]
 
@@ -383,8 +407,46 @@ const EXECUTION_ENV_NAMES = new Set([
 	"PAGER", "EDITOR", "VISUAL", "BROWSER", "MANPAGER", "LESS",
 ])
 
-/** True when this variable can change what the command executes, so no rule may speak for the leg. */
-export function envChangesExecution(name: string): boolean {
+/**
+ * The pager / editor / browser family: variables whose value names a program the command hands its output
+ * to, rather than changing what the command *is*.
+ *
+ * Membership is the variable name, and the `_PAGER` / `_EDITOR` suffixes are read as well as the bare names
+ * because every tool that has one spells it that way (`MANPAGER`, `SYSTEMD_PAGER`, `PSQL_PAGER`,
+ * `GIT_SEQUENCE_EDITOR`). `LESS` is in the set for the same reason `PAGER` is: its value decides which
+ * program reads the pager's input even though it usually holds options.
+ */
+const PAGER_FAMILY_NAMES = new Set(["PAGER", "LESS", "EDITOR", "VISUAL", "BROWSER", "MANPAGER"])
+const PAGER_FAMILY_SUFFIXES: readonly string[] = ["_PAGER", "_EDITOR"]
+
+/**
+ * The values that make a pager/editor setting neutral: a bare display program and nothing else.
+ *
+ * Exact bare words on purpose — not `less -R`, not `/bin/cat`, not `cat ; rm -rf /`, nothing with a space, a
+ * slash, a `$` or a quote in it. `cat` and friends read and print their input and take no argument of their
+ * own here, so a command configured that way is the command that runs. Anything else is a program, a path or
+ * a decision the rule cannot see, and keeps today's refusal.
+ */
+const DISPLAY_ONLY_VALUES = new Set(["cat", "less", "more", "head", "tail", "true", "false"])
+
+function isPagerFamily(name: string): boolean {
+	return PAGER_FAMILY_NAMES.has(name) || PAGER_FAMILY_SUFFIXES.some((suffix) => name.endsWith(suffix))
+}
+
+/**
+ * True when this variable can change what the command executes, so no rule may speak for the leg.
+ *
+ * `value` is the assignment as written. Omitting it is the fail-closed reading and is what a caller holding
+ * only a name gets: the name is on the list, so the leg is refused. Supplying it is what lets the pager/editor
+ * family through when the value is a display-only program — the one case where looking at the *name alone*
+ * costs a prompt without protecting anything (`PAGER=cat git log -5` runs `git log`).
+ *
+ * Everything else keeps the refusal whatever it is set to: the loader prefixes (`LD_*`, `DYLD_*`), the shell
+ * hooks (`BASH_ENV`, `ENV`), `PATH`, and the interpreter option strings, because there the value *is* the
+ * code that runs. A pager set to anything but a display-only bare word is the same: `PAGER='rm -rf /'`.
+ */
+export function envChangesExecution(name: string, value?: string): boolean {
+	if (value !== undefined && isPagerFamily(name) && DISPLAY_ONLY_VALUES.has(value)) return false
 	if (EXECUTION_ENV_NAMES.has(name)) return true
 	return EXECUTION_ENV_PREFIXES.some((p) => name.startsWith(p))
 }

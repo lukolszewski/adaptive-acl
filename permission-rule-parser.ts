@@ -97,19 +97,23 @@ function ruleIsJustAToolName(rule: string): PermissionRuleValue {
 }
 
 export function permissionRuleValueFromString(ruleString: string): PermissionRuleValue {
-	const { open, close } = scanSpecifierBounds(ruleString)
+	// Whitespace around a rule is not part of it. A hand-edited file holding `Bash(npm test) ` used to parse as
+	// a tool called `Bash(npm test)`, which matches nothing and reads like an active rule; trimming cannot
+	// widen any rule, because the specifier between the parens is compared verbatim either way.
+	const rule = ruleString.trim()
+	const { open, close } = scanSpecifierBounds(rule)
 
 	// Only a call whose closing paren is the very last character of the input carries a specifier.
-	// So `"Bash(ls) "` — trailing whitespace included — stays one (unmatchable) tool name, while
-	// whitespace *inside* the parens is specifier text and survives verbatim.
-	if (open === -1 || close <= open || close !== ruleString.length - 1) {
-		return ruleIsJustAToolName(ruleString)
+	// So `"Bash(ls) x"` stays one (unmatchable) tool name, while whitespace *inside* the parens is
+	// specifier text and survives verbatim.
+	if (open === -1 || close <= open || close !== rule.length - 1) {
+		return ruleIsJustAToolName(rule)
 	}
 
-	const toolName = ruleString.slice(0, open).trim()
-	if (toolName === "") return ruleIsJustAToolName(ruleString)
+	const toolName = rule.slice(0, open).trim()
+	if (toolName === "") return ruleIsJustAToolName(rule)
 
-	const specifier = ruleString.slice(open + 1, close)
+	const specifier = rule.slice(open + 1, close)
 	if (TOOL_WIDE.has(specifier)) return { toolName }
 
 	return { toolName, ruleContent: unescapeRuleContent(specifier) }

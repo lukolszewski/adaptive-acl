@@ -146,3 +146,31 @@ describe("deny-always revokes exactly the allowances that would have covered the
 		expect(rowCoversTargets(["/home/dev/.ssh/id_rsa"], space)(row("~/.ssh/id_rsa", "entity"))).toBe(true);
 	});
 });
+
+/**
+ * The two shapes that used to store NOTHING because their "acts on" was empty — the click was honoured
+ * once and forgotten, and the next identical call asked again.
+ */
+describe("durable rows for an action whose object is not a path", () => {
+	it("an agent CLI stores the PROGRAM, so the next pi call is already answered", () => {
+		const r = durableRowsForApproval({
+			tool: "bash",
+			input: { command: "nohup pi -p hi > log.txt 2>&1 &" },
+			category: "agent_spawn",
+			cwd: "/home/dev/proj",
+			folderScope: false,
+		});
+		expect(r).toEqual({ rows: [{ category: "agent_spawn", value: "pi", kind: "entity" }] });
+	});
+
+	it("an action whose object IS its category stores the marker, which matches only that shape", () => {
+		const r = durableRowsForApproval({
+			tool: "bash",
+			input: { command: "su" },
+			category: "privilege",
+			cwd: "/home/dev/proj",
+			folderScope: false,
+		});
+		expect(r).toEqual({ rows: [{ category: "privilege", value: "*", kind: "entity" }] });
+	});
+});

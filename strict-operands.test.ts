@@ -46,15 +46,18 @@ function categoryOf(command: string): string {
 	return evaluateBash(command, { cwd, project: cwd, home: "/home/user" }).category
 }
 
-describe("target-bearing verdicts: the rule must name every word", () => {
+describe("target-bearing verdicts: the rule must name every operand", () => {
 	// [command as it will be typed, the category the tables give it, a SHORTER rule that used to cover it
 	// because a specifier was read as a prefix — written by an approval on a shorter invocation, or by hand]
+	// The unit of comparison is "every operand", not "every word": the rows that pin the refusal all add a
+	// second operand or a flag that can carry one (`-t`, `-f`, `--output=…`), because those are what the harm
+	// of these categories is made of. An added value-free flag is covered now — the block below pins that.
 	const ROWS = [
 		["rm -rf /tmp/x /tmp/z", "delete_recursive", "Bash(rm -rf /tmp/x)"],
-		["rm -rf node_modules --force", "delete_recursive", "Bash(rm -rf node_modules)"],
+		["rm -rf node_modules -t /tmp/z", "delete_recursive", "Bash(rm -rf node_modules)"],
 		["shred -u secret.txt extra", "delete_recursive", "Bash(shred -u secret.txt)"],
 		["mv /tmp/a /tmp/b /dest", "delete_outside", "Bash(mv /tmp/a /tmp/b)"],
-		["chmod -R 777 /tmp/x --verbose", "perm_change", "Bash(chmod -R 777 /tmp/x)"],
+		["chmod -R 777 /tmp/x -f /tmp/z", "perm_change", "Bash(chmod -R 777 /tmp/x)"],
 		["chown -R www-data /etc/x /etc/y", "perm_change", "Bash(chown -R www-data /etc/x)"],
 		["git reset --hard HEAD~1", "vcs_discard", "Bash(git reset --hard)"],
 		["git clean -fdx .", "vcs_discard", "Bash(git clean -fd)"],
@@ -62,7 +65,7 @@ describe("target-bearing verdicts: the rule must name every word", () => {
 		["cp ./tmp-dump ~/.ssh/id_rsa extra", "read_secret", "Bash(cp ./tmp-dump ~/.ssh/id_rsa)"],
 		["tee ~/.gitconfig extra", "write_sensitive", "Bash(tee ~/.gitconfig)"],
 		["cp ./notes.txt /srv/exports/x", "write_outside", "Bash(cp ./notes.txt)"],
-		["rsync -a ./out /srv/exports --delete", "delete_recursive", "Bash(rsync -a ./out /srv/exports)"],
+		["rsync -a ./out /srv/exports --delete extra", "delete_recursive", "Bash(rsync -a ./out /srv/exports)"],
 		["sudo rm -rf /tmp/x /tmp/z", "privilege", "Bash(rm -rf /tmp/x)"],
 	] as const
 
@@ -78,6 +81,27 @@ describe("target-bearing verdicts: the rule must name every word", () => {
 		expect(view.floored, command).toBe(false)
 		// …then the behaviour.
 		expect(behaviorOf(command, [shorterRule]), `${command} ← ${shorterRule}`).toBe("passthrough")
+	})
+
+	it("a value-free flag the rule never named still means the same target", () => {
+		// The complaint: `Bash(rm -rf ./build)` stopped covering `rm -rf ./build -v`. Strictness exists so a
+		// rule cannot extend over a SECOND TARGET, and a flag that carries no value adds none. Every row is
+		// strict (target-bearing) and every added word is a flag that cannot name a path.
+		const COVERED = [
+			["rm -rf /tmp/x -v", "Bash(rm -rf /tmp/x)"],
+			["rm -rf /tmp/x --verbose", "Bash(rm -rf /tmp/x)"],
+			["chmod -R 777 /tmp/x --verbose", "Bash(chmod -R 777 /tmp/x)"],
+			["rsync -a ./out /srv/exports --delete", "Bash(rsync -a ./out /srv/exports)"],
+			["cat ~/.ssh/id_rsa --number", "Bash(cat ~/.ssh/id_rsa)"],
+		] as const
+		for (const [command, rule] of COVERED) {
+			expect(categoryHasStrictOperands(categoryOf(command)), command).toBe(true)
+			expect(behaviorOf(command, [rule]), `${command} ← ${rule}`).toBe("allow")
+		}
+		// The flags that can carry a path still void coverage, which is the whole boundary.
+		for (const command of ["rm -rf /tmp/x -t /tmp/z", "rm -rf /tmp/x --output=/tmp/z", "rm -rf /tmp/x -rf"]) {
+			expect(behaviorOf(command, ["Bash(rm -rf /tmp/x)"]), command).toBe("passthrough")
+		}
 	})
 
 	it("still covers the invocation the rule names, in the same words", () => {

@@ -18,7 +18,9 @@ import {
 	imageCovers,
 	isProtectedBranch,
 	namedByUserStructurally,
+	objectStoreCovers,
 	parseImageRef,
+	parseObjectStoreTarget,
 	parseVcsTarget,
 	PROTECTED_BRANCH_RE,
 	vcsCovers,
@@ -309,5 +311,63 @@ describe("describeTarget", () => {
 		expect(describeTarget("fs-write", "origin/*")).toBeUndefined()
 		expect(describeTarget("vcs_remote", "any branch")).toBeUndefined()
 		expect(describeTarget("network_send", "./src/app.ts")).toBeUndefined()
+	})
+})
+
+/**
+ * A bucket is a CONTAINER — a row that names the store reaches the objects inside it, the way a
+ * directory row reaches the files under it. Invented targets only: this is row-and-matcher behaviour, not
+ * prose, so no recorded model output is involved.
+ */
+describe("parseObjectStoreTarget", () => {
+	it("splits the store from the key in every scheme the module recognises", () => {
+		expect(parseObjectStoreTarget("s3://archive/reports/2024.csv")).toEqual({ scheme: "s3", bucket: "archive", key: "reports/2024.csv" })
+		expect(parseObjectStoreTarget("gs://old-reports")).toEqual({ scheme: "gs", bucket: "old-reports" })
+		expect(parseObjectStoreTarget("s3a://warehouse/part-0001")).toEqual({ scheme: "s3a", bucket: "warehouse", key: "part-0001" })
+		// The HTTP forms name the account in the authority, so the CONTAINER is the store (one level deeper).
+		expect(parseObjectStoreTarget("https://acme.blob.core.windows.net/logs/day-1.json")).toEqual({
+			scheme: "https",
+			bucket: "logs",
+			key: "day-1.json",
+		})
+		expect(parseObjectStoreTarget("https://acme.blob.core.windows.net/logs")).toEqual({ scheme: "https", bucket: "logs" })
+	})
+
+	it("reads a store named in one word, and refuses anything that is not a store name", () => {
+		expect(parseObjectStoreTarget("archive")).toEqual({ scheme: "", bucket: "archive" })
+		expect(parseObjectStoreTarget("my.bucket-2")).toEqual({ scheme: "", bucket: "my.bucket-2" })
+		// A prefix, a path, a URL and a sentence are all NOT a store name.
+		expect(parseObjectStoreTarget("dev/")).toBeUndefined()
+		expect(parseObjectStoreTarget("/srv/data")).toBeUndefined()
+		expect(parseObjectStoreTarget("https://example.com/x")).toBeUndefined()
+		expect(parseObjectStoreTarget("leave that folder alone")).toBeUndefined()
+		expect(parseObjectStoreTarget("a")).toBeUndefined() // below the 3-character floor of every store naming rule
+	})
+})
+
+describe("objectStoreCovers", () => {
+	it("a bare store name reaches every object in it, across schemes", () => {
+		expect(objectStoreCovers("archive", "s3://archive/reports/2024.csv")).toBe(true)
+		expect(objectStoreCovers("archive", "gs://archive/x")).toBe(true)
+		expect(objectStoreCovers("ARCHIVE", "s3://archive/x")).toBe(true)
+		expect(objectStoreCovers("logs", "https://acme.blob.core.windows.net/logs/day-1.json")).toBe(true)
+	})
+
+	it("a store row reaches no other store, and no local path", () => {
+		expect(objectStoreCovers("archive", "s3://old-reports/x")).toBe(false)
+		expect(objectStoreCovers("s3://archive", "gs://archive/x")).toBe(true) // same store, different CLI
+		// A local directory is answered by the path rule, not here: `undefined`, so the caller keeps it.
+		expect(objectStoreCovers("archive", "./archive/x.csv")).toBeUndefined()
+		expect(objectStoreCovers("/srv/data", "s3://data/x")).toBeUndefined()
+		expect(objectStoreCovers("some prefix here", "s3://bucket/x")).toBeUndefined()
+	})
+
+	it("a prefix row reaches the keys under it and stops at the component boundary", () => {
+		expect(objectStoreCovers("s3://archive/dev/", "s3://archive/dev/a/b.csv")).toBe(true)
+		expect(objectStoreCovers("s3://archive/dev", "s3://archive/dev/a.csv")).toBe(true)
+		expect(objectStoreCovers("s3://archive/dev", "s3://archive/dev")).toBe(true)
+		expect(objectStoreCovers("s3://archive/dev", "s3://archive/development/a.csv")).toBe(false)
+		// A key row cannot reach the store itself.
+		expect(objectStoreCovers("s3://archive/dev/a.csv", "s3://archive")).toBe(false)
 	})
 })

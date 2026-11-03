@@ -50,7 +50,7 @@ describe("tier 1 — the read-only allowlist", () => {
 		["wc -l f", "TTT", "plain read-only"],
 		["jq . package.json", "TTT", "plain read-only"],
 		["rg TODO", "TTT", "plain read-only"],
-		["printenv HOME", "TTT", "plain read-only"],
+		["printenv HOME", "fff", "the session environment is a host read, not shell state"],
 		["git status --short", "TTT", "git subcommand in the list"],
 		["git log --oneline -5", "TTT", "git subcommand in the list"],
 		["git diff HEAD~1", "TTT", "git subcommand in the list"],
@@ -64,7 +64,7 @@ describe("tier 1 — the read-only allowlist", () => {
 		["python --version", "TTT", "python only with --version"],
 		["sed -n 10,20p f", "TTT", "sed only with -n"],
 		["find . -name '*.ts'", "TTT", "find without a destructive predicate"],
-		["ls -1 /tmp 2>&1", "TTT", "fd-to-fd dup is not a write"],
+		["ls -1 /tmp 2>&1", "fff", "/tmp is outside for reads — the fd-to-fd dup was never the question"],
 		["cat f.txt < in.txt", "TTT", "a read redirect moves bytes in"],
 		["echo hi <<< x", "TTT", "a here-string is not a write"],
 	]
@@ -100,6 +100,53 @@ describe("tier 1 — what the allowlist does not admit", () => {
 		["ls; rm -rf build", "fff", "one destructive leg refuses the compound"],
 	]
 	table(rows)
+})
+
+/**
+ * The inert sink: a redirect that cannot hold a byte keeps the read-only face.
+ *
+ * `writesToAFile` disqualified a leg for ANY write redirect, so one `2>/dev/null` anywhere stopped the
+ * command from being read-only — and ask mode (`index.ts:isReadOnlyBash` in the prompt path), plan mode
+ * (the same call, one screen up) and the classifier-offline fallback all prompt on the read-only face. The
+ * distinction the ladder was reaching for is about the TARGET, not the operator: `/dev/null` keeps nothing,
+ * `/dev/stdout` and `/dev/stderr` are the streams the command already had. A redirect into a real file is
+ * still not read-only, and it needs no ladder of its own: layer 0 files that write and classifies the path
+ * (`read_only+write_project`, `write_sensitive`, `persistent_access`), so the gate judges the file.
+ */
+describe("a redirect at an inert sink is not a write", () => {
+	const rows: Row[] = [
+		["ls 2>/dev/null", "TTT", "the case users type most: suppress stderr on a read"],
+		["git status 2>/dev/null", "TTT", "a read-only subcommand with its errors dropped"],
+		["find . -name x 2>/dev/null", "TTT", "find without a destructive predicate"],
+		["ls > /dev/null", "TTT", "throwing stdout away writes no file"],
+		["ls > /dev/stdout", "TTT", "/dev/stdout is the stream the command already writes"],
+		["ls > /dev/stderr", "TTT", "same for /dev/stderr"],
+		["cat f < /dev/null", "TTT", "a read redirect from the null device"],
+		["echo hi > /dev/null", "TTT", "nothing can read it back, so nothing was written"],
+		["ls -la 2>/dev/null && git status 2>/dev/null", "TTT", "…and it is per leg of a compound"],
+		["ls 2>/dev/null > out.txt", "fff", "one sink does not launder a real file in the same step"],
+		["ls > /dev/null 2> err.txt", "fff", "same, other way round"],
+		["rm -rf build > /dev/null", "fff", "a sink never outranks the floor"],
+	]
+	table(rows)
+
+	it("is the face ask mode and plan mode read (both call index.ts:isReadOnlyBash)", () => {
+		// The two call sites are the same question, so the rows above are
+		// their cases: ask mode (`if (isReadOnlyBash(cmd, ctx.cwd)) return undefined`) and plan mode
+		// (`if (!isReadOnlyBash(...)) block`). Named here so a future split of the two faces cannot move
+		// one without the other.
+		for (const command of ["git status 2>/dev/null", "ls 2>/dev/null", "find . -name x 2>/dev/null"]) {
+			expect(isReadOnlyBash(command, cwd), command).toBe(true)
+		}
+		for (const command of ["git status > status.txt", "ls 2>/dev/null > out.txt"]) {
+			expect(isReadOnlyBash(command, cwd), command).toBe(false)
+		}
+	})
+
+	it("names the reason for the refusal it still gives", () => {
+		expect(tiersOf("ls 2>/dev/null > out.txt").readOnlyReason).toBe("writes-a-file")
+		expect(tiersOf("ls 2>/dev/null").readOnlyReason).toBe("proven")
+	})
 })
 
 describe("tier 2 — routine dev workflow", () => {
@@ -142,8 +189,8 @@ describe("tier 2 — routine dev workflow", () => {
 		["pytest -q", "fTT", "a pinned test runner"],
 		["mocha", "fTf", "a pinned test runner, tier 2 only"],
 		["docker build .", "fTf", "docker build has no host-mount vector"],
-		["docker ps", "fTf", "docker read verbs"],
-		["docker compose ps", "fTf", "a read-only compose verb stays tier 2 (D1)"],
+		["docker ps", "fff", "reading the daemon is a prompt at layer 0, so no face admits it"],
+		["docker compose ps", "fff", "a read-only compose verb is a daemon read, and layer 0 now says so"],
 		["docker run -v /:/host ubuntu", "fff", "docker run/exec are never tier 2 (host-mount execution)"],
 		["npm install", "fff", "install is not a workflow verb: it pulls code from the network"],
 		["pip install requests", "fff", "system package install is ask at layer 0"],
@@ -153,13 +200,13 @@ describe("tier 2 — routine dev workflow", () => {
 
 describe("tier 2 — compose is split by verb (D1)", () => {
 	const rows: Row[] = [
-		["docker compose ps", "fTf", "the read-only verbs stay: these are the ones run ten times an hour"],
-		["docker compose ps -a", "fTf", "a flag after the subcommand does not change the verb"],
-		["docker compose logs --tail 50 web", "fTf", "logs reads state"],
-		["docker compose config", "fTf", "config renders the file it already has"],
-		["docker compose top", "fTf", "top reads state"],
-		["docker compose images", "fTf", "images reads state"],
-		["docker compose port web 8080", "fTf", "port reads state"],
+		["docker compose ps", "fff", "the read-only verbs ask now — they read the daemon, not the repo"],
+		["docker compose ps -a", "fff", "a flag after the subcommand does not change the verb"],
+		["docker compose logs --tail 50 web", "fff", "logs reads daemon state"],
+		["docker compose config", "fff", "it renders the file it has AND reads the daemon"],
+		["docker compose top", "fff", "top reads daemon state"],
+		["docker compose images", "fff", "images reads daemon state"],
+		["docker compose port web 8080", "fff", "port reads daemon state"],
 		["docker compose version", "fTf", "version reads state"],
 		["docker compose up", "fff", "up starts containers that mount host paths and publish ports: tier 3"],
 		["docker compose up -d", "fff", "detached is the same container"],
@@ -387,7 +434,7 @@ describe("the guardrails a routine command carries", () => {
 		["cp a b --target-directory=/tmp", "fff", "and for an absolute option value"],
 		["mkdir \"../x\"", "fff", "quoting does not move the path inside the project"],
 		["touch ./notes.md", "fTf", "a project-relative path is fine"],
-		["ls -la /etc", "TTT", "tier 1 has no absolute-path guardrail: reading is reading"],
+		["ls -la /etc", "fff", "an outside read is refused by layer 0's floor, not by this ladder's guardrail"],
 	]
 	table(rows)
 	it("says which guardrail refused", () => {
@@ -475,7 +522,8 @@ describe("a remote secret read is floored by layer 0, not by a table here (D16)"
 	 * This ladder never learned the name of a cloud CLI, and it must not: `kubectl get secret prod-db` is
 	 * refused here because layer 0's floor moved to `ask`, which is the same route every other refusal takes.
 	 * The rows below are the proof that the ladder has no private opinion about these CLIs — the ordinary
-	 * verb on the same binary is still floored at `allow`.
+	 * verb on the same binary carries a different category, and both verbs sit on the same `ask`
+	 * floor, which is what makes the category the only thing telling them apart.
 	 */
 	it("refuses the secret read through the floor, with the reason id that says so", () => {
 		for (const command of [
@@ -493,9 +541,12 @@ describe("a remote secret read is floored by layer 0, not by a table here (D16)"
 			expect(tiers.readOnlyReason, command).not.toBe("read-only-table")
 		}
 	})
-	it("still treats the same verbs on an ordinary noun as un-floored", () => {
+	it("still treats the same verbs on an ordinary noun as something else", () => {
+		// What this pinned, and still pins: an ordinary cluster read is NOT a secret read. Its tier moved — a
+		// cluster is not the project — so `floor` is `ask`, while the category stays out of the secret row.
 		for (const command of ["kubectl get pods", "kubectl describe deployment web", "helm list", "aws ssm get-parameter --name /app/config"]) {
-			expect(tiersOf(command).floor, command).toBe("allow")
+			expect(tiersOf(command).floor, command).toBe("ask")
+			expect(tiersOf(command).category, command).not.toContain("read_secret_remote")
 		}
 	})
 	it("is not the never floor, because one approval is allowed to cover it", () => {

@@ -15,7 +15,7 @@
  */
 
 import { evaluateToolCall, policyProject, type Entity, type PolicyDecision, type PolicyOptions } from "./risk-policy.ts"
-import { verifyGrant, type GrantExtraction } from "./grant-verify.ts"
+import { verifyGrant, NO_OBJECT_TARGET, type GrantExtraction } from "./grant-verify.ts"
 import {
 	classifyEffect,
 	effectToTier,
@@ -26,7 +26,7 @@ import {
 } from "./model-client.ts"
 import { addGrant, grantsCover, type GrantStore } from "./session-grants.ts"
 import { compoundAll, ledgerCovers, namedForbidCovers, readOnlyActive, readOnlyLiftedByGrant, type Ledger } from "./auth-ledger.ts"
-import { callBudget, estimateTokens, fitNewestFirst } from "./context-budget.ts"
+import { callBudget, estimateTokens } from "./context-budget.ts"
 import { fitLedgerRows, LEDGER_SHARE, ledgerRows } from "./ledger-render.ts"
 import { GRANT_CALL_RESERVE_TOKENS, GRANT_NUMBERING_OVERHEAD_CHARS, grantCallFixedChars } from "./model-client.ts"
 // `classifierUnavailability` is a value import from gate-bridge, which imports this module by TYPE only — so the
@@ -37,8 +37,13 @@ import { classifierUnavailableReason } from "./classifier-messages.ts"
 
 /** Categories that are reads, not "changes" — exempt from the read-only posture
  *  (which is about writes/mutations). Everything else ask/unknown is treated as a
- *  change under read-only (fail-safe on ambiguous/unknown commands). */
-const READ_ONLY_EXEMPT = new Set(["read_secret", "read_only"])
+ *  change under read-only (fail-safe on ambiguous/unknown commands).
+ *
+ *  `read_system_state` belongs here because a status read changes nothing: a user who said "don't change
+ *  anything" did not forbid `ps`. The exemption only decides whether the POSTURE refuses the action out of
+ *  hand — a read_system_state action still needs a grant or a transcript sentence to run, exactly like any
+ *  other read. */
+const READ_ONLY_EXEMPT = new Set(["read_secret", "read_only", "read_system_state"])
 
 export type GateOutcome =
 	| "allow"            // run it, no user involvement
@@ -89,20 +94,35 @@ const BARE_CALL_BUDGET = callBudget(undefined, 0, GRANT_CALL_RESERVE_TOKENS)
 
 /**
  * The recent-window the grant call gets: the newest `MAX_USER_MSGS`, then as much of those as fits
- * in `budgetTokens` — filled newest-first, stopping at the first message that does not fit, so what
- * reaches the model is a contiguous suffix and every string in it is one of the strings passed in.
- * An empty result means even the newest message is too large for the window; the caller then sends
- * no raw messages at all rather than a fragment of one.
+ * in `budgetTokens`, filled newest-first and SKIPPING any single message that does not fit so older whole
+ * ones still get a place. Every string in the result is one of the strings passed in.
+ *
+ * Why skip rather than stop: the window is a suffix, so stopping at the first oversize message made one long
+ * paste hide every earlier approval in the conversation. Measured: `[approval, 11k paste]` with a 2 000-token
+ * budget produced `[]` — the gate then prompted without asking the model at all, although the approval fit.
+ * The gap that stopping was supposed to avoid is not a hazard here: the ledger rows
+ * (`ledger-render.ts`) are the summary of the turns that no longer fit and travel in the same call, and the
+ * oversize message itself is not lost either — it reaches the model through per-message chunked extraction
+ * (`extractMessageGrants` → `chunkMessage`), which is where the grant that lives in a long paste is read.
+ *
+ * An empty result therefore means nothing at all fit, not "the newest one did not".
  */
 export function limitUserMessages(
 	msgs: string[],
 	budgetTokens: number = BARE_CALL_BUDGET,
 ): string[] {
-	return fitNewestFirst(
-		msgs.slice(-MAX_USER_MSGS),
-		(m) => estimateTokens(m.length + GRANT_NUMBERING_OVERHEAD_CHARS),
-		budgetTokens,
-	)
+	const recent = msgs.slice(-MAX_USER_MSGS)
+	const kept: string[] = []
+	let spent = 0
+	for (let i = recent.length - 1; i >= 0; i--) {
+		const message = recent[i] as string
+		const cost = estimateTokens(message.length + GRANT_NUMBERING_OVERHEAD_CHARS)
+		if (spent + cost > budgetTokens) continue
+		spent += cost
+		kept.push(message)
+	}
+	kept.reverse()
+	return kept
 }
 
 /**
@@ -186,6 +206,10 @@ export async function runGate(tool: string, input: Record<string, unknown>, opts
 		// classify each unknown segment; the worst result wins
 		let worst: { tier: "allow" | "ask" | "never"; category: string } = { tier: "allow", category: "read_only" }
 		const targets: Entity[] = [...policy.entities]
+		// The path space the effect mapping needs to run layer 0's own read rules over the targets the model
+		// names. `home` falls back exactly as `makeCtx` in risk-policy.ts does: if the two layers disagreed
+		// about where `~` or a relative path is, one would call a target secret and the other would not.
+		const readSpace = { cwd: opts.policy.cwd, project, home: opts.policy.home ?? process.env.HOME ?? "/nonexistent" }
 		for (const u of policy.unknown) {
 			const res: ModelCallResult<EffectClassification> = await classifyEffect(
 				opts.endpoint,
@@ -204,7 +228,7 @@ export async function runGate(tool: string, input: Record<string, unknown>, opts
 				// never a classifier that voted no.
 				return finish("prompt", "ask", policy, `${classifierUnavailableReason(res.error)}; confirmation required`, modelCalls)
 			}
-			const mapped = effectToTier(res.value)
+			const mapped = effectToTier(res.value, readSpace)
 			dbg(`[gate] effect: ${u.command.slice(0, 60)} → ${res.value.effect}/${res.value.confidence} → ${mapped.tier}`)
 			for (const t of res.value.targets) targets.push({ kind: "target", value: t })
 			if (rank(mapped.tier) > rank(worst.tier)) worst = mapped
@@ -300,7 +324,12 @@ export async function runGate(tool: string, input: Record<string, unknown>, opts
 	// whole, newest-first, or not at all.
 	if (opts.endpoint) {
 		const command = policy.segments.map((s) => s.command).filter(Boolean)[0] ?? ""
-		const fixed = { description: policy.description, category: policy.category, entities: policy.entities, command }
+		// The no-object marker (`NO_OBJECT_TARGET`) is a GRANT-MATCHING value, not a target a person
+		// could name: sending it would tell the model the action reaches "*", and a model reading that will
+		// refuse a sentence that really did approve it. The pending action reaches the model with the same
+		// "(none)" it always did; the stores and the verifier still see the marker.
+		const modelEntities = policy.entities.filter((e) => !(e.kind === "target" && e.value === NO_OBJECT_TARGET))
+		const fixed = { description: policy.description, category: policy.category, entities: modelEntities, command }
 		// The ledger rows are the summary of the turns that no longer fit the window. They are fitted
 		// against a share of a budget measured WITHOUT them, then the fixed part is re-measured WITH them
 		// so the raw messages get exactly what is left. Measuring by rendering the real prompt
@@ -318,8 +347,9 @@ export async function runGate(tool: string, input: Record<string, unknown>, opts
 		const userMessages = limitUserMessages(opts.userMessages ?? [], budget)
 		if (rows.length > 0) dbg(`[gate] grant window: ${rows.length} ledger row(s) + ${userMessages.length} message(s) in ${budget} tokens`)
 		if (userMessages.length === 0 && rows.length === 0 && (opts.userMessages?.length ?? 0) > 0) {
-			// Not even the newest message fits, so nothing older can either, and no ledger row stands in
-			// for them. An empty list would ask the model to authorise an action from no evidence at all.
+			// Nothing fit: not one message, and no ledger row stands in for them. An empty list would ask the
+			// model to authorise an action from no evidence at all. (This is "nothing fits", not "the newest
+			// did not" — an oversize message is skipped, not fatal, so a fitting older one still gets here.)
 			dbg(`[gate] no user message fits the ${budget}-token grant window — call skipped`)
 			return finish("prompt", "ask", policy, `needs confirmation (no user message fits the classifier window)`, modelCalls)
 		}

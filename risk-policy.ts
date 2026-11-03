@@ -137,7 +137,7 @@ export const pathTouched = (v: string): Entity => ({ kind: "path", value: v })
 
 // ------------------------------------------------------------------ tool-level
 
-const READ_TOOLS = new Set(["read", "grep", "find", "ls", "glob", "web_search", "web_read", "fetch", "web_fetch", "plan_ready", "todo", "todo_read", "todo_write", "list_skills", "memory_search", "think"])
+const READ_TOOLS = new Set(["web_search", "plan_ready", "todo", "todo_read", "todo_write", "list_skills", "memory_search", "think"])
 
 export function evaluateToolCall(tool: string, input: Record<string, unknown>, opts: PolicyOptions): PolicyDecision {
 	try {
@@ -165,12 +165,19 @@ function evaluateToolCallInner(tool: string, input: Record<string, unknown>, opt
 		return mergeDecisions([d], `${tool} ${p}`)
 	}
 	if (tool === "read" || tool === "grep" || tool === "find" || tool === "ls" || tool === "glob") {
+		// The path decides, exactly as a parsed `cat`/`ls`/`find` decides the same path. A call with no
+		// path reads the working directory, which is inside the project, so it stays free.
 		const p = String(input.path ?? input.file ?? "")
-		if (p) {
-			const pc = classifyPath(p, ctx)
-			if (pc.isSecret) return mergeDecisions([seg("ask", "read_secret", `read secret-bearing path ${displayPath(pc, ctx)}`, `${tool} ${p}`, [target(displayPath(pc, ctx))])], `${tool} ${p}`)
-		}
-		return mergeDecisions([seg("allow", "read_only", `${tool} ${p || "(project)"}`, `${tool} ${p}`)], `${tool} ${p}`)
+		if (!p) return mergeDecisions([seg("allow", "read_only", `${tool} (project)`, `${tool} ${p}`)], `${tool} ${p}`)
+		return mergeDecisions([decideRead(classifyPath(p, ctx), ctx, tool)], `${tool} ${p}`)
+	}
+	if (tool === "web_read" || tool === "web_fetch" || tool === "fetch" || tool === "http" || tool === "https") {
+		// The same rule a parsed `curl`/`wget` GET gets, spelled as a tool: fetching a URL is a read of
+		// somebody else's machine and asks like one, with the host as the object so one approval covers the site
+		// rather than the page.
+		const url = String(input.url ?? input.path ?? "")
+		const host = url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").split("/")[0] || url
+		return mergeDecisions([seg("ask", "read_only", `fetch ${url || "(no url)"}`, `${tool} ${url}`, host ? [target(host)] : [])], `${tool} ${url}`)
 	}
 	if (READ_TOOLS.has(tool)) {
 		return mergeDecisions([seg("allow", "read_only", `${tool}`, tool)], tool)
@@ -190,6 +197,39 @@ export function policyProject(opts: PolicyOptions): string {
 function makeCtx(opts: PolicyOptions): PathContext {
 	const home = opts.home ?? process.env.HOME ?? "/nonexistent"
 	return { cwd: path.resolve(opts.cwd), project: policyProject(opts), home }
+}
+
+/**
+ * Decide READING one path.
+ *
+ * The rule is one sentence: a read whose object is inside the project is free, and a read of anything
+ * else needs the user's permission until a stated grant covers the object. That replaces the v3 rule
+ * "reads are free except secrets" everywhere the gate decides a read — pi's read/grep/find/ls/glob tools,
+ * every parsed bash read, and the effect model's read verdict (`readEffectTier` in model-client.ts).
+ *
+ * What did NOT move:
+ *  · secret-bearing paths keep `read_secret` (their harm is in the bytes, and they keep their own gate);
+ *  · inside the project stays allowed, `.git` included — the project subtree is the working area;
+ *  · temp locations are NOT exempt for reads: `/tmp`, `/var/tmp` and `$TMPDIR` are outside. Writes
+ *    there are unchanged — that is `decideWrite`'s `isTemp` branch, which this function does not share.
+ *
+ * The `scope` entity on the ask is what lets one approval cover the directory instead of one file, the
+ * same shape `decideWrite` uses; it is withheld for secrets, where a folder rule would reach credentials
+ * the user never looked at (and a `**` rule can never match a secret anyway).
+ */
+export function decideRead(pc: PathClass, ctx: PathContext, verb: string): SegmentDecision {
+	const disp = displayPath(pc, ctx)
+	const cmd = `${verb} ${pc.raw}`
+	if (pc.isSecret) return seg("ask", "read_secret", `read secret-bearing path ${disp}`, cmd, [target(disp)])
+	// The sinks that hold nothing: reading them discloses nothing.
+	if (pc.abs === "/dev/null" || pc.abs === "/dev/stdout" || pc.abs === "/dev/stderr") return seg("allow", "read_only", `${verb} ${disp}`, cmd)
+	if (pc.unresolvedRoot) return seg("ask", "read_only", `read through an unresolved path ${pc.raw}`, cmd, [target(pc.raw)])
+	if (pc.isDevice) return seg("ask", "read_only", `read device ${pc.abs}`, cmd, [target(pc.abs!)])
+	if (pc.insideProject) return seg("allow", "read_only", `${verb} ${disp}`, cmd)
+	return seg("ask", "read_only", `read outside the project: ${disp}`, cmd, [
+		target(disp),
+		scope(path.posix.dirname(pc.abs ?? "/") + "/"),
+	])
 }
 
 export function decideWrite(pc: PathClass, ctx: PathContext, verb: string, content?: string): SegmentDecision {
@@ -472,16 +512,24 @@ function readsLikeSecret(name: string | undefined): boolean {
 /**
  * The remote-secret rule applied to the leg that made the call.
  *
- * Rows the verb tables already rate `ask` or `never` are kept — `kubectl delete secret x` stays where the
- * mutation tables put it — and rows they rate `allow` or `unknown` are **replaced**, not added to. That is
- * not tidiness: `unknown` sorts *above* `ask` in `TIER_RANK`, so an appended row would leave the verdict
- * `unknown` for `vault kv get secret/prod/db` and hand it to the effect model, which may wave it through.
- * Where layer 0 can name the risk it states it, and the human decides.
+ * Rows the verb tables already rate `never` are kept — `kubectl delete secret x` stays where the mutation
+ * tables put it — and rows they rate `allow`, `unknown` or a plain read are **replaced**, not added to. That is
+ * not tidiness, for two separate reasons:
+ *
+ *  · `unknown` sorts *above* `ask` in `TIER_RANK`, so an appended row would leave the verdict `unknown` for
+ *    `vault kv get secret/prod/db` and hand it to the effect model, which may wave it through;
+ *  · since every read outside the project asks, a client read (`kubectl get …`) is itself an `ask read_only`
+ *    row — or an `ask read_system_state` row, for the status families — so appending would describe one
+ *    leg as two prompts — `read_only+read_secret_remote` — and the wider name would be the one a grant had to
+ *    satisfy. Where layer 0 can name the risk it states it, and the human decides.
+ *
+ * Only this leg's rows are in scope: the rows arrive from `classifyVerb` for one simple command, so dropping a
+ * read row here cannot silence a read of some other object elsewhere in the pipeline.
  */
 function withStoredSecretRead(rows: SegmentDecision[], argv: string[], text: string): SegmentDecision[] {
 	const hit = storedSecretRead(argv)
 	if (!hit) return rows
-	const kept = rows.filter((s) => s.tier === "ask" || s.tier === "never")
+	const kept = rows.filter((s) => s.tier === "never" || (s.tier === "ask" && s.category !== "read_only" && s.category !== "read_secret" && s.category !== "read_system_state"))
 	return [...kept, seg("ask", READ_SECRET_REMOTE, hit.description, text, [target(hit.entity)])]
 }
 
@@ -530,6 +578,7 @@ export function evaluateBash(command: string, opts: PolicyOptions): PolicyDecisi
 				pipesTo: nextPipesTo(ast.commands, c),
 				evaluateBash: (s, o) => evaluateBash(s, { ...opts, ...o, depth: depth + 1 }),
 				decideWrite: (pc, verb) => decideWrite(pc, ctx, verb),
+				decideRead: (pc, verb) => decideRead(pc, ctx, verb),
 				classify: (p) => classifyPath(p, ctx),
 				display: (pc) => displayPath(pc, ctx),
 			}
@@ -600,8 +649,15 @@ function unprovenDecision(text: string, reason: string, malformed: boolean, opts
 		// The legacy engine already found something that needs the user (or the model).
 		// Keep that verdict exactly as today — unverified structure must not make a
 		// command *cheaper* to approve than the tables already decided.
+		//
+		// It must not make it *harder to explain* either, which is the part the note is for: the refusal reason is
+		// written into every row's description, because `bridge.reportedConstruct` reads the SEGMENTS and a denial
+		// that quotes only the finding tells the user a rule refused them when what failed is the analyzer.
+		// Widening the tier to `unknown` instead would be a loosening, not a tightening: a
+		// classifier can wave an `unknown` through, while an `ask` can only be cleared by a human.
+		const annotated = legacy.segments.map((s) => ({ ...s, description: `${s.description} (command structure not verified: ${reason})` }))
 		const description = `${legacy.description} (command structure not verified: ${reason})`
-		return { ...legacy, description, reason: `${legacy.tier}: ${description}` }
+		return { ...legacy, segments: annotated, description, reason: `${legacy.tier}: ${description}` }
 	}
 	// Legacy saw nothing worth gating — but it is the engine we no longer trust for
 	// structure, so "all clear" here downgrades to "the model decides".
@@ -620,7 +676,11 @@ function astRedirectDecisions(c: AstCommand, ctx: PathContext): SegmentDecision[
 		if (r.fdDup) continue
 		if (r.op === "<" || r.op === "<<<") {
 			const pc = classifyPath(r.target, ctx)
-			if (pc.isSecret) out.push(seg("ask", "read_secret", `read secret-bearing file ${displayPath(pc, ctx)}`, c.text, [target(displayPath(pc, ctx))]))
+			// A here-string is inline text, not a file: its "target" is the string, so only the secret-name
+			// rule applies to it. A real `< file` redirect is a read and is decided like one.
+			out.push(r.op === "<" ? decideRead(pc, ctx, "read") : pc.isSecret
+				? seg("ask", "read_secret", `read secret-bearing file ${displayPath(pc, ctx)}`, c.text, [target(displayPath(pc, ctx))])
+				: seg("allow", "read_only", "herestring input", c.text))
 			continue
 		}
 		if (r.op === "<>") continue
@@ -684,6 +744,7 @@ export function evaluateBashLegacy(command: string, opts: PolicyOptions): Policy
 			pipesTo: next && (next.connector === "|" || next.connector === "|&") ? wordsOf(next) : null,
 			evaluateBash: (s, o) => evaluateBash(s, { ...opts, ...o, depth: depth + 1 }),
 			decideWrite: (pc, verb) => decideWrite(pc, ctx, verb),
+			decideRead: (pc, verb) => decideRead(pc, ctx, verb),
 			classify: (p) => classifyPath(substituteVars(p, state.vars), ctx),
 			display: (pc) => displayPath(pc, ctx),
 		}
@@ -728,7 +789,9 @@ function redirectDecisions(c: SimpleCommand, ctx: PathContext, opts: PolicyOptio
 		const t = r.target.value
 		if (r.op === "<" || r.op === "<<<") {
 			const pc = classifyPath(t, ctx)
-			if (pc.isSecret) out.push(seg("ask", "read_secret", `read secret-bearing file ${displayPath(pc, ctx)}`, c.raw, [target(displayPath(pc, ctx))]))
+			out.push(r.op === "<" ? decideRead(pc, ctx, "read") : pc.isSecret
+				? seg("ask", "read_secret", `read secret-bearing file ${displayPath(pc, ctx)}`, c.raw, [target(displayPath(pc, ctx))])
+				: seg("allow", "read_only", "herestring input", c.raw))
 			continue
 		}
 		if (r.op === "<>" ) continue

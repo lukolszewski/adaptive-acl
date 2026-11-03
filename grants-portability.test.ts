@@ -128,6 +128,13 @@ describe("grants-file value pruning with a category", () => {
 			["system_config", "nginx"],
 			["privilege", "sudo"],
 			["interactive_editor", "vim"],
+			// a machine read names a MACHINE, not a place, so its durable row must survive the
+			// path-shape screen (the unit-scoped spelling included).
+			["read_system_state", "localhost"],
+			["read_system_state", "localhost/nginx"],
+			// the program an agent spawn runs, and the marker a targetless ask carries.
+			["agent_spawn", "pi"],
+			["privilege", "*"],
 		] as const) {
 			expect(isUnmatchableValue(value, category)).toBe(false)
 		}

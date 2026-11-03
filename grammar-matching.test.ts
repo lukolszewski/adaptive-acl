@@ -9,7 +9,7 @@
  *
  * What these pins are worth: every one of them is the gate's OWN spelling. For
  * `git push origin feature/ABC123` layer 0 emits target `origin/feature/ABC123` and scope
- * `origin/*` (risk-handlers.ts:618), and "Allow for session (scope origin/*)" stores exactly
+ * `origin/*` (risk-handlers.ts:1177), and "Allow for session (scope origin/*)" stores exactly
  * that scope string — so before the grammar the button the user pressed covered nothing, and
  * the denial told them to grant something that could never work. The container case is the
  * same defect one category over: a row can now say "any tag of myrepo/app".
@@ -46,9 +46,19 @@ function grant(opts: {
 	allowed?: string[]
 	forbidden?: string[]
 	quote: string
+	effects?: string[]
 }) {
 	return verifyGrant({
-		extraction: extraction({ allowed_targets: opts.allowed ?? [], forbidden_targets: opts.forbidden ?? [], quote: opts.quote }),
+		// These pins are about TARGET matching, so the width of the sentence is held constant: the model
+		// answered "this action type and nothing else". The effects field is decisive, so a fixture that left
+		// it out would test the coverage gate instead of the grammar. The recorded-answer pins for the
+		// coverage gate itself are in risk-policy.test.ts ("the effects field decides…").
+		extraction: extraction({
+			allowed_targets: opts.allowed ?? [],
+			forbidden_targets: opts.forbidden ?? [],
+			quote: opts.quote,
+			effects: opts.effects ?? opts.category.split("+"),
+		}),
 		category: opts.category,
 		entities: [T(opts.entity)],
 		userMessages: [opts.quote],
@@ -101,7 +111,19 @@ describe("grantsCover matches publish targets by grammar", () => {
 		expect(covered(both, "vcs_local+vcs_remote", "origin/feature/ABC123")).toBe(true)
 	})
 
+	it("one network_send row covers the push a grant sentence names", () => {
+		// Layer 0 files `docker push myrepo/app:1.0` as plain `network_send` on the image ref, so the image
+		// grammar attached to that category is enough on its own: no container row, no bridge, no second
+		// effect for the ledger to chase. This is the shape a sentence naming the push produces.
+		const store = storeWith(["network_send", "myrepo/app", "scope"])
+		expect(covered(store, "network_send", "myrepo/app:1.0")).toBe(true)
+		expect(covered(store, "network_send", "myrepo/other:1.0")).toBe(false)
+		expect(covered(store, "network_send", "other-registry.com/myrepo/app:1.0")).toBe(false)
+	})
+
 	it("a repository row covers any tag of that repository, under both halves of the publish compound", () => {
+		// The compound is no longer what layer 0 emits for a push; it stays pinned because a durable approval or
+		// a grants.json written then stores that category verbatim, and such a row still needs one row per effect.
 		const rows: Array<[string, string, "entity" | "scope"]> = [
 			["container_mutation", "myrepo/app", "scope"],
 			["network_send", "myrepo/app", "scope"],

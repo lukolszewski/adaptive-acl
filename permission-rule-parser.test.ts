@@ -76,14 +76,21 @@ describe("permission-rule-parser: trimming", () => {
 		})
 	})
 
-	it("treats whitespace after the closing paren as part of the tool name", () => {
-		// Not a specifier with trailing space: the ") is no longer the last character, so the
-		// whole string is the (unmatchable) tool name. Preserved deliberately.
+	it("trims the whitespace around the call form too", () => {
+		// A hand-edited file holding `Bash(x) ` used to parse as a tool called `Bash(x)` — a rule that
+		// matches nothing and reads as an active one, with no warning anywhere. Whitespace outside the parens
+		// is not part of the rule; text after them still is (see the next block).
 		expect(permissionRuleValueFromString("Bash(x) ")).toEqual({
-			toolName: "Bash(x)",
+			toolName: "Bash",
+			ruleContent: "x",
 		})
 		expect(permissionRuleValueFromString("  Bash(x)  ")).toEqual({
-			toolName: "Bash(x)",
+			toolName: "Bash",
+			ruleContent: "x",
+		})
+		expect(permissionRuleValueFromString("Bash(x:*) \t")).toEqual({
+			toolName: "Bash",
+			ruleContent: "x:*",
 		})
 	})
 

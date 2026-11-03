@@ -10,8 +10,9 @@
  * credential file and mutating it are different permissions; a user who said "you
  * may read this" did not say "you may rewrite this".
  *
- * Tightening a compatibility relation can only ever cost a prompt, so these tests
- * pin the tight side and would catch a regression back to bundling.
+ * The write→read direction is the ONE direction the group split does not close, and it must not: you cannot
+ * edit a credentials file without opening it first. It stays one-way, so the pin above is what the file exists
+ * for and the read side is now asserted alongside it.
  */
 import { describe, expect, it } from "vitest"
 import { applyEvent, createLedger, ledgerCovers } from "./auth-ledger.ts"
@@ -42,8 +43,15 @@ describe("secret read and secret write are separate permissions", () => {
 		expect(ledgerCovers(granted("read_secret"), "write_sensitive", target, HOME).covered).toBe(false)
 	})
 
-	it("a write grant does not authorise reading the same path", () => {
-		expect(ledgerCovers(granted("write_sensitive"), "read_secret", target, HOME).covered).toBe(false)
+	it("a write grant DOES authorise reading the same path (an edit needs a read first)", () => {
+		// The line used to assert `false` on the reasoning that reading and writing a secret are different
+		// permissions. The direction that holds is the ordinary one: to edit the file you must open it,
+		// and within the row's own value the read comes with the write. What the split still guarantees is the
+		// OTHER direction, pinned above: a read grant buys no write.
+		expect(ledgerCovers(granted("write_sensitive"), "read_secret", target, HOME).covered).toBe(true)
+		// …and only inside the value the row names.
+		const elsewhere: Entity[] = [{ kind: "target", value: "/home/u/.ssh/id_rsa" }]
+		expect(ledgerCovers(granted("write_sensitive"), "read_secret", elsewhere, HOME).covered).toBe(false)
 	})
 
 	it("each still authorises its own kind", () => {

@@ -24,7 +24,7 @@
  * | rule | argv it covers | argv it covers when `strictOperands` is set |
  * | --- | --- | --- |
  * | `Bash` / `Bash()` / `Bash(*)` | every non-empty argv | the same |
- * | `Bash(git status)` | `["git","status"]` and any argv that *starts* with those two words | `["git","status"]` only |
+ * | `Bash(git status)` | `["git","status"]` and any argv that *starts* with those two words | the same words, exactly — plus value-free flags |
  * | `Bash(git status:*)` | the same: `git status`, plus whatever follows it | the same (it says so itself) |
  * | `Bash(git * main)` | the glob, over the argv joined with single spaces (see below) | the same |
  * | `Bash(echo hi > /tmp/out.txt)` | `["echo","hi"]` writing exactly `/tmp/out.txt` — and nothing else | the same (it is already equality) |
@@ -38,22 +38,34 @@
  * A leg that writes through a redirect passes the same argv as the same command without one, so argv
  * alone cannot tell `echo hi > /tmp/out.txt` from `echo hi > ~/.ssh/authorized_keys`. The caller hands
  * over the leg's file targets (`coverage.targets`, produced by `bash-audit.ts` from the walker's
- * `redirects`) and the truth table below decides. It is written to narrow coverage, never to widen it:
+ * `redirects`) and the truth table below decides. A target can be settled two ways, and the second one
+ * is a different question:
+ *
+ *   - the rule **names** the file (`Bash(echo hi > /tmp/out.txt)`), which is a statement about one
+ *     invocation and is compared by equality;
+ *   - or the caller says a direct `write` / `read` of that file would have been allowed anyway
+ *     (`coverage.targetAllowed`). A rule for the words does not have to repeat a permission the session
+ *     already holds: `Bash(make:*)` reaching `make > build.log` adds nothing a direct write to
+ *     `./build.log` would have needed, and refusing it only made users write file names into rules that
+ *     had nothing to do with them.
  *
  * | specifier | what the leg must be |
  * | --- | --- |
- * | exact, no clause | no file target, and its words start with the words named |
+ * | exact, no clause | its words start with the words named, and every target is authorised |
  * | exact, with a clause (`a b > f`) | **equal** words **and** exactly the targets named |
- * | `:*` prefix | no file target (a prefix cannot carry a clause; `:*` says "any words", not "any file") |
- * | glob | no file target (a `*` spans characters in the words; nothing in a glob can name one file) |
+ * | `:*` prefix | every target is authorised (a prefix carries no clause, so it can only ride on the caller's answer) |
+ * | glob | every target is authorised (a `*` spans characters in the WORDS; a file is checked on its own) |
  * | tool-wide `Bash` | anything — it is not a reading of one approval (see below) |
  *
- * So a rule that names no target covers no command that redirects to one, and a rule that names a
- * target covers nothing but that invocation: the clause already wrote down the whole command, so there
- * is no "and whatever follows it" left to extend over. The tool-wide rule is the one exception because
- * it never was a reading of one approval — it is the user's own "every bash command", `dangerous-
- * permissions.ts` strips it before auto mode, and a rule with no specifier has no place to write a
- * target, so refusing here would only make `Bash` stop meaning what the user typed.
+ * Omitting `targetAllowed` is the fail-closed reading — nothing is authorised — which is what a caller
+ * with no write-authority answer says, and what this module said about every redirect before the caller
+ * could say otherwise.
+ *
+ * So a rule that names a target covers nothing but that invocation: the clause already wrote down the
+ * whole command, so there is no "and whatever follows it" left to extend over. The tool-wide rule stays
+ * outside both halves because it never was a reading of one approval — it is the user's own "every bash
+ * command", `dangerous-permissions.ts` strips it before auto mode, and a rule with no specifier has no
+ * place to write a target, so refusing there would only make `Bash` stop meaning what the user typed.
  *
  * ## Strict operands (`{ strictOperands: true }`)
  *
@@ -62,8 +74,12 @@
  * becomes permission to delete a second path the user never saw — and "Allow always" persists that
  * reading as a durable rule. Where the caller says the argv is target-bearing (it has layer 0's verdict:
  * `delete_recursive`, `perm_change`, … — the table lives in `bash-audit.ts`), an **exact** specifier has
- * to name every word the call passes, options included: `rm -rf /tmp/x --verbose` is not covered by
- * `Bash(rm -rf /tmp/x)` and the user is asked once more.
+ * to name every operand the call passes: `rm -rf /tmp/x /tmp/z` is not covered by `Bash(rm -rf /tmp/x)`.
+ *
+ * "Every operand" and not "every word": a flag the rule did not name is covered as long as it can carry no
+ * value of its own (`-v`, `--verbose`), because the harm these categories name is done to operands. A flag
+ * that can carry a path (`-t`, `-o`, `-f`, `--target…`, `--reference…`, `--output…`, anything `--x=y`) still
+ * voids coverage — see {@link isValueFreeFlag}, which is the whole of the difference.
  *
  * Only an exact specifier gets that treatment, and that is a boundary rather than an oversight:
  * `Bash(rm:*)` and `Bash(rm *)` are breadth the user typed themselves — "every rm", "any rm argument" —
@@ -80,9 +96,12 @@
  *   argv, so an argument prefix is invisible for free and a redirect arrives as `coverage.targets`
  *   instead of being shaved off the command; a wrapper word *is* argv[0], and a caller that
  *   wants to see through one has to say so where argv is produced, not here.
- * - **No `xargs` allowance.** The text matcher lets `git status:*` cover `xargs git status …`; this
- *   does not. Those trailing arguments arrive from a pipe at run time, and `xargs` is on the
- *   broad-rule list (`dangerous-permissions.ts`) for exactly that reason. Narrowing on the allow path.
+ * - **No `xargs` allowance on an exact specifier.** The text matcher lets `git status:*` cover
+ *   `xargs git status …`; here that reading exists for the `:*` form only. Those trailing arguments do
+ *   arrive from a pipe at run time, which is why `xargs` is on the broad-rule list
+ *   (`dangerous-permissions.ts`) — but a prefix specifier already covers arbitrary trailing words by
+ *   construction, so honouring the reading there adds nothing the rule did not say. An exact specifier is
+ *   one invocation, and `xargs` changes it ({@link throughXargs}).
  * - **No judgement about argv.** A token the walker could only give as a placeholder
  *   (`__CMDSUB_OUTPUT__`, `__TRACKED_VAR__`) is matched like any other word. Whether a rule may wave
  *   through a value decided at run time is the caller's decision — it has `AstCommand.opaque` — and
@@ -383,6 +402,97 @@ function namedWordsAreAll(named: string[], argv: string[]): boolean {
 	return named.length === argv.length && namedWordsCover(named, argv)
 }
 
+/**
+ * A call word the rule did not name, which can carry nothing of its own: a *single* short letter or a long
+ * `--name`, with no `=` anywhere and no known value-taking spelling.
+ *
+ * The list of refusals is about values, not about style — a flag is only harmless here when it cannot be
+ * followed by (or glued to) a name of its own:
+ *
+ *   - `-t`, `-o` and `-f` take a directory, an output or a file in the verbs that carry them (`rm -t DIR`,
+ *     `cc -o out`, `tar -f archive`), so a call that adds one could be naming a target the rule never saw;
+ *   - the long forms that name a place (`--target…`, `--reference…`, `--output…`, `--file…`, `--directory…`,
+ *     `--dest*`, `--prefix…`, `--input…`) are the same hazard spelled out;
+ *   - any `=` excludes the word outright, which is what keeps `--reference=HEAD` and
+ *     `--output=/etc/passwd` away;
+ *   - a fused short cluster (`-rf`, `-xzf`, `-T list`) is refused even when its letters look harmless,
+ *     because one of them may be the flag that eats the next word — and doubt is answered strictly here.
+ *
+ * Over-strictness only costs one prompt; the alternative is an approval that quietly widens over a target.
+ */
+const PATH_TAKING_SHORT_LETTERS: readonly string[] = ["t", "o", "f"]
+const PATH_TAKING_LONG_PREFIXES: readonly string[] = [
+	"--target", "--reference", "--output", "--file", "--directory", "--dest", "--prefix", "--input",
+]
+
+function isValueFreeFlag(word: string): boolean {
+	if (word.length < 2 || !word.startsWith("-")) return false
+	if (word === "--") return false
+	if (word.includes("=")) return false
+	if (word.startsWith("--")) {
+		if (!/^--[a-z][a-z0-9-]*$/.test(word)) return false
+		return !PATH_TAKING_LONG_PREFIXES.some((prefix) => word.startsWith(prefix))
+	}
+	return /^-[a-z]$/.test(word) && !PATH_TAKING_SHORT_LETTERS.includes(word.slice(1))
+}
+
+/**
+ * The words of an argv that are not options: what the command is *about*, `--`-aware.
+ *
+ * `--` ends the option run, so `rm -- -weird-name` names one operand and not one flag; `-` on its own is an
+ * operand (stdin) rather than an option, which is how the shell reads it.
+ */
+function operandsOf(words: readonly string[]): string[] {
+	const operands: string[] = []
+	let optionsDone = false
+	for (const word of words) {
+		if (!optionsDone && word === "--") {
+			optionsDone = true
+			continue
+		}
+		if (!optionsDone && word.length > 1 && word.startsWith("-")) continue
+		operands.push(word)
+	}
+	return operands
+}
+
+/**
+ * Strict coverage, read the way the harm is worded: the operands have to be exactly the rule's, and the only
+ * words a call may add are flags that carry nothing.
+ *
+ * Exact equality on the whole argv was the first reading, and it cost an approval for adding `-v`: a user who
+ * stored `Bash(rm -rf ./build)` was asked again for `rm -rf ./build -v`, although nothing about what gets
+ * deleted had changed. What the strictness exists to stop is the rule *extending over a second target*, and
+ * the targets of these verbs are their operands (`rm`, `chmod`, `mv`, `rsync` — `bash-audit.ts` owns the
+ * category table that decides). So the comparison is in two halves, and both have to hold:
+ *
+ *   1. the operands, in order and unchanged, are exactly the rule's — one added path refuses coverage, and
+ *      so does one added word in a position the rule did not name (`chmod +x a.sh b.sh`);
+ *   2. every word the rule names is present in the call, and everything the call adds is a value-free flag
+ *      ({@link isValueFreeFlag}) — an option that can carry a path voids coverage, as does a fused cluster.
+ *
+ * The flag half of 2 runs over a multiset rather than a prefix walk: `git clean -fd -e x` and
+ * `git clean -e x -fd` are one invocation to bash, and both are refused because `-e` is not value-free.
+ */
+function operandsAreAll(named: readonly string[], argv: readonly string[]): boolean {
+	if (named.length === 0 || named.length > argv.length) return false
+	const namedOperands = operandsOf(named)
+	const calledOperands = operandsOf(argv)
+	if (namedOperands.length !== calledOperands.length) return false
+	for (let at = 0; at < namedOperands.length; at++) {
+		if (namedOperands[at] !== calledOperands[at]) return false
+	}
+	// Every word the rule names has to be one the call passes, or the rule is describing an invocation the
+	// call is not (a rule may name a flag this call omits, and then it does not cover it).
+	const extra = [...argv]
+	for (const word of named) {
+		const at = extra.indexOf(word)
+		if (at < 0) return false
+		extra.splice(at, 1)
+	}
+	return extra.every(isValueFreeFlag)
+}
+
 /** How far a rule may be read past the words it names. {@link bashRuleCoversArgv} for the contract. */
 export type ArgvCoverage = {
 	/**
@@ -398,6 +508,13 @@ export type ArgvCoverage = {
 	 * target then covers nothing here rather than covering a write nobody authorised.
 	 */
 	targets?: readonly RedirectTarget[]
+	/**
+	 * The caller's answer for one file the command redirects to: would a direct `write` / `read` of it go
+	 * through without asking (`permissions.ts` → `redirectAuthority`)? Omitted means "no" — the
+	 * fail-closed reading, and the only one a module that sees no session state can give. A target the
+	 * rule itself names never needs it.
+	 */
+	targetAllowed?: (target: RedirectTarget) => boolean
 }
 
 /**
@@ -415,11 +532,13 @@ export type ArgvCoverage = {
  * Omitting the argument keeps the prefix contract exactly (`namedWordsCover`), which is what a caller with
  * no verdict — or a command whose risk is not set by its targets — wants.
  *
- * `coverage.targets` is the narrower of the two and is not opt-in: when the command writes or reads a
- * file through a redirect, only an exact specifier that names that file — same operator, same
- * descriptor — covers it. A rule that names no target stops covering the command, which is the point:
- * `Bash(echo hi)` covering `echo hi > ~/.ssh/authorized_keys` is the over-grant this repository
- * already refuses to *write*, and refusing it here too is what makes the two halves agree.
+ * `coverage.targets` is the other half: when the command writes or reads a file through a redirect, a rule
+ * that names no target may cover it only when every one of those files is somewhere the session is
+ * already allowed to write or read (`coverage.targetAllowed`) — which is why `Bash(make:*)` reaches
+ * `make > build.log` while `Bash(echo:*)` does not reach `echo key >> ~/.ssh/authorized_keys` (the floor,
+ * and then the target). A rule that names the file is compared against it instead, by equality. Leaving
+ * `targetAllowed` out means nothing is authorised, which is the fail-closed reading this module shipped
+ * with and the only one a caller holding no session state can give.
  */
 export function bashRuleCoversArgv(
 	rule: PermissionRule,
@@ -446,10 +565,10 @@ export function bashRuleCoversArgv(
 	// Renders the argv back to text so that engine can score it: joining the resolved words with
 	// single spaces is not re-tokenising anything — every word is still exactly one argument in the
 	// string it lands in, and a star in the rule spans characters inside a word just as it always did.
-	// A star spans characters in the WORDS only: nothing in a glob names one file without also naming
-	// every file, so a glob never speaks for a command that redirects to one.
+	// Stars span the WORDS; a file is a separate question, answered by the targets below.
 	if (shape.type === "wildcard") {
-		return targets.length === 0 && matchWildcardPattern(shape.pattern, argv.join(" "))
+		if (!targetsAreAllowed(targets, coverage)) return false
+		return matchWildcardPattern(shape.pattern, argv.join(" "))
 	}
 
 	const named = readSpecifier(shape.type === "prefix" ? shape.prefix : shape.command)
@@ -463,10 +582,67 @@ export function bashRuleCoversArgv(
 		if (shape.type === "prefix") return false
 		return namedWordsAreAll(named.words, argv) && sameTargets(named.targets, targets)
 	}
-	if (targets.length > 0) return false
+	if (targets.length > 0) {
+		// The rule names no file, so it may speak for these redirects only if the caller says each of
+		// them was somewhere this session may write/read anyway.
+		if (!targetsAreAllowed(targets, coverage)) return false
+	}
 
-	if (coverage.strictOperands && shape.type !== "prefix") return namedWordsAreAll(named.words, argv)
-	return namedWordsCover(named.words, argv)
+	if (coverage.strictOperands && shape.type !== "prefix") return operandsAreAll(named.words, argv)
+	if (namedWordsCover(named.words, argv)) return true
+	// `xargs cmd …` is the same programme run with arguments that were decided one pipe earlier, and a `:*`
+	// specifier already covers "this command with whatever arguments follow". Refusing the spelling removed
+	// coverage of an ordinary idiom (`… | xargs git status`) without narrowing what the rule says, so it is
+	// read here — and only here: an exact specifier keeps its equality, because there the reading is one
+	// invocation and `xargs` adds words to it.
+	if (shape.type !== "prefix") return false
+	const throughPipe = throughXargs(argv)
+	return throughPipe !== null && namedWordsCover(named.words, throughPipe)
+}
+
+/**
+ * `xargs` options that consume nothing of their own. Anything else — a value-taking option (`-n 2`, `-d\n`,
+ * `-I {}`) or a value glued to an option — ends the reading, because the next words would then be that
+ * option's value rather than the command.
+ */
+const XARGS_VALUE_FREE_OPTIONS: readonly string[] = [
+	"-0", "--null", "-r", "--no-run-if-empty", "-t", "--verbose", "-p", "--interactive", "-x", "--exit",
+]
+
+/**
+ * The command `xargs` would run, or null when this argv is not an `xargs` invocation this module can read.
+ *
+ * `xargs` itself is a plain word on argv (the walker does not peel it, on purpose — `bash-audit.ts` keeps
+ * the wrapper peel to the six wrappers whose own argument shapes it models), so the reading happens here:
+ * step over the value-free options and whatever follows is the command and its arguments.
+ */
+function throughXargs(argv: readonly string[]): string[] | null {
+	const head = argv[0]
+	if (head === undefined) return null
+	if (head.slice(head.lastIndexOf("/") + 1) !== "xargs") return null
+	let at = 1
+	while (at < argv.length) {
+		const word = argv[at]!
+		if (word === "--") {
+			at++
+			break
+		}
+		if (word === "-" || !word.startsWith("-")) break
+		if (!XARGS_VALUE_FREE_OPTIONS.includes(word)) return null
+		at++
+	}
+	const rest = argv.slice(at)
+	return rest.length === 0 ? null : rest
+}
+
+/**
+ * Do the rule's words reach a command that touches files? With no targets the question does not arise;
+ * with targets, each one has to be cleared by the caller.
+ */
+function targetsAreAllowed(targets: readonly RedirectTarget[], coverage: ArgvCoverage): boolean {
+	if (targets.length === 0) return true
+	const allowed = coverage.targetAllowed
+	return allowed !== undefined && targets.every((target) => allowed(target))
 }
 
 /**

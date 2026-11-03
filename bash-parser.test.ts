@@ -21,6 +21,13 @@ async function freshAdapter(): Promise<Adapter> {
   return (await import("./bash-parser.ts")) as Adapter;
 }
 
+/**
+ * Same budget as bash-parser-availability.test.ts, same cause: a fresh module recompiles the grammar, and the
+ * wasm instantiate sometimes takes 5–8 s under a full-suite load, past vitest's 5 s default. Budget, not
+ * assertion.
+ */
+const GRAMMAR_LOAD_TIMEOUT = 20_000;
+
 /** First node of the given type, depth-first, or null. */
 function pick(node: { type: string; children: any[] }, type: string): any | null {
   if (node.type === type) return node;
@@ -31,7 +38,7 @@ function pick(node: { type: string; children: any[] }, type: string): any | null
   return null;
 }
 
-describe("bash-parser: lifecycle", () => {
+describe("bash-parser: lifecycle", { timeout: GRAMMAR_LOAD_TIMEOUT }, () => {
   it("fails closed before init", async () => {
     const mod = await freshAdapter();
     expect(mod.isBashParserReady()).toBe(false);
@@ -75,7 +82,7 @@ describe("bash-parser: lifecycle", () => {
   });
 });
 
-describe("bash-parser: parsing", () => {
+describe("bash-parser: parsing", { timeout: GRAMMAR_LOAD_TIMEOUT }, () => {
   // One shared instance for the parse-only tests: they do not touch init state.
   const withParser = async () => {
     const mod = await freshAdapter();
@@ -130,7 +137,7 @@ describe("bash-parser: parsing", () => {
   });
 });
 
-describe("bash-parser: limits", () => {
+describe("bash-parser: limits", { timeout: GRAMMAR_LOAD_TIMEOUT }, () => {
   const atCap = (mod: Adapter, text: string) => mod.parseBash(text);
 
   it("refuses a command over the 10 000 character cap without parsing it", async () => {

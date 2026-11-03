@@ -94,6 +94,20 @@ describe("buildPreciseDenial", () => {
 		expect(msg).toContain("RETRY: only after you change the command")
 	})
 
+	it("tells a refused outside read that the path needs permission, not a rewrite", () => {
+		const msg = buildPreciseDenial({
+			head: "Not auto-approved: read outside the project",
+			segments: [{ command: "read /x/plan.md", category: "read_only", targets: ["~/x/plan.md"] }],
+			futility: "only-after-rewrite",
+		})
+		expect(msg).toContain("reads outside the project (~/x/plan.md)")
+		expect(msg).toContain("rewriting will not help")
+		expect(msg).toContain("name the exact path")
+		// Inverse: the generic split-and-literal advice was the defect, and must not come back for a plain read.
+		expect(msg).not.toMatch(/Split this into separate calls/)
+		expect(msg).not.toContain("could not establish that this is safe")
+	})
+
 	it("names only the offending segment, not harmless siblings in the chain", () => {
 		const msg = buildPreciseDenial({
 			head: "Not auto-approved",

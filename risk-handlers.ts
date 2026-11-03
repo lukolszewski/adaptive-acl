@@ -13,8 +13,10 @@
 
 import path from "node:path"
 import { existsSync } from "node:fs"
-import type { PathClass, PathContext } from "./risk-paths.ts"
+import { currentClusterObject, LOCAL_MACHINE_OBJECT, type PathClass, type PathContext } from "./risk-paths.ts"
 import type { SimpleCommand } from "./shell-lexer.ts"
+import { grammarFor, isObjectStoreUri } from "./target-grammar.ts"
+import { NO_OBJECT_TARGET } from "./grant-verify.ts"
 import {
 	seg,
 	target,
@@ -39,6 +41,8 @@ export type HandlerContext = {
 	pipesTo: string[] | null
 	evaluateBash: (s: string, o?: Partial<PolicyOptions>) => PolicyDecision
 	decideWrite: (pc: PathClass, verb: string) => SegmentDecision
+	/** The path-space answer for READING this path (risk-policy.ts `decideRead`). */
+	decideRead: (pc: PathClass, verb: string) => SegmentDecision
 	classify: (p: string) => PathClass
 	display: (pc: PathClass) => string
 }
@@ -90,24 +94,197 @@ const rawOf = (c: SimpleCommand) => c.raw.trim()
 
 // ---------------------------------------------------------------- command sets
 
-const READONLY_BINS = new Set([
-	"ls", "dir", "vdir", "cat", "head", "tail", "less", "more", "wc", "stat", "file", "du", "df", "tree",
-	"grep", "egrep", "fgrep", "rg", "ag", "ack", "fd", "fdfind", "bat", "eza", "exa", "lsd",
-	"which", "whereis", "type", "printenv", "uname", "whoami", "id", "date", "cal",
-	"uptime", "free", "top", "htop", "btop", "nproc", "lscpu", "lsusb", "lspci", "lsblk",
-	"nvidia-smi", "rocm-smi", "sensors", "uptime", "hostname", "hostnamectl", "groups",
-	"sort", "uniq", "cut", "tr", "column", "paste", "join", "comm", "diff", "cmp",
-	"md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "b2sum", "basename", "dirname",
-	"realpath", "readlink", "jq", "yq", "xxd", "hexdump", "od", "strings", "nl", "tac",
-	"expr", "seq", "bc", "true", "false", "yes", "tty", "locale", "getent", "ldd",
-	"ps", "pstree", "pgrep", "pidof", "lsof", "ss", "netstat", "ip", "ifconfig", "route", "arp",
-	"dig", "nslookup", "host", "ping", "ping6", "traceroute", "mtr", "whois",
-	"infocmp", "tput", "stty", "printf", "echo", "env", "look", "man", "info", "help",
-	"apropos", "whatis", "zcat", "zless", "zgrep", "xzcat", "bzcat", "gunzip",
-	"sleep", "wait", "sync", "test", "[", "[[", "pwd", "dirs", "history", "fc",
-	"col", "fold", "fmt", "rev", "shuf", "timeout", "watch", "time", "times",
-	"gguf-dump", "sqlite3", // sqlite3 handled specially below (read vs write)
+/**
+ * Binaries whose operands are FILES whose bytes (or metadata) they read.
+ *
+ * Each operand decides the verdict: inside the project free, outside it asks, secret-bearing it
+ * asks as `read_secret`. With no operand the command filters its stdin and reads nothing new. This table is
+ * the old `READONLY_BINS` minus the entries that were never file readers — see {@link ARG_DATA_BINS} and
+ * {@link HOST_READ_OBJECTS} — so it is *not* a looser list than the one it replaces: an entry that moved out
+ * moved to a table that still answers for it.
+ */
+const FILE_READERS = new Set([
+	"ls", "dir", "vdir", "eza", "exa", "lsd", "tree", "cat", "head", "tail", "less", "more", "bat", "nl", "tac",
+	"wc", "stat", "file", "du", "strings", "xxd", "hexdump", "od", "gguf-dump",
+	"grep", "egrep", "fgrep", "rg", "ag", "ack", "fd", "fdfind", "zgrep", "zcat", "zless", "xzcat", "bzcat", "gunzip",
+	"sort", "uniq", "cut", "column", "paste", "join", "comm", "diff", "cmp", "col", "fold", "fmt", "rev", "shuf",
+	"md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "b2sum",
+	"look", "man", "info", "jq", "yq",
 ])
+
+/**
+ * Binaries that never open the thing their argument names: the operand is data — a word, a number, a path
+ * *string*. `echo`, `printf`, `basename`, `realpath`, `date`, `test` print or compute; the free list covers
+ * them ("the shell's own state"), and `which`/`type`/`command -v` are named on it explicitly.
+ *
+ * They still pay the secret check the old table applied, so `echo ~/.ssh/id_rsa` keeps asking: a zero-loosening
+ * line is measured against that table and an argument that names a credential file is
+ * worth one prompt even when nothing is read.
+ */
+const ARG_DATA_BINS = new Set([
+	"date", "cal", "expr", "seq", "bc", "true", "false", "yes", "tty", "tr",
+	"basename", "dirname", "realpath", "readlink", "which", "whereis", "type", "help", "apropos", "whatis",
+	"infocmp", "tput", "stty", "locale", "printf", "echo", "sleep", "wait", "sync", "test", "[", "[[", "pwd", "dirs", "fc",
+	"timeout", "watch", "time", "times",
+])
+
+/**
+ * Search/JSON tools whose FIRST operand is the pattern or filter, not a path (`grep RE src`, `jq '.a' f`,
+ * `fd PATTERN .`). Skipping it is CLI grammar, not English: with `-e`/`-f` the pattern is in the flag, so
+ * then nothing is skipped. Without this, `grep -r /etc/passwd src` would be reported as reading `/etc/passwd`
+ * when it only searches for that string, and `rg -F '$(' src` would be a path.
+ */
+const PATTERN_FIRST_BINS = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack", "fd", "fdfind", "zgrep", "look", "jq", "yq"])
+const PATTERN_FLAGS = ["-e", "--regexp", "-f", "--file", "--from-file", "--slurpfile"]
+
+/**
+ * The reads that are not reads of a FILE and are not machine status either.
+ *
+ * After the two larger families are taken out, this table holds what is left: a query aimed at SOMEBODY
+ * ELSE'S service (DNS, reachability, a path to a host) and a read of a system database rather than of this
+ * machine's own state. The value is the object the read sees, which is what a grant has to name. `ps`, `df`,
+ * `uptime`, `ip`, `ss`, `lscpu` and the rest of the status families are no longer here — they live in
+ * {@link MACHINE_STATUS_BINS} and are named by the MACHINE they report on, which is the object a troubleshooting
+ * grant is given.
+ *
+ * A read is free only under the two rules stated here: a tool's own information (`--version`, `--help`, `man`,
+ * `which`/`type`/`whereis`) and the shell's own state (builtins, `pwd`, `cd`, `echo`/`printf`, `true`/`false`).
+ * Reading the ENVIRONMENT is neither free nor a status read: `env`/`printenv` answer `read_secret`.
+ */
+const HOST_READ_OBJECTS: Record<string, string> = {
+	getent: "the system account databases", ldd: "shared library resolution",
+	dig: "DNS records", nslookup: "DNS records", host: "DNS records", whois: "registration data",
+	ping: "a host's reachability", ping6: "a host's reachability", traceroute: "the network path", mtr: "the network path",
+}
+
+/**
+ * The status families whose object is a MACHINE or a CLUSTER.
+ *
+ * These are the reads a person means when they say "find out why X is broken": processes, disks and memory,
+ * CPU and hardware, the network configuration, what the init system and the container runtime report. They get
+ * a category of their own — `read_system_state` — granted by TROUBLESHOOTING INTENT rather than by a
+ * sentence naming each command, because nobody says "you may run df" when they say "go find out why the box is
+ * slow". Every entry names in `what` the thing it reports on; the OBJECT is the machine, never this table.
+ *
+ * What is NOT here is a decision, not an oversight:
+ *  · `env` / `printenv` / bare `env` / `docker inspect` — the environment is where a session keeps its tokens, so
+ *    they answer `read_secret`, out of reach of a troubleshooting grant;
+ *  · `dig`, `nslookup`, `host`, `whois`, `ping`, `traceroute`, `mtr` — these query somebody ELSE's machine, so
+ *    their object is that service or host and they keep their own answer (`read_only`);
+ *  · `getent` (every account on the box, not this user's own identity) and `ldd` (it opens the binary) likewise;
+ *  · anything that CHANGES state keeps its own category — see {@link STATUS_CHANGE_WORDS}, which is what stops a
+ *    grant for reading `ip` from buying `ip link set eth0 down`.
+ */
+const MACHINE_STATUS_BINS: Record<string, string> = {
+	ps: "the process table", pgrep: "the process table", pidof: "the process table", pstree: "the process tree",
+	top: "the process table", htop: "the process table", btop: "the process table",
+	lsof: "which process holds which file", fuser: "which process holds a file",
+	df: "filesystem usage", free: "memory usage", lsblk: "the block devices", uptime: "uptime and load",
+	nproc: "the CPU count", lscpu: "CPU information", lsusb: "attached USB devices", lspci: "PCI devices",
+	sensors: "sensor readings", "nvidia-smi": "GPU state", "rocm-smi": "GPU state",
+	uname: "kernel and machine information", hostname: "the host name", hostnamectl: "the host name",
+	id: "the current user and its groups", whoami: "the current user", groups: "the current user's groups",
+	ip: "the network configuration", ifconfig: "the network configuration", ss: "the socket table",
+	netstat: "the socket table", route: "the routing table", arp: "the ARP table",
+}
+
+/**
+ * The argument words that turn a network-configuration tool into a CHANGE rather than a status read.
+ *
+ * `ip`, `route`, `arp` and `ifconfig` are read-only tools only until their next argument: `ip link set`,
+ * `route add`, `arp -d` rewrite the machine. Status reads are granted by intent, so a family that can also write
+ * has to answer for the writing separately — otherwise "go look at the networking" would buy the reconfiguration.
+ * These are CLI grammar (the same kind of table `DOCKER_READ` and `KUBECTL_READ` are), never prose.
+ */
+const STATUS_CHANGE_WORDS = new Set([
+	"add", "del", "delete", "change", "replace", "set", "flush", "new", "rename", "append", "preappend", "purge",
+	"promisc", "down", "up", "mtu", "txqueuelen",
+])
+
+/** `arp -s` / `arp -d` and `ss -K` are the flag-shaped changes in the same family. */
+const STATUS_CHANGE_FLAGS = new Set(["-s", "-d", "--set", "--delete", "-K", "-D", "-E"])
+
+/** A read of a machine's or a cluster's own state — the `read_system_state` row. */
+function statusRead(raw: string, object: string, what: string): SegmentDecision[] {
+	return [seg("ask", "read_system_state", what, raw, [target(object)])]
+}
+
+/**
+ * The object of a status read that is scoped to ONE named unit (`journalctl -u X`, `systemctl status X`).
+ *
+ * The outcome aimed for is that a `read_system_state` grant naming the service answers the read,
+ * while a machine-wide read (all logs, every disk, load) keeps asking. Two things have to be true at once for
+ * that, and spelling the object as `machine/unit` is what makes both true at the same time:
+ *
+ *  · the unit is part of the object, so a grant naming the service matches it (the component matcher asks
+ *    "does any component of the entity equal the target", so `gettemp` reaches `localhost/gettemp` — the same
+ *    rule that lets an image name reach `myrepo/app:1.0`);
+ *  · the machine is still part of it, so the approval a user already gave for THIS machine — the object every
+ *    local status read carries — keeps answering the unit-scoped reads too. Dropping the machine
+ *    would have made one `systemctl status nginx` cost a fresh prompt inside a session whose user had just
+ *    approved reading the box.
+ *
+ * And the direction this deliberately excludes stays excluded by construction: a machine-wide read keeps its object
+ * `localhost`, which a service-named grant does not reach, so `journalctl` with no `-u`, `df` and `uptime` keep
+ * asking (pinned in `grants-imply.test.ts`).
+ */
+function unitReadObject(machine: string, unit: string): string {
+	const name = unit.trim()
+	return name ? `${machine}/${name}` : machine
+}
+
+/** The single unit a read names, if it names exactly one.
+ *
+ * Exactly one, deliberately: `systemctl status a b` and `journalctl -u a -u b` read BOTH, so answering them from
+ * a grant that names `a` would be reading a service the user never mentioned. Two names fall back to the machine
+ * object, which is the answer such a read had before a unit could join it.
+ */
+function soleUnit(units: string[]): string | undefined {
+	const named = [...new Set(units.map((u) => u.trim()).filter(Boolean))]
+	return named.length === 1 ? named[0] : undefined
+}
+
+/** `journalctl -u name` / `--unit name` / `--unit=name`, in the order they were written. */
+function journalUnits(argv: string[]): string[] {
+	const units: string[] = []
+	for (let i = 0; i < argv.length; i++) {
+		const a = argv[i]!
+		if (a === "-u" || a === "--unit") {
+			const next = argv[i + 1]
+			if (next && !next.startsWith("-")) units.push(next)
+			continue
+		}
+		if (a.startsWith("--unit=")) units.push(a.slice("--unit=".length))
+		else if (a.startsWith("-u") && a.length > 2) units.push(a.slice(2))
+	}
+	return units
+}
+
+/**
+ * The machine a container-runtime read is addressed to (the `docker -H` / `DOCKER_HOST` case).
+ *
+ * An unset address means the local socket, which is this machine; a `tcp://host:port` means that host, and the
+ * scheme and port are transport — the object a user can spell is the host. An address this function cannot read
+ * falls back to the local machine, the narrower answer, because that is what an unaddressed client does.
+ */
+function daemonMachine(argv: string[], h: HandlerContext): string {
+	const written = flagValue(argv, "-H", "--host") ?? h.opts.env?.DOCKER_HOST ?? process.env.DOCKER_HOST ?? ""
+	const trimmed = written.trim()
+	if (!trimmed || trimmed.startsWith("unix://") || trimmed.startsWith("/")) return LOCAL_MACHINE_OBJECT
+	const host = netHost(trimmed)
+	return host || LOCAL_MACHINE_OBJECT
+}
+
+/** Is this command the read form of its family, or the form that changes the machine? */
+function asksForAChange(bin: string, argv: string[]): boolean {
+	if (argv.slice(1).some((a) => STATUS_CHANGE_WORDS.has(a) || STATUS_CHANGE_FLAGS.has(a))) return true
+	// `ifconfig` has no subcommand: `ifconfig` and `ifconfig -a` report, `ifconfig eth0 10.0.0.1 netmask …`
+	// assigns. Naming the interface is the change, so a second operand is the whole test — and the cost of
+	// getting this direction wrong is a troubleshooting grant buying a reconfiguration, which is the one thing
+	// the status-read exclusion exists to prevent.
+	if (bin === "ifconfig") return positionals(argv).length >= 2
+	return false
+}
 
 // verbs that read the terminal / control flow — allow
 const SHELL_BUILTIN_ALLOW = new Set([
@@ -116,6 +293,94 @@ const SHELL_BUILTIN_ALLOW = new Set([
 	"exit", "trap", "getopts", "read", "let", "eval-noop", "shopt", "complete", "compgen",
 	"disown", "jobs", "fg", "bg", "suspend", "logout", ":", "command", "builtin", "enable",
 ])
+
+/**
+ * The free list: the flags that make a command a report about ITSELF, nothing else.
+ *
+ * Only the two long spellings, deliberately. `-h` is "human-readable" on `df`, `du`, `ps`, `free` — all of
+ * which are reads that must ask — and `-V` is "version" on some tools and "verbose" on others. A free
+ * answer granted by a letter that means three things is how `df -h` would stop asking.
+ */
+const SELF_INFO_FLAGS = new Set(["--version", "--help"])
+
+/** A command reporting on itself is free, and it is the ONLY free non-file read besides shell state. */
+function isSelfReport(argv: string[]): boolean {
+	return argv.length === 2 && SELF_INFO_FLAGS.has(argv[1]!)
+}
+
+/** A read of something that is not a file — a daemon, a cluster, a registry, host state. */
+function objectRead(raw: string, object: string, what: string): SegmentDecision[] {
+	return [seg("ask", "read_only", what, raw, [target(object)])]
+}
+
+/**
+ * The session environment, which is a SECRET read and not a status read.
+ *
+ * The object keeps its older spelling (`environment variables`) so a row the user approved before this was a
+ * category of its own still matches; only the category moved, and it moved the strict way — a `read_only` grant
+ * no longer reaches it, and neither does a grant to read this machine's state.
+ */
+function environmentRead(raw: string, v: string): SegmentDecision[] {
+	return [seg("ask", "read_secret", `${v} — reads the session environment`, raw, [target("environment variables")])]
+}
+
+/** The free list again: the tool's own information, or the shell's own state. */
+function infoRow(raw: string, what: string): SegmentDecision[] {
+	return [seg("allow", "read_only", what, raw)]
+}
+
+/**
+ * The object a client/daemon read is about.
+ *
+ * A user who means "you may look at containers" writes `docker`, not `unix:///var/run/docker.sock`: the object
+ * has to be spellable by the person who grants it, because it is also the value a stored grant carries. Where
+ * the client can address several targets the address wins — `--context prod` *is* "the prod cluster" — so one
+ * cluster's approval does not quietly cover every other cluster the same binary can reach.
+ */
+function clusterObject(argv: string[], client: string): string {
+	return flagValue(argv, "--context", "--kube-context") ?? client
+}
+
+/**
+ * The registry an image/artifact ref is read from.
+ *
+ * The first path component is a host only when it is spelled like one (a dot, a colon, or `localhost`);
+ * otherwise the ref is a shortcut for the vendor registry, and naming the shortcut (`nginx`) would make a
+ * grant for one image look like a grant for the registry. Unnamed → the client's own default.
+ */
+function registryOf(ref: string, client: string): string {
+	const first = (ref.split("/")[0] ?? "").trim()
+	if (first && (first === "localhost" || first.includes(".") || first.includes(":"))) return first
+	return DEFAULT_REGISTRY[client] ?? client
+}
+
+/** Where a bare ref (`nginx`, `redis:7`) actually comes from — the registry the client defaults to. */
+const DEFAULT_REGISTRY: Record<string, string> = { docker: "docker.io", podman: "docker.io", nerdctl: "docker.io" }
+
+/**
+ * The cluster a read is addressed to, as opposed to {@link clusterObject}, which is the answer kept for
+ * the clients whose reads are NOT status reads (helm, terraform): the context the command names, else the
+ * kubeconfig's current context, else the client's own name. With no kubeconfig probe (unit tests, `fs: false`)
+ * it is the client name, so a test never depends on which cluster the machine happens to be logged into.
+ */
+function clusterReadObject(argv: string[], client: string, h: HandlerContext): string {
+	return currentClusterObject(flagValue(argv, "--context", "--kube-context"), client, h.ctx.home, h.opts.env, h.opts.fs)
+}
+
+/**
+ * `--dry-run` splits by WHERE it runs.
+ *
+ * `--dry-run=server` sends the object to the API for validation, which is a read of that cluster and asks like
+ * one; `--dry-run` / `--dry-run=client` renders the manifest locally and touches nothing outside the project,
+ * so it stays the tool's own output. Guessing the other way either prompts for a local render or waves through
+ * a server round trip.
+ */
+function dryRunRows(argv: string[], client: string, raw: string, what: string): SegmentDecision[] {
+	const mode = flagValue(argv, "--dry-run")
+	return mode === "server"
+		? objectRead(raw, clusterObject(argv, client), `${what} — --dry-run=server validates against the cluster`)
+		: infoRow(raw, `${what} (rendered locally)`)
+}
 
 const WRAPPERS = new Set(["timeout", "time", "nice", "ionice", "nohup", "stdbuf", "strace", "ltrace", "command", "builtin", "exec", "setsid", "unbuffer", "script", "chronic", "flock", "taskset", "numactl"])
 
@@ -153,6 +418,10 @@ const NEVER_WIPE_HISTORY_RE = /\/(\.bash_history|\.zsh_history|\.python_history|
 // ---------------------------------------------------------------- main entry
 
 export function classifyVerb(argvIn: string[], h: HandlerContext): SegmentDecision[] {
+	return withTargetlessObjects(classifyVerbRows(argvIn, h))
+}
+
+function classifyVerbRows(argvIn: string[], h: HandlerContext): SegmentDecision[] {
 	let argv = argvIn.filter((a) => a !== "")
 	if (argv.length === 0) return [seg("allow", "read_only", "empty", rawOf(h.cmd))]
 
@@ -192,12 +461,15 @@ export function classifyVerb(argvIn: string[], h: HandlerContext): SegmentDecisi
 			continue
 		}
 		if (v === "env") {
-			argv = argv.slice(1)
-			while (argv.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0]!) || argv[0] === "-i" || argv[0] === "-u")) {
-				const f = argv[0]!
-				argv = argv.slice(1)
-				if (f === "-u" && argv.length) argv = argv.slice(1)
-			}
+			const inner = stepOverEnvArguments(argv.slice(1))
+			// An option this table does not know means the command behind `env` cannot be located. Guessing
+			// where it starts would judge some other command than the one that runs, so hand it to the model.
+			if (inner === null) return [seg("unknown", "unknown_command", `run \`${rawOf(h.cmd)}\` — env option not understood`, rawOf(h.cmd))]
+			// Nothing follows: `env` is not a wrapper here, it IS the command, and what it prints is the
+			// session environment — the read `printenv` is (reading the environment is not shell state).
+			// Peeling it away called `env | grep '^PI_'` free, which is how a token in an env var got read.
+			if (inner.length === 0) break
+			argv = inner
 			continue
 		}
 		if (v === "xargs") {
@@ -225,6 +497,52 @@ function base(word: string): string {
 	return path.posix.basename(word)
 }
 
+/** `NAME=value` — an argument that belongs to `env` rather than to the command it would run. */
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+/**
+ * `env`'s own arguments — deliberately the same vocabulary §11.2 gives the walker, because the two engines
+ * disagreeing about where a wrapper ends is how a command gets judged as something else.
+ */
+const ENV_BARE_OPTIONS = new Set(["--", "-i", "-0", "--ignore-environment", "--null"])
+const ENV_VALUE_OPTIONS = new Set(["-u", "--unset"])
+
+/**
+ * Step over `env`' own arguments and return the command it runs — the empty array when it runs none.
+ *
+ * `null` is a third answer and it is not the same question as "no command": the shape is one this table
+ * cannot read, so where the wrapped command starts is unknown and the verdict belongs to the model. An
+ * empty answer means the command ran nothing and printed the environment, which is a read.
+ */
+function stepOverEnvArguments(args: string[]): string[] | null {
+	let i = 0
+	while (i < args.length) {
+		const word = args[i]!
+		if (ENV_ASSIGNMENT.test(word)) {
+			i += 1
+			continue
+		}
+		if (!(word.length > 1 && word.startsWith("-"))) return args.slice(i) // the command starts here
+		const long = word.startsWith("--")
+		const equals = word.indexOf("=")
+		const name = long ? (equals > 0 ? word.slice(0, equals) : word) : word.slice(0, 2)
+		const valueWrittenWithIt = long ? equals > 0 : word.length > 2
+		if (ENV_BARE_OPTIONS.has(name)) {
+			// `-i=…` is not a spelling of `env` this table knows, and guessing is how an option swallows a command.
+			if (valueWrittenWithIt) return null
+			i += 1
+			continue
+		}
+		if (ENV_VALUE_OPTIONS.has(name)) {
+			// `-u NAME`, `-uNAME` and `--unset=NAME` all drop one variable; only the first eats the next word.
+			i += valueWrittenWithIt ? 1 : 2
+			continue
+		}
+		return null
+	}
+	return []
+}
+
 /** sudo wrapping: NEVER stays NEVER; everything else becomes ask/privilege (spec §2.2). */
 function escalateSudo(decisions: SegmentDecision[], h: HandlerContext): SegmentDecision[] {
 	return decisions.map((d) => {
@@ -239,6 +557,10 @@ function escalateSudo(decisions: SegmentDecision[], h: HandlerContext): SegmentD
 function dispatch(argv: string[], h: HandlerContext): SegmentDecision[] {
 	const v = base(argv[0]!)
 	const raw = rawOf(h.cmd)
+
+	// The free list, first because it is the cheapest answer and the one an agent hits constantly: `git
+	// --version`, `docker --help`. A tool describing itself reads nothing outside the project.
+	if (isSelfReport(argv)) return infoRow(raw, `${v} ${argv[1]} (the tool's own version/help)`)
 
 	switch (v) {
 		case "rm": case "unlink": return rmHandler(argv, h)
@@ -280,7 +602,7 @@ function dispatch(argv: string[], h: HandlerContext): SegmentDecision[] {
 		case "nc": case "ncat": case "netcat": case "socat": return ncHandler(argv, h, v)
 		case "kill": case "pkill": case "killall": case "killall5": return killHandler(argv, h, v)
 		case "systemctl": return systemctlHandler(argv, h)
-		case "service": case "rc-service": return [seg("ask", "system_config", `service control: ${raw}`, raw, targetsOf(argv, h))]
+		case "service": case "rc-service": return serviceControlRows(argv, h, v)
 		case "journalctl": return journalctlHandler(argv, h)
 		case "crontab": return crontabHandler(argv, h)
 		case "iptables": case "ip6tables": case "nft": case "ufw": case "firewall-cmd": return firewallHandler(argv, h, v)
@@ -299,10 +621,12 @@ function dispatch(argv: string[], h: HandlerContext): SegmentDecision[] {
 			if (argv.slice(1).every((a) => /^(--help|-h|--version|-v|--list-models|list|--list|--print-config)$/.test(a)) && argv.length <= 3) {
 				return [seg("allow", "read_only", `${v} ${argv[1] ?? ""}`, raw)]
 			}
-			return [seg("ask", "agent_spawn", `spawn coding agent: ${raw.slice(0, 120)}`, raw)]
+			// The object of spawning an agent is the AGENT, not its prompt: one approval covers every pi
+			// invocation (chained, redirected, backgrounded, nohup'd) and never covers a different program.
+			return [seg("ask", "agent_spawn", `spawn coding agent: ${raw.slice(0, 120)}`, raw, [target(v)])]
 		}
 		case "code": case "subl": case "vim": case "vi": case "nvim": case "nano": case "emacs":
-			return [seg("ask", "interactive_editor", `open interactive editor ${v}`, raw)]
+			return editorHandler(argv, h, v)
 		case "eval": return [seg("unknown", "interpreter_unknown", `eval: ${argv.slice(1).join(" ").slice(0, 200)}`, raw, [], { inlineCode: argv.slice(1).join(" ") })]
 		case "source": case ".": return sourceHandler(argv, h)
 		case "ollama": case "llama-server": case "llama-cli": case "vllm": return [seg("ask", "network_listen", `start model server ${v}`, raw, targetsOf(argv, h))]
@@ -313,12 +637,20 @@ function dispatch(argv: string[], h: HandlerContext): SegmentDecision[] {
 	if (INTERPRETERS.has(v)) return interpreterHandler(argv, h, v)
 	if (SHELL_BUILTIN_ALLOW.has(v)) return [seg("allow", "read_only", `shell builtin ${v}`, raw)]
 
-	if (READONLY_BINS.has(v)) {
-		// generic read-only: check file args for secrets
-		const secretRead = positionals(argv).map((p) => h.classify(p)).find((pc) => pc.isSecret)
-		if (secretRead) return [seg("ask", "read_secret", `read secret-bearing path ${h.display(secretRead)} via ${v}`, raw, [target(h.display(secretRead))])]
-		return [seg("allow", "read_only", `${v} (read-only)`, raw)]
+	if (FILE_READERS.has(v)) return fileReadRows(h, v, raw, pathOperands(v, argv))
+	// The status families. The object is the MACHINE, so one approval covers the family instead of the
+	// command — except where the same tool can also reconfigure the machine, which is a change and keeps its
+	// own category however the arguments are spelled.
+	const statusWhat = MACHINE_STATUS_BINS[v]
+	if (statusWhat !== undefined) {
+		if (asksForAChange(v, argv)) return [seg("ask", "system_config", `${v} changes ${statusWhat}`, raw, targetsOf(argv, h))]
+		return statusRead(raw, LOCAL_MACHINE_OBJECT, `${v} — reads ${statusWhat} on this machine`)
 	}
+	// The environment is where a session keeps its tokens, so it is a SECRET read and a troubleshooting
+	// grant must never reach it. `env` reaches here only when it runs no command (as a wrapper it is peeled).
+	if (v === "env" || v === "printenv") return environmentRead(raw, v)
+	if (HOST_READ_OBJECTS[v] !== undefined) return objectRead(raw, HOST_READ_OBJECTS[v]!, `${v} — reads ${HOST_READ_OBJECTS[v]}`)
+	if (ARG_DATA_BINS.has(v)) return argDataRows(h, v, raw, positionals(argv))
 
 	// ./script.sh or /path/to/script inside project → run project code
 	if (argv[0]!.includes("/")) {
@@ -328,7 +660,15 @@ function dispatch(argv: string[], h: HandlerContext): SegmentDecision[] {
 		}
 		if (pc.abs && !pc.insideProject) {
 			// known safe absolute binaries (e.g. /usr/bin/ls) — re-dispatch on the basename once
-			if (READONLY_BINS.has(base(argv[0]!))) return [seg("allow", "read_only", `${base(argv[0]!)} (read-only)`, raw)]
+			const bin = base(argv[0]!)
+			if (FILE_READERS.has(bin)) return fileReadRows(h, bin, raw, pathOperands(bin, argv))
+			if (MACHINE_STATUS_BINS[bin] !== undefined) {
+				const what = MACHINE_STATUS_BINS[bin]!
+				if (asksForAChange(bin, argv)) return [seg("ask", "system_config", `${bin} changes ${what}`, raw, targetsOf(argv, h))]
+				return statusRead(raw, LOCAL_MACHINE_OBJECT, `${bin} — reads ${what} on this machine`)
+			}
+			if (bin === "env" || bin === "printenv") return environmentRead(raw, bin)
+			if (ARG_DATA_BINS.has(bin)) return argDataRows(h, bin, raw, positionals(argv))
 			return [seg("unknown", "unknown_command", `run ${pc.abs}`, raw)]
 		}
 	}
@@ -340,6 +680,152 @@ function dispatch(argv: string[], h: HandlerContext): SegmentDecision[] {
 }
 
 // ---------------------------------------------------------------- handlers
+
+/** Rows whose categories describe why the analyzer stopped rather than what the command does. */
+function isBookkeepingCategory(category: string): boolean {
+	return category === "unparseable_command" || category.startsWith("unknown_") || category.startsWith("unproven_")
+}
+
+/**
+ * Categories whose target language ALREADY has a wildcard.
+ *
+ * `vcs_remote`, `container_mutation`, `network_send` and `vcs_force_protected` are read by a grammar, and in each
+ * of them `*` is a word with a meaning of its own (`network_send` `*` covers any host, `container_mutation` `*`
+ * any repository — see `target-grammar.ts`). Naming `*` for a command that named no destination there would not
+ * record "a targetless action", it would record "every destination", so those rows keep refusing a target.
+ * `publish-targets.test.ts` pins the same refusal for `docker push` with no ref.
+ */
+function hasTargetGrammar(category: string): boolean {
+	return category.split("+").some((segment) => grammarFor(segment.trim()) !== undefined)
+}
+
+/**
+ * Give every targetless ASK row the category-as-object marker (`NO_OBJECT_TARGET`, defined in `grant-verify.ts`
+ * with the rules that keep it from matching a named target).
+ *
+ * Some actions have no noun a user could name: `su` is "be another user", an interactive shell is "hand this
+ * terminal to a human", a bare `systemctl` is the tool's own usage. Their capability IS the category, so a
+ * targetless ask used to be unanswerable by construction — both grant stores started with "no targets ⇒ not
+ * covered", and the "always" button had no row to store. The row that answers one is `{category, "*"}`, which
+ * is exactly as wide as the invocation that earned it: a missing value never becomes a wildcard, and an
+ * action with no value at all is the one case where the wildcard IS the object).
+ *
+ * Asked only of ask-tier rows: an allow row needs no permission, and an `unknown` row's object is precisely what
+ * the model is being asked to determine, so naming the category there would put a word into the effects prompt
+ * that nobody said.
+ */
+function withTargetlessObjects(decisions: SegmentDecision[]): SegmentDecision[] {
+	return decisions.map((d) => {
+		if (d.tier !== "ask" || d.entities.length > 0) return d
+		if (isBookkeepingCategory(d.category) || hasTargetGrammar(d.category)) return d
+		return { ...d, entities: [target(NO_OBJECT_TARGET)] }
+	})
+}
+
+/**
+ * Editor options that run something of their own rather than open a file.
+ *
+ * `vim -c '!rm -rf /'` and `emacs --eval …` are not "open this file": the editor is being used as a launcher,
+ * and the argv editor options are where the launched command hides. Those invocations keep the editor's own
+ * category (so they still ask), with the file named when there is one.
+ */
+const EDITOR_EXEC_OPTIONS = new Set([
+	"-c", "--cmd", "-S", "--source", "-s", "--script",
+	"-e", "--eval", "--batch", "-l", "--load",
+	"--command", "--execute", "--remote", "--remote-expr", "--remote-send", "--remote-tab",
+])
+
+/** Editor options whose next word is an ARGUMENT, not a file (`vim -c 'set nu' notes.md`). */
+const EDITOR_VALUE_OPTIONS = new Set([
+	"-c", "--cmd", "-S", "--source", "-s", "--script",
+	"-e", "--eval", "-l", "--load", "-t", "--tag", "-u", "--command", "--execute",
+	"--remote-expr", "--remote-send", "--remote-tab",
+])
+
+/** The file operands of an editor invocation: no option words, no option arguments, no `+cmd`/`+42`. */
+function editorOperands(argv: string[]): string[] {
+	const out: string[] = []
+	let noMoreFlags = false
+	for (let i = 1; i < argv.length; i++) {
+		const a = argv[i]!
+		if (!noMoreFlags && a === "--") { noMoreFlags = true; continue }
+		if (!noMoreFlags && a.length > 1 && a.startsWith("-")) {
+			if (EDITOR_VALUE_OPTIONS.has(a) && i + 1 < argv.length) i++
+			continue
+		}
+		if (a.startsWith("+")) continue
+		out.push(a)
+	}
+	return out
+}
+
+/**
+ * Does this editor word launch something of its own? `+42` and `+/pattern` are a line number and a search —
+ * they move the cursor. `+cmd` (and every option in {@link EDITOR_EXEC_OPTIONS}) runs ex/emacs code.
+ */
+function editorLaunchesSomething(argv: string[]): boolean {
+	return argv.slice(1).some((a) => {
+		if (EDITOR_EXEC_OPTIONS.has(a)) return true
+		return a.startsWith("+") && !/^\+\d+$/.test(a) && !a.startsWith("+/")
+	})
+}
+
+/**
+ * Opening a file in an interactive editor, decided like the WRITE to that file.
+ *
+ * The editor is how bytes get into a file, and the file is the whole object: classifying the operand with
+ * `decideWrite` gives the row the write tier and the write target, so `vim notes.md` inside the project is the
+ * project write it is, `vim ~/.ssh/config` is `write_sensitive`, and a write grant over a folder covers the
+ * editor opened inside it. Before this, the row carried no target at all, so no stored grant could ever answer
+ * it and the user was asked the same question every time.
+ *
+ * Two shapes deliberately keep the editor's own category instead:
+ *  · no file operand — an empty buffer opens nothing, so there is no object to name and the row stays an ask
+ *    with no target;
+ *  · a command-carrying option ({@link EDITOR_EXEC_OPTIONS}, `+cmd`) — the argv then runs something of its own,
+ *    which is not a write to the file.
+ * Both still name the file operands, so the prompt says what is being opened.
+ */
+function editorHandler(argv: string[], h: HandlerContext, v: string): SegmentDecision[] {
+	const raw = rawOf(h.cmd)
+	const files = editorOperands(argv)
+	if (editorLaunchesSomething(argv) || files.length === 0) {
+		const named = files.slice(0, 6).map((f) => target(h.display(h.classify(f))))
+		return [seg("ask", "interactive_editor", `open interactive editor ${v}`, raw, named)]
+	}
+	return files.slice(0, 6).map((f) => h.decideWrite(h.classify(f), "open in editor"))
+}
+
+/**
+ * The file-reading binaries: every operand is put through the same path rule a parsed read uses.
+ *
+ * With no operand the command filters its stdin — the bytes the pipeline already produced, which the
+ * upstream segment was asked about — so it reads nothing new and is free. With operands each one decides
+ * for itself, and a read of two files outside the project is two objects: the user is asked about the
+ * objects they were asked about, and a grant for one of them does not silently cover the other.
+ */
+function fileReadRows(h: HandlerContext, verb: string, raw: string, operands: string[]): SegmentDecision[] {
+	if (operands.length === 0) return infoRow(raw, `${verb} (no file argument)`)
+	// `command` stays the leg's own text, as every other handler leaves it: `decideRead` builds its own phrase for
+	// the tool-call path, where there is no shell command to quote, and a prompt that lost the command would be
+	// a prompt the user cannot read.
+	return operands.slice(0, 6).map((p) => ({ ...h.decideRead(h.classify(p), verb), command: raw }))
+}
+
+/** The operands of a file reader that are actually paths: every one, except a search tool's pattern. */
+function pathOperands(bin: string, argv: string[]): string[] {
+	const pos = positionals(argv)
+	if (pos.length === 0 || !PATTERN_FIRST_BINS.has(bin)) return pos
+	if (hasFlag(argv, ...PATTERN_FLAGS)) return pos
+	return pos.slice(1)
+}
+
+/** An operand that is a word, a number or a path *string* — nothing is opened, but a named credential still asks. */
+function argDataRows(h: HandlerContext, verb: string, raw: string, operands: string[]): SegmentDecision[] {
+	const named = operands.map((p) => h.classify(p)).find((pc) => pc.isSecret)
+	if (named) return [seg("ask", "read_secret", `names secret-bearing path ${h.display(named)} (via ${verb})`, raw, [target(h.display(named))])]
+	return infoRow(raw, `${verb} (arguments are data, not files)`)
+}
 
 function targetsOf(argv: string[], h: HandlerContext): Entity[] {
 	return positionals(argv).slice(0, 6).map((p) => target(p))
@@ -369,7 +855,9 @@ function rmHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
 	const recursive = hasFlag(argv, "-r", "-R", "--recursive")
 	const pos = positionals(argv)
-	if (pos.length === 0) return [seg("ask", "delete_recursive", "rm with no visible target", raw)]
+	// No operand at all: `rm` prints its usage and removes nothing, so there is no action to gate — and a row
+	// could not name what it was about either.
+	if (pos.length === 0) return [seg("allow", "read_only", "rm with no operand (prints usage)", raw)]
 	const never = neverIfSystem(argv, h, recursive ? "recursively delete" : "delete", recursive)
 	if (never) return [never]
 
@@ -511,7 +999,21 @@ function sedHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 		const f = wMatch[1] ?? wMatch[2]!
 		return [h.decideWrite(h.classify(f), "sed write to")]
 	}
-	return [seg("allow", "read_only", "sed (stream edit, no -i)", raw)]
+	// Without `-i` sed prints the result instead of writing it, but it still READS the files it was given.
+	return fileReadRows(h, "sed", raw, fileOperandsAfterScript(argv))
+}
+
+/**
+ * The files a `sed`/`awk`-shaped command reads: every operand except the program.
+ *
+ * The program is the first operand unless it was passed with `-e`/`-f`, in which case every operand is a file.
+ * This is the same grammar rule {@link pathOperands} applies to grep and jq — one shape, one helper.
+ */
+function fileOperandsAfterScript(argv: string[]): string[] {
+	const pos = positionals(argv)
+	if (pos.length === 0) return []
+	if (hasFlag(argv, "-e", "--expression", "-f", "--file", "--progfile")) return pos
+	return pos.slice(1)
 }
 
 function awkHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
@@ -520,7 +1022,8 @@ function awkHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	if (/\bsystem\s*\(/.test(prog)) return [seg("unknown", "interpreter_unknown", `awk with system() call`, raw, [], { inlineCode: prog.slice(0, 500) })]
 	const redir = /(?:>|>>)\s*"([^"]+)"/.exec(prog)
 	if (redir) return [h.decideWrite(h.classify(redir[1]!), "awk write to")]
-	return [seg("allow", "read_only", "awk (filter)", raw)]
+	// Like sed: the program is data, the files after it are read.
+	return fileReadRows(h, "awk", raw, fileOperandsAfterScript(argv))
 }
 
 function chmodHandler(argv: string[], h: HandlerContext, v: string): SegmentDecision[] {
@@ -531,6 +1034,9 @@ function chmodHandler(argv: string[], h: HandlerContext, v: string): SegmentDeci
 	const files = pos.slice(1)
 	const worldWritable = v === "chmod" && (/^0?[0-7]?77[67]?$/.test(mode) || /(^|,)[ao]?\+w/.test(mode) && mode.includes("o"))
 	const out: SegmentDecision[] = []
+	// A mode with no file (or no argument at all) is usage, not a permission change: nothing is chmodded, and
+	// the row could name no target.
+	if (files.length === 0) return [seg("allow", "read_only", `${v} with no file operand (prints usage)`, raw)]
 	for (const f of files) {
 		const pc = h.classify(f)
 		const disp = h.display(pc)
@@ -538,13 +1044,15 @@ function chmodHandler(argv: string[], h: HandlerContext, v: string): SegmentDeci
 		if (pc.insideProject && !worldWritable && !pc.isGitInternal) { out.push(seg("allow", "write_project", `${v} ${mode} ${disp}`, raw, [pathTouched(disp)])); continue }
 		out.push(seg("ask", "perm_change", `${v} ${mode} ${disp}${worldWritable ? " (world-writable)" : ""}`, raw, [target(disp)]))
 	}
-	return out.length ? out : [seg("ask", "perm_change", raw.slice(0, 120), raw)]
+	return out
 }
 
 // ---------------------------------------------------------------- git & forges
 
 const GIT_READ = new Set(["status", "log", "diff", "show", "branch", "remote", "ls-files", "ls-remote", "ls-tree", "cat-file", "rev-parse", "rev-list", "describe", "blame", "shortlog", "reflog", "config", "var", "grep", "help", "version", "count-objects", "cherry", "whatchanged", "show-ref", "symbolic-ref", "name-rev", "merge-base", "diff-tree", "diff-index", "fsck", "bisect", "worktree", "notes", "stash"])
 const GIT_LOCAL_WRITE = new Set(["add", "commit", "checkout", "switch", "merge", "rebase", "cherry-pick", "revert", "tag", "init", "mv", "rm", "restore", "apply", "am", "format-patch", "fetch", "pull", "submodule", "clone", "gc", "prune", "pack-refs", "maintenance", "sparse-checkout", "update-index", "commit-tree", "read-tree", "write-tree", "mktree", "checkout-index"])
+/** …of those, the ones that ask a REMOTE for objects, so outside the project they are also object reads. */
+const GIT_REMOTE_READ = new Set(["fetch", "pull"])
 /**
  * Branches a force-push or a delete may not touch on the word of an unnamed target.
  *
@@ -582,22 +1090,73 @@ function pushTargetBranch(refspec: string | undefined, sessionBranch: string | u
 	return typeof sessionBranch === "string" ? sessionBranch.trim() : ""
 }
 
+/**
+ * The directory a `git` invocation reads its repository from, and where its subcommand begins.
+ *
+ * `git` finds `.git` by walking up from its working directory, so the object a git command reads is decided by
+ * `-C` when one was written and otherwise by the directory the leg actually runs in — which, after a `cd`
+ * earlier in the same command, is not the project (risk-policy.ts threads that directory in as the leg's cwd,
+ * so `h.ctx.cwd` is it). Treating every git command as "the project repository" was the hole: after
+ * `cd ~/work/other-repo`, a `git fetch` reads a repository the user never put in scope.
+ *
+ * The fused spellings count too (`-Cdir`, `--git-dir=dir`): an option carrying its own value still names the
+ * repository. An option this set does not know is skipped without its value, which is what the previous scan
+ * did, and can only move the subcommand index — never the repository.
+ */
+const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix"])
+/** …of those, the ones that say WHERE the repository is. */
+const GIT_REPO_DIR_OPTS = new Set(["-C", "--git-dir", "--work-tree"])
+
+function gitLayout(argv: string[]): { sub: string | undefined; rest: string[]; repoArg: string | null } {
+	let repoArg: string | null = null
+	let i = 1
+	while (i < argv.length) {
+		const word = argv[i]!
+		if (!word.startsWith("-")) break
+		if (word === "--") {
+			i += 1
+			break
+		}
+		const long = word.startsWith("--")
+		const equals = word.indexOf("=")
+		const name = long ? (equals > 0 ? word.slice(0, equals) : word) : word.slice(0, 2)
+		const fused = long ? (equals > 0 ? word.slice(equals + 1) : undefined) : word.length > 2 ? word.slice(2) : undefined
+		if (GIT_VALUE_OPTS.has(name)) {
+			const value = fused ?? (i + 1 < argv.length ? argv[i + 1] : undefined)
+			if (GIT_REPO_DIR_OPTS.has(name) && value !== undefined) repoArg = value
+			// A separated value is the next word; when one is missing, nothing after it is a subcommand.
+			i += fused === undefined && value !== undefined ? 2 : 1
+			continue
+		}
+		i += 1
+	}
+	if (i >= argv.length) return { sub: undefined, rest: [], repoArg }
+	return { sub: argv[i], rest: argv.slice(i + 1), repoArg }
+}
+
+/**
+ * The remote a git command asks something of.
+ *
+ * Usually a NAME (`origin`, `forgejo`) whose URL lives in that repository's config — which is one of the files
+ * this read is about, so reading it to get a host would be using the answer to decide whether to allow it.
+ * The name as spelled is what the user typed and what a grant can be written against; when the argument is a
+ * URL, written out or in scp's `user@host:path` form, the host is known and wins.
+ */
+function gitRemoteObject(rest: string[]): string {
+	if (hasFlag(rest, "--all")) return "all remotes"
+	return netHost(rest.find((a) => !a.startsWith("-")) ?? "origin")
+}
+
 function gitHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
-	// skip global flags: git -C dir -c a=b <sub>
-	let i = 1
-	let effCwd: string | null = null
-	while (i < argv.length && argv[i]!.startsWith("-")) {
-		const f = argv[i]!
-		i++
-		if ((f === "-C" || f === "-c" || f === "--git-dir" || f === "--work-tree") && i < argv.length) {
-			if (f === "-C") effCwd = argv[i]!
-			i++
-		}
-	}
-	const sub = argv[i]
+	const layout = gitLayout(argv)
+	const sub = layout.sub
 	if (!sub) return [seg("allow", "read_only", "git", raw)]
-	const rest = argv.slice(i + 1)
+	const rest = layout.rest
+	// The repository this command reads is the one at its effective directory, so that is the object the
+	// user is asked about — `./repo` when it is the project, `~/work/other-repo` when it is not.
+	const repo = h.classify(layout.repoArg ?? h.ctx.cwd)
+	const repoOutside = !repo.insideProject
 
 	if (sub === "push") {
 		const force = hasFlag(rest, "--force", "-f", "--force-with-lease", "--force-if-includes")
@@ -652,9 +1211,28 @@ function gitHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 		if (global) return [seg("ask", "write_sensitive", `git config ${rest.join(" ").slice(0, 80)} (global)`, raw, [target("~/.gitconfig")])]
 		return [seg("allow", "vcs_local", "git config (local)", raw)]
 	}
-	if (GIT_READ.has(sub)) return [seg("allow", "read_only", `git ${sub}`, raw)]
+	if (GIT_READ.has(sub)) {
+		// A repository is a set of FILES: when the repo is inside the project the read is inside the project,
+		// and when the command's effective directory is elsewhere it is an outside read. `ls-remote` is not
+		// a repository read at all — it asks the remote what it has, so the remote is the object.
+		if (sub === "ls-remote") {
+			const remote = rest.find((a) => !a.startsWith("-")) ?? "origin"
+			return objectRead(raw, remote, `git ls-remote ${remote} — reads the remote repository`)
+		}
+		// `git config --global --get x` reads ~/.gitconfig, not the repository: the file decides.
+		if (sub === "config" && hasFlag(rest, "--global", "-g", "--global-only")) return [h.decideRead(h.classify("~/.gitconfig"), "git config --global")]
+		if (sub === "config" && hasFlag(rest, "--system")) return [h.decideRead(h.classify("/etc/gitconfig"), "git config --system")]
+		if (repoOutside) return [h.decideRead(repo, `git ${sub}`)]
+		return infoRow(raw, `git ${sub} (the project repository)`)
+	}
 	if (GIT_LOCAL_WRITE.has(sub)) {
-		// clone/fetch/pull touch the network but only mutate locally — allow (spec §2.1)
+		// clone/fetch/pull touch the network but only mutate locally — allow (spec §2.1). In a repository that
+		// is not the project's, `fetch`/`pull` are two reads first: the repository's objects and whatever
+		// the remote answers. Every other entry keeps the category it has always had.
+		if (repoOutside && GIT_REMOTE_READ.has(sub)) {
+			const remote = gitRemoteObject(rest)
+			return [h.decideRead(repo, `git ${sub}`), ...objectRead(raw, remote, `git ${sub} — reads the remote ${remote} of the repository at ${h.display(repo)}`)]
+		}
 		return [seg("allow", "vcs_local", `git ${sub}`, raw)]
 	}
 	return [seg("unknown", "unknown_command", `git ${sub} ${rest.join(" ").slice(0, 120)}`, raw)]
@@ -664,18 +1242,32 @@ const GH_READ_RE = /^(list|view|status|diff|checks|download|search|api)$/
 function ghHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
 	const [_, grp, act] = argv
+	// Every `gh` read is a read of the forge, and the forge is the object a user can name. `GH_HOST` is how
+	// a Server/Enterprise install is spelled, so the host is read from the environment the leg actually runs
+	// in — and `glab`/`hub` default to a different forge than `gh` does.
+	const forge = forgeHost(base(argv[0] ?? ""), h)
 	if (grp === "api") {
 		const method = (flagValue(argv, "-X", "--method") ?? "GET").toUpperCase()
-		if (method === "GET") return [seg("allow", "read_only", `gh api GET`, raw)]
+		if (method === "GET") return objectRead(raw, forge, `gh api GET — reads the forge API at ${forge}`)
 		return [seg("ask", "network_send", `gh api ${method} ${positionals(argv.slice(1))[0] ?? ""}`, raw, targetsOf(argv.slice(1), h))]
 	}
-	if (grp && act && GH_READ_RE.test(act)) return [seg("allow", "read_only", `gh ${grp} ${act}`, raw)]
-	if (grp === "auth" && act === "status") return [seg("allow", "read_only", "gh auth status", raw)]
+	if (grp && act && GH_READ_RE.test(act)) return objectRead(raw, forge, `gh ${grp} ${act} — reads the forge at ${forge}`)
+	if (grp === "auth" && act === "status") return objectRead(raw, forge, `gh auth status — reads the forge credentials at ${forge}`)
 	if (grp === "repo" && act === "clone") return [seg("allow", "vcs_local", "gh repo clone", raw)]
 	if (grp && ["pr", "issue", "release", "repo", "gist", "workflow", "run", "label", "secret", "variable", "auth"].includes(grp)) {
 		return [seg("ask", "vcs_remote", `gh ${grp} ${act ?? ""} — writes to the forge`, raw, [target(`${grp} ${act ?? ""}`.trim())])]
 	}
 	return [seg("unknown", "unknown_command", `gh ${argv.slice(1).join(" ").slice(0, 120)}`, raw)]
+}
+
+const GH_DEFAULT_HOST: Record<string, string> = { gh: "github.com", glab: "gitlab.com", hub: "github.com" }
+const GH_HOST_ENV: Record<string, string> = { gh: "GH_HOST", glab: "GLAB_HOST", hub: "GH_HOST" }
+
+/** Which forge a forge CLI talks to — its own env override, else the vendor's default. */
+function forgeHost(client: string, h: HandlerContext): string {
+	const fromEnv = h.opts.env?.[GH_HOST_ENV[client] ?? "GH_HOST"]?.trim()
+	if (fromEnv) return fromEnv.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").replace(/\/.*$/, "")
+	return GH_DEFAULT_HOST[client] ?? "github.com"
 }
 
 // ---------------------------------------------------------------- artifact publishes
@@ -697,42 +1289,62 @@ function artifactRepoOf(ref: string): string {
 }
 
 /**
- * One publish, as two rows: what it does to the artifact store, and what it sends over the wire.
+ * One publish, as one row: bytes leaving this machine for a registry.
  *
- * `docker push` was one `network_send` row, and the intent behind it is not one thing. The ledger's action
- * table reads "push the image" as `container_mutation`; a user who read the same push as an upload writes a
- * `network_send` row. With one category, neither of those covers the other and the only value that would is
- * `*` — so the pending row becomes the compound `container_mutation+network_send` and a grant has to speak
- * for the publish as a whole. Both rows carry the same entities, so the compound names one target.
+ * A push does not change a container or an image — it reads the artifact and uploads it. Naming it the
+ * compound `container_mutation+network_send` asked the model to agree that publishing is container
+ * work, and the measured models did not: they answered `network_send` for an upload and were over-blocked
+ * because the pending row also demanded the container half. The effect it really is, is `network_send`:
+ * on the image ref, which the image-ref grammar already reads, so one
+ * `network_send myrepo/app` row covers `docker push myrepo/app:1.0` with no bridge.
  *
- * The tier is unchanged (`ask` on both halves): splitting the intent widens what a sentence can name, never
- * what the gate waves through.
+ * Tier unchanged (`ask`); the entities are unchanged; only the name of the effect moved.
  */
 function artifactPushRows(raw: string, label: string, ref: string): SegmentDecision[] {
-	if (!ref) {
-		return [seg("ask", "container_mutation", `${label} — no artifact ref given`, raw), seg("ask", "network_send", `${label} — no artifact ref given`, raw)]
-	}
-	const ents = [target(ref), scope(artifactRepoOf(ref))]
-	return [
-		seg("ask", "container_mutation", `${label} ${ref} — publishes this artifact`, raw, ents),
-		seg("ask", "network_send", `${label} ${ref} — uploads it to a registry`, raw, ents),
-	]
+	if (!ref) return [seg("ask", "network_send", `${label} — no artifact ref given`, raw)]
+	return [seg("ask", "network_send", `${label} ${ref} — uploads this artifact to a registry`, raw, [target(ref), scope(artifactRepoOf(ref))])]
 }
 
 // ---------------------------------------------------------------- docker & compose
 
 const DOCKER_READ = new Set(["ps", "images", "logs", "inspect", "stats", "top", "port", "diff", "history", "version", "info", "events", "search", "manifest", "context"])
+/**
+ * `docker inspect` is a credential read, not a status read.
+ *
+ * What `inspect` prints is the container's whole configuration, and that configuration contains its
+ * environment — the same bytes `printenv` prints, one layer removed. Naming it `read_system_state` would let
+ * "go find out why the container restarts" read the tokens out of the container config, so it keeps the secret
+ * gate whatever else a troubleshooting grant covers.
+ */
+function dockerReadRows(argv: string[], h: HandlerContext, sub: string, client: string, raw: string): SegmentDecision[] {
+	const machine = daemonMachine(argv, h)
+	if (sub === "inspect") {
+		return [seg("ask", "read_secret", `${client} ${sub} — reads a container's configuration, its environment included`, raw, [target(machine)])]
+	}
+	if (sub === "search") {
+		// A registry query, not this machine's state: somebody else's index is the object.
+		return objectRead(raw, machine === LOCAL_MACHINE_OBJECT ? "the image registry" : machine, `${client} ${sub} — searches a registry`)
+	}
+	return statusRead(raw, machine, `${client} ${sub} — reads container state on ${machine === LOCAL_MACHINE_OBJECT ? "this machine" : machine}`)
+}
+
 function dockerHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
+	const client = base(argv[0]!)
 	let i = 1
 	while (i < argv.length && argv[i]!.startsWith("-")) { const f = argv[i]!; i++; if (["-H", "--host", "-c", "--context", "--config", "-l", "--log-level"].includes(f)) i++ }
 	const sub = argv[i]
-	if (!sub) return [seg("allow", "read_only", "docker", raw)]
+	if (!sub) return statusRead(raw, daemonMachine(argv, h), `${client} — reads the ${client} daemon`)
 	const rest = argv.slice(i + 1)
 	if (sub === "compose") return dockerComposeHandler(argv, h, i)
-	if (DOCKER_READ.has(sub)) return [seg("allow", "read_only", `docker ${sub}`, raw)]
+	// `docker ps|images|inspect|logs|system df` are reads that must ask: they report what is running on
+	// someone else's machine, and the container runtime is the object a user can name. `version` stays free —
+	// that is the tool describing itself, which is the only free non-file read besides shell state.
+	if (sub === "version") return infoRow(raw, `${client} version (the tool's own version)`)
+	if (DOCKER_READ.has(sub)) return dockerReadRows(argv, h, sub, client, raw)
 	if (sub === "build" || sub === "buildx") return [seg("allow", "run_project_code", `docker ${sub}`, raw)]
-	if (sub === "pull") return [seg("allow", "read_only", "docker pull", raw)]
+	// A pull reads somebody else's registry (and puts an image in the local store); the registry is the object.
+	if (sub === "pull") return objectRead(raw, registryOf(positionals([sub, ...rest])[1] ?? "", client), `${client} pull — downloads an image from a registry`)
 	// `positionals` skips the program word, and `rest` starts *after* the subcommand — so the subcommand is
 	// put back in front of it rather than re-implementing the flag/`--` rules a second time.
 	if (sub === "push") return artifactPushRows(raw, `${base(argv[0]!)} push`, positionals([sub, ...rest])[0] ?? "")
@@ -796,8 +1408,14 @@ function dockerComposeHandler(argv: string[], h: HandlerContext, i: number): Seg
 	let j = 0
 	while (j < args.length && args[j]!.startsWith("-")) { const f = args[j]!; j++; if (["-f", "--file", "-p", "--project-name", "--profile", "--env-file"].includes(f)) j++ }
 	const sub = args[j]
-	if (!sub) return [seg("allow", "read_only", "docker compose", raw)]
-	if (["config", "ps", "logs", "top", "events", "images", "ls", "version", "port"].includes(sub)) return [seg("allow", "read_only", `docker compose ${sub}`, raw)]
+	if (!sub) return statusRead(raw, daemonMachine(argv, h), "docker compose — reads the compose services on the daemon")
+	// A compose read asks the same daemon `docker ps` asks (`docker compose ps|logs` are reads of it), and
+	// it is a status read of the machine that daemon runs on.
+	if (["config", "ps", "logs", "top", "events", "images", "ls", "port"].includes(sub)) {
+		const machine = daemonMachine(argv, h)
+		return statusRead(raw, machine, `docker compose ${sub} — reads the compose services on ${machine === LOCAL_MACHINE_OBJECT ? "this machine" : machine}`)
+	}
+	if (sub === "version") return infoRow(raw, "docker compose version (the tool's own version)")
 	if (["build", "pull", "create", "up", "start", "run", "exec", "watch", "cp"].includes(sub)) {
 		// `up` starts services which may publish ports; compose files are project config → treat as project-scoped run
 		return [seg("allow", "run_project_code", `docker compose ${sub}`, raw)]
@@ -835,7 +1453,14 @@ function kubectlHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 		if (sub === "config" && pos[1] && !["view", "get-contexts", "current-context", "get-clusters", "get-users"].includes(pos[1])) {
 			return [seg("ask", "cluster_mutation", `kubectl config ${pos[1]}`, raw, [target(pos[2] ?? pos[1])])]
 		}
-		return [seg("allow", "read_only", `kubectl ${sub}`, raw)]
+		// `kubectl version`/`explain` are the tool's own report; everything else in this set reads a cluster
+		// (`get`/`describe`/`logs`), and the object is the CLUSTER the call is addressed to — its
+		// `--context` when it names one, because that is the word a user would use to grant it.
+		if (sub === "version") return infoRow(raw, `${base(argv[0]!)} version (the tool's own version)`)
+		// A cluster read is a status read whose OBJECT is the cluster — `--context`
+		// when the command names one, else the kubeconfig's current context — so a grant that already lets the
+		// agent change something in that cluster still covers looking at it.
+		return statusRead(raw, clusterReadObject(argv, base(argv[0]!), h), `${base(argv[0]!)} ${sub} — reads the cluster${sub === "config" ? " configuration" : ""} (ns ${ns})`)
 	}
 	if (sub === "delete") {
 		const wide = hasFlag(argv, "--all", "-A", "--all-namespaces")
@@ -847,11 +1472,11 @@ function kubectlHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 		return [seg("ask", "cluster_mutation", `kubectl delete ${kind} ${names.join(" ")} -n ${ns}`, raw, [...names.map((n) => target(`${kind}/${n}@${ns}`)), scope(`${kind}@${ns}`)])]
 	}
 	if (sub === "drain" || sub === "cordon" || sub === "uncordon" || sub === "taint") {
-		if (hasFlag(argv, "--dry-run")) return [seg("allow", "read_only", `kubectl ${sub} --dry-run`, raw)]
+		if (hasFlag(argv, "--dry-run")) return dryRunRows(argv, base(argv[0]!), raw, `${base(argv[0]!)} ${sub} --dry-run`)
 		return [seg("never", "cluster_wide_destroy", `kubectl ${sub} ${pos[1] ?? ""} — node-level operation`, raw, [target(pos[1] ?? "node")])]
 	}
 	if (["apply", "create", "patch", "replace", "edit", "scale", "rollout", "label", "annotate", "set", "expose", "autoscale", "cp"].includes(sub)) {
-		if (hasFlag(argv, "--dry-run")) return [seg("allow", "read_only", `kubectl ${sub} --dry-run`, raw)]
+		if (hasFlag(argv, "--dry-run")) return dryRunRows(argv, base(argv[0]!), raw, `${base(argv[0]!)} ${sub} --dry-run`)
 		return [seg("ask", "cluster_mutation", `kubectl ${sub} ${pos.slice(1, 4).join(" ")} -n ${ns}`, raw, [target(`${pos.slice(1, 3).join("/") || sub}@${ns}`), scope(`${ns}`)])]
 	}
 	if (sub === "exec" || sub === "attach" || sub === "debug") {
@@ -867,8 +1492,15 @@ function helmHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	const pos = positionals(stripValueFlags(argv, KUBECTL_VALUE_FLAGS))
 	const sub = pos[0]
 	if (!sub || ["list", "ls", "status", "get", "show", "search", "repo", "template", "lint", "version", "env", "history", "inspect", "dependency", "verify"].includes(sub)) {
-		if (sub === "repo" && pos[1] && ["add", "remove", "update"].includes(pos[1])) return [seg("allow", "read_only", `helm repo ${pos[1]}`, raw)]
-		return [seg("allow", "read_only", `helm ${sub ?? ""}`, raw)]
+	if (sub === "repo" && pos[1] && ["add", "remove", "update"].includes(pos[1])) {
+		// `helm repo add/update` downloads an index from somebody else's chart repository (a registry read)
+		// and rewrites the local repository file outside the project. The repository is the object.
+		const repo = pos.slice(2).find((p) => !p.startsWith("-")) ?? "the chart repository"
+		return objectRead(raw, repo, `helm repo ${pos[1]} — reads the chart repository ${repo}`)
+	}
+		if (sub === "version" || sub === "env" || !sub) return infoRow(raw, `helm ${sub ?? ""} (the tool's own version/environment)`)
+		// Every other verb here reads a cluster or a chart repository (`helm list|status`).
+		return objectRead(raw, clusterObject(argv, "helm"), `helm ${sub} — reads the cluster charts and releases`)
 	}
 	const ns = flagValue(argv, "-n", "--namespace") ?? "default"
 	if (sub === "push") {
@@ -883,7 +1515,7 @@ function helmHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 		return [seg("ask", "cluster_mutation", `helm uninstall ${releases.join(" ")} -n ${ns}`, raw, releases.map((r) => target(`${r}@${ns}`)))]
 	}
 	if (["install", "upgrade", "rollback", "test"].includes(sub)) {
-		if (hasFlag(argv, "--dry-run")) return [seg("allow", "read_only", `helm ${sub} --dry-run`, raw)]
+		if (hasFlag(argv, "--dry-run")) return dryRunRows(argv, "helm", raw, `helm ${sub} --dry-run`)
 		return [seg("ask", "cluster_mutation", `helm ${sub} ${pos.slice(1, 3).join(" ")} -n ${ns}`, raw, [target(`${pos[1] ?? sub}@${ns}`), scope(ns)])]
 	}
 	return [seg("unknown", "unknown_command", `helm ${sub}`, raw)]
@@ -891,12 +1523,17 @@ function helmHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 
 function terraformHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
+	const client = base(argv[0]!)
 	const sub = positionals(argv)[0]
 	if (!sub || ["plan", "show", "validate", "fmt", "init", "output", "state", "graph", "providers", "version", "workspace", "console", "get", "refresh", "test"].includes(sub)) {
 		if (sub === "state" && positionals(argv)[1] && ["rm", "mv", "push", "replace-provider"].includes(positionals(argv)[1]!)) {
 			return [seg("ask", "cluster_mutation", `terraform state ${positionals(argv)[1]}`, raw)]
 		}
-		return [seg("allow", "read_only", `terraform ${sub ?? ""}`, raw)]
+		// `plan`/`show`/`output`/`state` read the STATE, which lives on a backend outside this project. The object
+		// is the tool's own deployment name: a terraform working directory is
+		// not addressable from a sentence, the stack it manages is.
+		if (sub === "version" || sub === "fmt" || sub === "validate" || !sub) return infoRow(raw, `terraform ${sub ?? ""} (the tool's own version / local files only)`)
+		return objectRead(raw, client, `terraform ${sub} — reads the managed stack and its state`)
 	}
 	if (sub === "destroy") return [seg("never", "cluster_wide_destroy", "terraform destroy — destroys managed infrastructure", raw)]
 	if (sub === "apply") {
@@ -908,14 +1545,52 @@ function terraformHandler(argv: string[], h: HandlerContext): SegmentDecision[] 
 }
 
 const AWS_READ_RE = /^(describe|list|get|ls|head|search|lookup|query|scan|select|preview|check|validate|estimate|test|wait|help)/
-const AWS_NEVER: Array<{ svc: string; re: RegExp; why: string }> = [
+
+/**
+ * Object-storage URIs come from `target-grammar.ts` (`isObjectStoreUri`), the module every matcher already
+ * asks about a target's space — one definition, so layer 0 and the matcher cannot disagree about what a URI is.
+ * What a verb does to one of these is a change to DATA in a store, whichever CLI typed it, so the effect name
+ * follows the URI rather than the tool (spec §2.8).
+ */
+function objectUris(args: string[]): string[] {
+	return args.filter((a) => isObjectStoreUri(a))
+}
+
+/** The store + prefix a URI names, i.e. the widest thing a "yes" about it can honestly mean: a URI that
+ *  already ends at a prefix covers that prefix; one naming a single object scopes to its parent prefix.
+ *  A URI that names the store itself (`gs://bucket`) scopes to nothing wider — there is no wider prefix. */
+function bucketScopeOf(uri: string): string {
+	if (uri.endsWith("/")) return uri
+	const cut = uri.lastIndexOf("/")
+	return cut > uri.indexOf("//") + 1 ? uri.slice(0, cut + 1) : uri
+}
+
+/** `s3://bucket/key` out of the `s3api` flags, which are where an s3api call names its object. */
+function s3UriFromFlags(argv: string[]): string | undefined {
+	const bucket = flagValue(argv, "--bucket")
+	if (!bucket) return undefined
+	const key = flagValue(argv, "--key")
+	return key ? `s3://${bucket}/${key}` : `s3://${bucket}`
+}
+
+/**
+ * The whole-thing-gone operations, each with the effect word for its own destruction.
+ *
+ * These rows are tier `never`, so no grant can ever reach them and the category changes nothing about the
+ * verdict — but the category is what the model is shown and what a denial is explained by, and one label for
+ * eight different destructions taught the models that "destroy" is a cloud word. Deleting a database is
+ * `db_destroy` (a whole database gone), issuing or revoking standing cloud credentials is
+ * `privilege_persist` (standing elevated rights), and only the values that wipe a whole managed store or a
+ * whole deployment keep `cluster_wide_destroy`. `cat` is omitted where the wide-destroy name is the right one.
+ */
+const AWS_NEVER: Array<{ svc: string; re: RegExp; why: string; cat?: string }> = [
 	{ svc: "s3", re: /^rb\b/, why: "remove bucket" },
 	{ svc: "s3api", re: /^delete-bucket\b/, why: "remove bucket" },
 	{ svc: "ec2", re: /^terminate-instances\b/, why: "terminate instances" },
-	{ svc: "rds", re: /^delete-db/, why: "delete database" },
-	{ svc: "dynamodb", re: /^delete-table\b/, why: "delete table" },
+	{ svc: "rds", re: /^delete-db/, why: "delete database", cat: "db_destroy" },
+	{ svc: "dynamodb", re: /^delete-table\b/, why: "delete table", cat: "db_destroy" },
 	{ svc: "cloudformation", re: /^delete-stack\b/, why: "delete stack" },
-	{ svc: "iam", re: /^(delete|create)-(user|access-key|role)|attach-.*policy/, why: "IAM mutation" },
+	{ svc: "iam", re: /^(delete|create)-(user|access-key|role)|attach-.*policy/, why: "IAM mutation", cat: "privilege_persist" },
 	{ svc: "kms", re: /^schedule-key-deletion\b/, why: "delete KMS key" },
 ]
 function awsHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
@@ -923,9 +1598,14 @@ function awsHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	const pos = positionals(argv)
 	const svc = pos[0] ?? ""
 	const op = pos[1] ?? ""
-	if (!svc) return [seg("allow", "read_only", "aws", raw)]
+	if (!svc) return objectRead(raw, "aws", "aws — reads the account it is configured for")
 	if (svc === "s3") {
-		if (["ls", "presign"].includes(op)) return [seg("allow", "read_only", `aws s3 ${op}`, raw)]
+		// `aws s3 ls` / `download` are reads. The object is the URI when the command names one (that is what a
+		// user grants: "you may read that bucket"), and the service when it does not.
+		if (["ls", "presign"].includes(op)) {
+			const uri = pos.slice(2).find((p) => isObjectStoreUri(p)) ?? "aws s3"
+			return objectRead(raw, uri, `aws s3 ${op} — reads ${uri}`)
+		}
 		if (op === "cp" || op === "sync" || op === "mv") {
 			const rest = pos.slice(2)
 			const remoteDest = rest.find((a) => a.startsWith("s3://")) && rest[rest.length - 1]?.startsWith("s3://")
@@ -935,29 +1615,99 @@ function awsHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 				if (pc.isSecret || pc.isNeverWipe) return [seg("never", "exfiltration", `upload ${h.display(pc)} to ${rest[rest.length - 1]}`, raw, [target(rest[rest.length - 1]!)])]
 				return [seg("ask", "network_send", `aws s3 ${op} to ${rest[rest.length - 1]}`, raw, [target(rest[rest.length - 1]!)])]
 			}
-			// download
-			return [seg("allow", "read_only", `aws s3 ${op} (download)`, raw)]
+			// download: a read of the remote object, and the write it performs locally is decided by the
+			// `outFile`-shaped rule below in the caller — here the question is only whether the store may be read.
+			const srcUri = rest.find((a) => isObjectStoreUri(a)) ?? "aws s3"
+			return objectRead(raw, srcUri, `aws s3 ${op} — downloads ${srcUri}`)
 		}
 		if (op === "rm") {
 			const uri = pos[2] ?? ""
 			const recursive = hasFlag(argv, "--recursive")
 			if (recursive && /^s3:\/\/[^/]+\/?$/.test(uri)) return [seg("never", "cluster_wide_destroy", `aws s3 rm --recursive on whole bucket ${uri}`, raw, [target(uri)])]
-			return [seg("ask", "cluster_mutation", `aws s3 rm${recursive ? " --recursive" : ""} ${uri}`, raw, [target(uri), scope(uri.replace(/[^/]+$/, ""))])]
+			// Objects inside a bucket are DATA: removing them is delete_data whatever CLI spells it (spec §2.8),
+			// the same word `rm` of a local data file uses. `cluster_mutation` is for cluster resources — a
+			// bucket object is not one, and the models measured on that question all said delete_data here.
+			return [seg("ask", "delete_data", `aws s3 rm${recursive ? " --recursive" : ""} ${uri}`, raw, [target(uri), scope(uri.replace(/[^/]+$/, ""))])]
 		}
 		if (op === "rb") return [seg("never", "cluster_wide_destroy", `aws s3 rb ${pos[2] ?? ""}`, raw, [target(pos[2] ?? "")])]
 	}
-	for (const n of AWS_NEVER) if (svc === n.svc && n.re.test(op)) return [seg("never", "cluster_wide_destroy", `aws ${svc} ${op} — ${n.why}`, raw, targetsOf(argv.slice(2), h))]
-	if (AWS_READ_RE.test(op)) return [seg("allow", "read_only", `aws ${svc} ${op}`, raw)]
+	if (svc === "s3api") {
+		// The same two effects as `s3 rm` / `s3 cp`, spelled as flags: removing objects is delete_data, sending
+		// an object to a store is network_send. Tiers unchanged (both were the fallback's `ask`).
+		const uri = s3UriFromFlags(argv)
+		const ents = uri ? [target(uri), scope(bucketScopeOf(uri))] : targetsOf(argv.slice(2), h)
+		if (/^delete-objects?$/.test(op)) return [seg("ask", "delete_data", `aws s3api ${op} ${uri ?? ""}`.trim(), raw, ents)]
+		if (/^(put-object|upload-file|copy-object|upload-part-copy)$/.test(op)) return [seg("ask", "network_send", `aws s3api ${op} ${uri ?? ""}`.trim(), raw, ents)]
+	}
+	for (const n of AWS_NEVER) if (svc === n.svc && n.re.test(op)) return [seg("never", n.cat ?? "cluster_wide_destroy", `aws ${svc} ${op} — ${n.why}`, raw, targetsOf(argv.slice(2), h))]
+	if (AWS_READ_RE.test(op)) {
+		// A read of a cloud API is a read of that service in that account (`aws s3 ls` is a read, and the same
+		// reasoning covers describe/get/list). Object = the service, or the object the call names.
+		const uri = pos.slice(2).find((p) => isObjectStoreUri(p))
+		return objectRead(raw, uri ?? `aws ${svc}`, `aws ${svc} ${op} — reads ${uri ?? `the ${svc} service`}`)
+	}
 	return [seg("ask", "cluster_mutation", `aws ${svc} ${op}`, raw, [target(`${svc}:${op}`), scope(svc)])]
 }
 
 const CLOUD_READ_RE = /^(list|describe|get|show|info|status|whoami|config|regions|zones|versions?|logs?|ls|cat|env|open|releases|domains|projects?|apps?|ps)$/
+
+/**
+ * The storage-CLI branches, decided by which end of the transfer the bucket URI sits at.
+ *
+ * `gsutil` / `az storage` / `aws s3api` are not cluster tools: `rm` of a prefix removes objects (data) and
+ * `cp` of a local file into a store sends bytes out (a send). Before this, every verb on those CLIs was
+ * `cluster_mutation`, which is the category for cluster RESOURCES — and the measured models all answered
+ * the bucket verbs with the effect words instead, which is what the over-blocks were made of.
+ * Whole-store removals keep the wide-destroy `never` rules below and in `AWS_NEVER`; nothing here changes a
+ * tier, only which effect is named.
+ */
+const OBJ_DELETE_RE = /^(rm|remove|delete|del|delete-object|delete-objects|delete-blob|purge)$/
+const OBJ_UPLOAD_RE = /^(cp|copy|sync|upload|upload-blob|upload-file|rsync)$/
+
+/**
+ * Does this URI name something INSIDE a store, rather than the store itself?
+ * `gs://bucket/prefix` and `s3://bucket/key` put the store in the authority, so anything after it is a key.
+ * The URL forms (`https://<account>.blob.core.windows.net/<container>/<blob>`, the GCS download URL) put the
+ * account in the authority and the CONTAINER in the first path segment, so a store is named one level later.
+ */
+function uriNamesAnObject(uri: string): boolean {
+	const rest = uri.slice(uri.indexOf("//") + 2)
+	const segments = rest.split("/").filter((s) => s.length > 0)
+	const storeLevel = /^https?:\/\//i.test(uri) ? 2 : 1
+	return segments.length > storeLevel
+}
+
+function objectStorageRows(pos: string[], v: string, raw: string): SegmentDecision[] | undefined {
+	// Only URIs that name an object or a prefix inside a store. A URI naming the store itself (`gs://bucket`,
+	// a container URL) is a piece of provisioned infrastructure, not data in one, and stays with the generic
+	// branch — creating or removing a store is not the same effect as removing what is in it.
+	const uris = objectUris(pos).filter(uriNamesAnObject)
+	if (uris.length === 0) return undefined
+	const last = pos[pos.length - 1] ?? ""
+	const verbs = pos.filter((p) => !isObjectStoreUri(p))
+	if (verbs.some((p) => OBJ_DELETE_RE.test(p))) {
+		const ents = uris.flatMap((u) => [target(u), scope(bucketScopeOf(u))])
+		return [seg("ask", "delete_data", `${v} ${verbs.join(" ")} — removes objects in ${uris[0]}`, raw, ents)]
+	}
+	// The destination is the LAST argument (the storage CLIs follow `cp src dst`); a URI there means bytes are
+	// leaving this machine. A URI only on the source side is a fetch into a local path — that stays what the
+	// generic branch below says, because naming it a local write would change which grants reach it.
+	if (isObjectStoreUri(last) && verbs.some((p) => OBJ_UPLOAD_RE.test(p))) {
+		return [seg("ask", "network_send", `${v} ${verbs.join(" ")} — uploads to ${last}`, raw, [target(last), scope(bucketScopeOf(last))])]
+	}
+	return undefined
+}
+
 function cloudHandler(argv: string[], h: HandlerContext, v: string): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
 	const pos = positionals(argv)
 	const joined = pos.slice(0, 3).join(" ")
+	const storage = objectStorageRows(pos, v, raw)
+	if (storage) return storage
 	if (pos.some((p) => CLOUD_READ_RE.test(p)) && !pos.some((p) => /^(delete|destroy|rm|remove|create|deploy|set|update|scale|restart|stop)$/.test(p))) {
-		return [seg("allow", "read_only", `${v} ${joined}`, raw)]
+		// Same ruling as docker/kubectl/aws: reading a cloud account is a read of an object outside the project,
+		// and the object is the CLI's account surface — the thing a user can name in one word.
+		return objectRead(raw, v, `${v} ${joined} — reads the ${v} account/project`)
 	}
 	if (pos.some((p) => /^(delete|destroy|rm|remove)$/.test(p))) {
 		if (v === "gcloud" && pos.includes("projects") || v === "az" && pos.includes("group")) {
@@ -976,7 +1726,11 @@ function sysPkgHandler(argv: string[], h: HandlerContext, v: string): SegmentDec
 	const sub = pos[0] ?? ""
 	const pkgs = pos.slice(1)
 	const READ = /^(search|show|info|list|ls|depends|rdepends|policy|download|changelog|files|provides|leaves|outdated|doctor|--version|cache)$/
-	if (READ.test(sub)) return [seg("allow", "read_only", `${v} ${sub}`, raw)]
+	if (READ.test(sub)) {
+		// A package query asks the SYSTEM database and, for search/show/download, a remote mirror. The
+		// object is the package manager the user would name (`apt`, `brew`), not its cache paths.
+		return objectRead(raw, v, `${v} ${sub} — reads the system package database${sub === "search" || sub === "download" ? " and its remote mirror" : ""}`)
+	}
 	if (/^(install|add|reinstall)$/.test(sub)) {
 		return [seg("ask", "package_system", `install system package(s): ${pkgs.join(" ") || "(unnamed)"} via ${v}`, raw, pkgs.map(target))]
 	}
@@ -1092,7 +1846,12 @@ function pipHandler(argv: string[], h: HandlerContext, v: string, call: PipInvoc
 	const raw = rawOf(h.cmd)
 	const pos = positionals(argv)
 	const sub = pos[0] ?? ""
-	if (["list", "show", "freeze", "check", "config", "debug", "index", "inspect", "download", "cache", "hash", "help"].includes(sub)) return [seg("allow", "read_only", `${v} ${sub}`, raw)]
+	if (["list", "show", "freeze", "check", "config", "debug", "index", "inspect", "download", "cache", "hash", "help"].includes(sub)) {
+		// Reading a project virtualenv is reading files inside the project; reading the interpreter the machine
+		// runs on is not, and neither is `download`, which asks the package index.
+		if (sub !== "download" && pipInVenv(call.program, h)) return infoRow(raw, `${v} ${sub} (the project env)`)
+		return objectRead(raw, v, `${v} ${sub} — reads ${sub === "download" ? "the package index" : "the python environment packages are installed into"}`)
+	}
 	if (sub === "install") {
 		const pkgs = pos.slice(1)
 		const vcsOrUrl = pkgs.find((p) => /^(git\+|https?:\/\/|ssh:\/\/)/.test(p))
@@ -1135,7 +1894,7 @@ function pyEnvHandler(argv: string[], h: HandlerContext, v: string): SegmentDeci
 	const pos = positionals(argv)
 	const sub = pos[0] ?? ""
 	if (v === "pipx") {
-		if (["list", "runpip", "environment"].includes(sub)) return [seg("allow", "read_only", `pipx ${sub}`, raw)]
+		if (["list", "runpip", "environment"].includes(sub)) return objectRead(raw, "pipx", `pipx ${sub} — reads the user-wide python env`)
 		if (sub === "install" || sub === "run") return [seg("ask", "package_system", `pipx ${sub} ${pos.slice(1).join(" ")}`, raw, pos.slice(1).map(target))]
 		return [seg("ask", "package_system", `pipx ${sub}`, raw)]
 	}
@@ -1238,7 +1997,27 @@ function curlHandler(argv: string[], h: HandlerContext, v: string): SegmentDecis
 		const w = h.decideWrite(pc, "download to")
 		if (w.tier !== "allow") return [w]
 	}
-	return [seg("allow", "read_only", `${v} GET ${url}`.trim(), raw)]
+	// A `curl`/`wget` GET is a read that must ask: it fetches bytes from somebody else's machine, the same
+	// class of act as reading a file outside the project. The object is the HOST, so one approval covers the
+	// site rather than every path on it.
+	const host = url ? netHost(url) : "the network"
+	return objectRead(raw, host, `${v} GET ${url || "(no url)"} — reads ${host}`)
+}
+
+/**
+ * The HOST a URL spells, with the parts a grant cannot mean stripped off.
+ *
+ * `hostOf` needs a scheme, and half the URLs an agent types have none (`curl localhost:8080/health`,
+ * `curl example.com/api`). The authority is what a user would name — not the path, and not the port, because
+ * "you may read example.com" plainly covers every port and page on it.
+ */
+function netHost(url: string): string {
+	const authority = (url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").split("/")[0] ?? "").trim()
+	const at = authority.lastIndexOf("@")
+	const hostPort = at >= 0 ? authority.slice(at + 1) : authority
+	if (hostPort.startsWith("[")) return hostPort.replace(/\].*$/, "]")
+	const colon = hostPort.lastIndexOf(":")
+	return colon > 0 ? hostPort.slice(0, colon) : hostPort
 }
 
 function hostOf(url: string): string {
@@ -1286,7 +2065,15 @@ function sshHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	// host-scoped so a grant for the host covers repeats.
 	const inner = h.evaluateBash(remoteCmd)
 	if (inner.tier === "never") return [seg("never", inner.category, `on ${host}: ${inner.description}`, raw, [target(host)])]
-	if (inner.tier === "allow") return [seg("allow", "read_only", `read-only command on ${host}: ${remoteCmd.slice(0, 80)}`, raw, [target(host)])]
+	// Read-only ssh was already a read of the machine; what the object of such a read is, is the HOST. So the
+	// inner verdict's CATEGORY survives — a status read of a remote box is still `read_system_state`, a read of a
+	// remote FILE is still `read_only` — and only the object moves, because a grant for this machine must never
+	// cover that host, nor the other way round.
+	if (inner.tier === "allow") return objectRead(raw, host, `read-only command on ${host}: ${remoteCmd.slice(0, 80)}`)
+	const READ_CATEGORIES = new Set(["read_only", "read_secret", "read_system_state"])
+	if (inner.segments.length > 0 && inner.segments.every((s) => READ_CATEGORIES.has(s.category))) {
+		return inner.segments.map((s) => seg(s.tier, s.category, `read-only command on ${host}: ${s.description}`, raw, [target(host), scope(host)]))
+	}
 	return [seg("ask", "network_send", `run on ${host}: ${remoteCmd.slice(0, 100)}`, raw, [target(host), scope(host)])]
 }
 
@@ -1301,13 +2088,15 @@ function scpHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 		if (secretSrc) return [seg("never", "exfiltration", `scp ${h.display(secretSrc)} to ${remote[remote.length - 1]}`, raw, [target(remote[remote.length - 1]!)])]
 		return [seg("ask", "network_send", `scp to ${remote[remote.length - 1]}`, raw, [target(hostOf("ssh://" + remote[remote.length - 1]!))])]
 	}
-	// download from remote
+	// download from remote — a read of the remote host, and the local write it performs is
+	// decided above when it lands outside the project.
 	const dest = local[local.length - 1]
 	if (dest) {
 		const w = h.decideWrite(h.classify(dest), "scp download to")
 		if (w.tier !== "allow") return [w]
 	}
-	return [seg("allow", "read_only", "scp download", raw)]
+	const srcHost = hostOf("ssh://" + (remote[0] ?? ""))
+	return objectRead(raw, srcHost, `scp download from ${srcHost}`)
 }
 
 function ncHandler(argv: string[], h: HandlerContext, v: string): SegmentDecision[] {
@@ -1315,7 +2104,11 @@ function ncHandler(argv: string[], h: HandlerContext, v: string): SegmentDecisio
 	if (hasFlag(argv, "-l", "--listen") || v === "socat" && argv.some((a) => /LISTEN|BIND/i.test(a))) {
 		return [seg("ask", "network_listen", `${v} listener`, raw, targetsOf(argv, h))]
 	}
-	if (hasFlag(argv, "-z")) return [seg("allow", "read_only", `${v} -z port scan`, raw)]
+	if (hasFlag(argv, "-z")) {
+		// A port probe asks whether something is listening on another machine.
+		const probeHost = positionals(argv).find((p) => !/^\d+$/.test(p)) ?? "a host"
+		return objectRead(raw, probeHost, `${v} -z port scan — reads whether ${probeHost} is listening`)
+	}
 	// piping data into nc = sending
 	if (h.pipedFrom) return [seg("ask", "network_send", `pipe data into ${v} ${positionals(argv).join(" ")}`, raw, targetsOf(argv, h))]
 	return [seg("ask", "network_send", `${v} connection to ${positionals(argv).join(" ")}`, raw, targetsOf(argv, h))]
@@ -1344,6 +2137,37 @@ function killHandler(argv: string[], h: HandlerContext, v: string): SegmentDecis
 	return [seg("ask", "process_control", `${v} ${pos.join(" ")}`, raw, pos.filter((p) => !p.startsWith("-")).map(target))]
 }
 
+/**
+ * The service-control verbs that act on a RUNNING unit, and the rows they produce.
+ *
+ * The category names the effect. Stopping or restarting a named service is what `process_control` is
+ * defined as ("stops, restarts or kills named processes or services, however many are named") — the same act
+ * `docker stop` and `kill` already file there. What the machine will do at BOOT (`enable`, `mask`,
+ * `daemon-reload`, a unit file edit) is what `system_config` means, and that is what the rest of the verb
+ * table stays on. Tiers are untouched — both branches were and are `ask`; only the name moved, so a sentence
+ * the dictionary defines as process_control now reaches the row it names instead of costing a prompt.
+ * `start` is in neither list on purpose: starting a unit may publish a port (whose effect is network_listen)
+ * and nothing in the vocabulary calls "start a service" an effect of its own, so it stays where it was.
+ */
+const SERVICE_STATE_VERBS = new Set(["stop", "restart", "reload", "reload-or-restart", "try-restart", "try-reload-or-restart", "kill", "freeze", "cancel"])
+
+/** `service nginx restart` / `rc-service nginx restart` — the verb can sit after the unit name. */
+function serviceControlRows(argv: string[], h: HandlerContext, v: string): SegmentDecision[] {
+	const raw = rawOf(h.cmd)
+	const pos = positionals(argv)
+	const verb = pos.find((p) => SERVICE_STATE_VERBS.has(p))
+	if (!verb) return [seg("ask", "system_config", `service control: ${raw}`, raw, targetsOf(argv, h))]
+	const units = pos.filter((p) => p !== verb && p !== v && p !== "status")
+	return [seg("ask", "process_control", `${v} ${verb} ${units.join(" ")}`, raw, units.map(target))]
+}
+
+/** The `systemctl` subcommands whose operand is a UNIT — the ones whose unit joins the object.
+ *
+ * `list-units` / `list-timers` / `list-sockets` / `get-default` / `show-environment` are deliberately absent:
+ * their arguments (a glob pattern, nothing at all) do not name the service being read, so scoping their object to
+ * one would be reading the whole machine under a service's name. */
+const UNIT_READ_SUBS = new Set(["status", "show", "cat", "is-active", "is-enabled", "is-failed"])
+
 function systemctlHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
 	const user = hasFlag(argv, "--user")
@@ -1351,7 +2175,15 @@ function systemctlHandler(argv: string[], h: HandlerContext): SegmentDecision[] 
 	const sub = pos[0] ?? ""
 	const units = pos.slice(1)
 	if (["status", "show", "list-units", "list-unit-files", "list-timers", "list-sockets", "cat", "is-active", "is-enabled", "is-failed", "get-default", "show-environment"].includes(sub)) {
-		return [seg("allow", "read_only", `systemctl ${sub}`, raw)]
+		// "What is this unit doing" is a status read of the machine the unit lives on, so the object is the
+		// machine — one approval covers the whole family instead of one per unit name. What the prompt says still
+		// names the unit, because a person reads the prompt, not the object.
+		// When the subcommand reads ONE unit, that unit joins the object (`localhost/gettemp`), so a grant for
+		// the service answers it as well as the machine grant already does. The machine-wide
+		// subcommands (`list-units`, `list-timers`, …) name no unit and keep the machine object.
+		const unit = UNIT_READ_SUBS.has(sub) ? soleUnit(units) : undefined
+		const object = unit ? unitReadObject(LOCAL_MACHINE_OBJECT, unit) : LOCAL_MACHINE_OBJECT
+		return statusRead(raw, object, `systemctl${user ? " --user" : ""} ${sub}${units.length ? ` ${units.join(" ")}` : ""} — reads unit state on this machine`)
 	}
 	if (["reboot", "poweroff", "halt", "suspend", "hibernate", "kexec", "hybrid-sleep", "suspend-then-hibernate", "default", "rescue", "emergency"].includes(sub)) {
 		return [seg("never", "system_power", `systemctl ${sub}`, raw)]
@@ -1361,6 +2193,9 @@ function systemctlHandler(argv: string[], h: HandlerContext): SegmentDecision[] 
 	if (securityUnit && ["stop", "disable", "mask"].includes(sub)) {
 		return [seg("never", "security_teardown", `systemctl ${sub} ${securityUnit} — disables a security service`, raw, [target(securityUnit)])]
 	}
+	if (SERVICE_STATE_VERBS.has(sub)) {
+		return [seg("ask", "process_control", `systemctl${user ? " --user" : ""} ${sub} ${units.join(" ")}`, raw, units.map(target))]
+	}
 	return [seg("ask", "system_config", `systemctl${user ? " --user" : ""} ${sub} ${units.join(" ")}`, raw, units.map(target))]
 }
 
@@ -1369,13 +2204,18 @@ function journalctlHandler(argv: string[], h: HandlerContext): SegmentDecision[]
 	if (argv.some((a) => a.startsWith("--vacuum") || a === "--rotate" || a === "--flush")) {
 		return [seg("never", "history_wipe", "journalctl --vacuum/rotate — destroys system logs", raw)]
 	}
-	return [seg("allow", "read_only", "journalctl (read)", raw)]
+	// `-u X` scopes the read to that unit, so the unit joins the object. Without `-u` the command reads the
+	// whole journal, which is the machine-wide read that must keep asking.
+	const unit = soleUnit(journalUnits(argv))
+	const object = unit ? unitReadObject(LOCAL_MACHINE_OBJECT, unit) : LOCAL_MACHINE_OBJECT
+	const scoped = unit ? ` for ${unit}` : ""
+	return statusRead(raw, object, `journalctl — reads the system journal${scoped} on this machine`)
 }
 
 function crontabHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
 	if (hasFlag(argv, "-r")) return [seg("never", "history_wipe", "crontab -r — deletes all cron jobs", raw)]
-	if (hasFlag(argv, "-l")) return [seg("allow", "read_only", "crontab -l", raw)]
+	if (hasFlag(argv, "-l")) return objectRead(raw, "the user crontab", "crontab -l — reads the scheduled jobs")
 	return [seg("ask", "write_sensitive", "modify crontab (persistent scheduled execution)", raw, [target("crontab")])]
 }
 
@@ -1387,15 +2227,15 @@ function firewallHandler(argv: string[], h: HandlerContext, v: string): SegmentD
 	}
 	if (v === "ufw" && argv.includes("disable")) return [seg("never", "security_teardown", "ufw disable", raw)]
 	if (/\b-P\s+\w+\s+ACCEPT\b/.test(joined)) return [seg("never", "security_teardown", `${v} default-ACCEPT policy`, raw)]
-	if (v === "ufw" && argv.includes("status") || /\b(-L|--list|list)\b/.test(joined)) return [seg("allow", "read_only", `${v} list`, raw)]
+	if (v === "ufw" && argv.includes("status") || /\b(-L|--list|list)\b/.test(joined)) return objectRead(raw, "the firewall rules", `${v} list — reads the active firewall rules`)
 	return [seg("ask", "system_config", `${v} rule change: ${raw.slice(0, 100)}`, raw, [target(raw.slice(0, 60))])]
 }
 
 function sysConfigHandler(argv: string[], h: HandlerContext, v: string): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
 	if (v === "setenforce" && argv[1] === "0") return [seg("never", "security_teardown", "setenforce 0 — disables SELinux", raw)]
-	if (v === "sysctl" && !hasFlag(argv, "-w") && !argv.some((a) => a.includes("="))) return [seg("allow", "read_only", "sysctl (read)", raw)]
-	if (v === "mount" && argv.length === 1) return [seg("allow", "read_only", "mount (list)", raw)]
+	if (v === "sysctl" && !hasFlag(argv, "-w") && !argv.some((a) => a.includes("="))) return statusRead(raw, LOCAL_MACHINE_OBJECT, "sysctl — reads kernel parameters on this machine")
+	if (v === "mount" && argv.length === 1) return statusRead(raw, LOCAL_MACHINE_OBJECT, "mount — reads the mounted filesystems on this machine")
 	return [seg("ask", "system_config", `${v} ${argv.slice(1, 4).join(" ")}`, raw, targetsOf(argv, h))]
 }
 
@@ -1423,19 +2263,36 @@ function dbHandler(argv: string[], h: HandlerContext, v: string): SegmentDecisio
 		const joined = positionals(argv).join(" ")
 		if (/\bFLUSHALL\b|\bFLUSHDB\b/i.test(joined)) return [seg("never", "db_destroy", `redis ${joined.match(/FLUSH\w+/i)?.[0]}`, raw)]
 		if (/\b(SET|DEL|EXPIRE|HSET|LPUSH|RPUSH|SADD|ZADD|CONFIG\s+SET|SHUTDOWN)\b/i.test(joined)) return [seg("ask", "db_mutation", `redis-cli write: ${joined.slice(0, 80)}`, raw, [target(joined.split(/\s+/)[0] ?? "")])]
-		return [seg("allow", "read_only", "redis-cli (read)", raw)]
+		return objectRead(raw, v, "redis-cli — reads the database it connects to")
 	}
 	if (!sql) {
 		// interactive/file input: sqlite3 file.db "SELECT..." puts SQL as positional
 		const posSql = positionals(argv).find((p) => SQL_MUTATE_RE.test(p) || /select/i.test(p))
-		if (posSql) return dbSqlDecision(posSql, v, h)
-		if (v === "sqlite3" && positionals(argv).length <= 1) return [seg("allow", "read_only", `${v} (interactive/read)`, raw)]
-		return [seg("allow", "read_only", `${v} (no inline SQL visible)`, raw)]
+		if (posSql) return dbSqlDecision(posSql, v, h, dbReadRows(v, h, argv))
+		// An embedded engine's whole state IS a file in the tree, so the file path decides, exactly as `cat` of
+		// the same path would. A client/server engine has no such file: its object is the database.
+		if ((v === "sqlite3" || v === "duckdb") && positionals(argv).length <= 1) {
+			return [h.decideRead(h.classify(positionals(argv)[0] ?? "."), v)]
+		}
+		return objectRead(raw, v, `${v} — reads the database it opens`)
 	}
-	return dbSqlDecision(sql, v, h)
+	return dbSqlDecision(sql, v, h, dbReadRows(v, h, argv))
 }
 
-function dbSqlDecision(sql: string, v: string, h: HandlerContext): SegmentDecision[] {
+/**
+ * Reading a database is a read of the DATABASE (`redis-cli`, `psql` and the like) — there is no file in the tree
+ * for a grant to name. The embedded engines are the exception: an sqlite/duckdb file IS the database, so there
+ * the path decides, exactly as `cat` of the same path would.
+ */
+function dbReadRows(v: string, h: HandlerContext, argv: string[]): SegmentDecision[] {
+	if (v === "sqlite3" || v === "duckdb") {
+		const file = positionals(argv)[0]
+		if (file) return [h.decideRead(h.classify(file), v)]
+	}
+	return [objectRead(rawOf(h.cmd), v, `${v} — reads the database it opens`)[0]!]
+}
+
+function dbSqlDecision(sql: string, v: string, h: HandlerContext, readRows: SegmentDecision[]): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
 	if (SQL_NEVER_RE.test(sql)) return [seg("never", "db_destroy", `${v}: ${sql.slice(0, 80)}`, raw)]
 	if (SQL_DELETE_NO_WHERE_RE.test(sql) && !/\bWHERE\b/i.test(sql)) return [seg("never", "db_destroy", `${v}: DELETE without WHERE — ${sql.slice(0, 80)}`, raw)]
@@ -1445,14 +2302,19 @@ function dbSqlDecision(sql: string, v: string, h: HandlerContext): SegmentDecisi
 		const objs = [...sql.matchAll(/\b(?:TABLE|FROM|INTO|UPDATE)\s+([\w".]+)/gi)].map((m) => m[1]!).slice(0, 4)
 		return [seg("ask", "db_mutation", `${v}: ${sql.replace(/\s+/g, " ").slice(0, 100)}`, raw, objs.map(target))]
 	}
-	return [seg("allow", "read_only", `${v} query (read)`, raw)]
+	return readRows
 }
 
 // ---------------------------------------------------------------- misc
 
 function historyHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
-	if (argv.includes("-c") || argv.includes("-w")) return [seg("never", "history_wipe", "clear shell history", rawOf(h.cmd))]
-	return [seg("allow", "read_only", "history", rawOf(h.cmd))]
+	const raw = rawOf(h.cmd)
+	if (argv.includes("-c") || argv.includes("-w")) return [seg("never", "history_wipe", "clear shell history", raw)]
+	// `history -r FILE` reads a file; plain `history` reports this shell's recorded commands, which is host state
+	// rather than the project's, so it is an object read: when unsure, it asks.
+	const files = positionals(argv).filter((p) => !/^-\d+$/.test(p))
+	if (files.length) return fileReadRows(h, "history", raw, files)
+	return objectRead(raw, "the shell history", "history — reads the recorded shell commands")
 }
 
 function findHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
@@ -1471,7 +2333,10 @@ function findHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 		const inner = classifyVerb(execArgv.filter((a) => a !== "{}" && a !== ";" && a !== "+"), h)
 		return inner.map((d) => d.tier === "allow" ? d : { ...d, description: `find -exec: ${d.description}` })
 	}
-	return [seg("allow", "read_only", "find (search)", raw)]
+	// A search walks the trees it is given, so the ROOTS decide: `find .` is inside the project, `find ~`
+	// reads the home directory. With no root, find walks the working directory, which is inside.
+	if (roots.length === 0) return infoRow(raw, "find (searches the working directory)")
+	return fileReadRows(h, "find", raw, roots)
 }
 
 function archiveHandler(argv: string[], h: HandlerContext, v: string): SegmentDecision[] {
@@ -1493,9 +2358,10 @@ function archiveHandler(argv: string[], h: HandlerContext, v: string): SegmentDe
 function tmuxHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
 	const sub = positionals(argv)[0] ?? ""
-	if (["ls", "list-sessions", "list-windows", "list-panes", "capture-pane", "show-options", "display-message", "has-session", "-V"].includes(sub) || argv.includes("-V")) {
-		return [seg("allow", "read_only", `tmux ${sub}`, raw)]
+	if (["ls", "list-sessions", "list-windows", "list-panes", "capture-pane", "show-options", "display-message", "has-session"].includes(sub)) {
+		return objectRead(raw, "tmux sessions", `tmux ${sub} — reads the running tmux sessions`)
 	}
+	if (sub === "-V" || argv.includes("-V")) return infoRow(raw, `tmux ${sub} (the tool's own version)`)
 	if (sub === "send-keys") {
 		// arbitrary command injection into another terminal — classify the payload text
 		return [seg("ask", "agent_spawn", `tmux send-keys: ${positionals(argv).slice(1).join(" ").slice(0, 80)}`, raw)]

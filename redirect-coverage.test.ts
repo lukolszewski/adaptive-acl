@@ -26,9 +26,11 @@ import {
  *
  *   - the rule that names the target covers that invocation and nothing shaped like it — a different file,
  *     a different operator, a different descriptor, one extra word: all uncovered;
- *   - a rule that names NO target covers no command that redirects at all, including the `:*` and glob forms
- *     that used to wave them through. That is a narrowing of yesterday's behaviour, and it is the half that
- *     makes the recovery safe instead of a new way to over-grant.
+ *   - a rule that names NO target covers no command that redirects to a file the session is not allowed to
+ *     write — a secret, live config, outside the project with no grant — including in the `:*` and glob
+ *     forms that used to wave every redirect through. An earlier answer withheld all of them; the refusal
+ *     is kept for the targets that matter and dropped where a direct write/read of the file would have gone
+ *     through anyway (`redirect-authority.test.ts` owns that half).
  *
  * The floor, the run-time-value refusals and the textual deny/ask path are pinned from their own side too,
  * because a change aimed at the offer must not have reached any of them.
@@ -168,25 +170,18 @@ describe("the offer names the file, and the matcher honours exactly that", () =>
 	})
 })
 
-describe("tightening: a rule that names no target covers no command that redirects to one", () => {
-	// Each row here was `allow` before this task — the argv-only matcher saw `echo hi` and stopped. They are
-	// the cost of the change, paid in prompts by rules written before a redirect could be named, and they
-	// are the reason the recovery above is not a loosening: `Bash(echo:*)` covering
-	// `echo key > ~/.ssh/authorized_keys` is the exact over-grant the suggestion engine already refuses to
-	// WRITE (see SUBCOMMAND_GRAMMAR_TOOLS in bash-permission-match.ts). Refusing it on the side that has to
-	// honour the rule is what makes the two agree.
-	const TIGHTENED: Array<[string, string[]]> = [
-		["echo hi > /tmp/out.txt", ["Bash(echo hi)"]],
-		["echo hi > /tmp/out.txt", ["Bash(echo:*)"]],
-		["echo hi > /tmp/out.txt", ["Bash(echo *)"]],
+describe("a rule that names no target covers a redirect only into a place the session may write", () => {
+	// The refusal these rows carried was about the FILE, not about the redirect: a rule that
+	// names no target cannot say which file it approved. The answer is to ask the question the
+	// file deserves — would a direct write/read of it have been allowed? — so the two rows below still
+	// stop at the gate (a secret read, and the never floor) and `redirect-authority.test.ts` owns the
+	// other half: the project and temp targets a word rule now covers.
+	const STILL_REFUSED: Array<[string, string[]]> = [
 		["echo key >> ~/.ssh/authorized_keys", ["Bash(echo key:*)"]],
-		["git log > report.txt", ["Bash(git log:*)"]],
-		["cat x > /tmp/y", ["Bash(cat:*)"]],
 		["cat < /etc/shadow", ["Bash(cat:*)"]],
-		["grep x f > /tmp/out", ["Bash(grep *)"]],
 	]
 
-	it.each(TIGHTENED)("%s is left to the gate by %j", (command, allow) => {
+	it.each(STILL_REFUSED)("%s is left to the gate by %j", (command, allow) => {
 		expect(behaviorOf(command, { allow })).toBe("passthrough")
 	})
 
@@ -256,7 +251,6 @@ describe("what is still withheld, class by class", () => {
 		["echo hi > ~/.ssh/authorized_keys", "the never floor decides before any rule; an offer would hide the reason"],
 		["echo x > $(printf /etc/x)", "the target is decided at run time, so layer 0 refuses the command"],
 		['echo hi > "$TARGET"', "an opaque target cannot be named by a rule"],
-		["cat notes.txt << 'EOF'\nbody\nEOF", "a here-document body is data on the leg"],
 		["grep x f <<< hello", "a here-string is input no rule names"],
 		["LD_PRELOAD=/tmp/e.so cmd > /tmp/x", "the environment decides what runs, and argv carries none of it"],
 		["printf 'a\nb' > /tmp/x", "an argument that spans lines cannot sit in a one-line rule"],
@@ -272,10 +266,27 @@ describe("what is still withheld, class by class", () => {
 		expect(set.reason, command).toBeTruthy()
 	})
 
-	it("refuses a compound in which only one leg redirects and cannot be named", () => {
+	it("offers a here-document the rule for its words and its target", () => {
+		// The old refusal said the body "is data on the leg", which is true and was never the question: the
+		// body needs no part in the rule, and coverage never consults it, so the rule for the same command
+		// without a body is honoured. Pinned here beside the redirect truth table because the rule is the
+		// two halves together — the words and the file.
+		const heredoc = "cat notes.txt << 'EOF'\nbody\nEOF"
+		const set = offerFor(heredoc)
+		expect(set.persistable, set.reason ?? "").toBe(true)
+		expect(set.rules).toEqual(["Bash(cat notes.txt)"])
+		expect(behaviorOf(heredoc, { allow: set.rules })).toBe("allow")
+		// the file named by the redirect travels with the clause, body or no body
+		const writing = "cat > /tmp/out << 'EOF'\nbody\nEOF"
+		expect(offerFor(writing).rules).toEqual(["Bash(cat > /tmp/out)"])
+		expect(behaviorOf(writing, { allow: offerFor(writing).rules })).toBe("allow")
+	})
+
+	it("refuses a compound in which only one leg cannot be named", () => {
 		// Coverage is AND across legs, so one unnameable leg takes the whole set with it rather than
-		// storing half a rule that would never fire.
-		const set = offerFor("git status && cat notes.txt << 'EOF'\nbody\nEOF")
+		// storing half a rule that would never fire. The unnameable leg here is a here-string (a
+		// here-document is nameable, so it could no longer play this part).
+		const set = offerFor("git status && cat <<< hi")
 		expect(set.persistable).toBe(false)
 		expect(set.rules).toEqual([])
 	})

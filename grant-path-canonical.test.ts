@@ -110,10 +110,24 @@ describe("ledgerCovers — an absolutely-worded grant covers project-relative en
 		).toBe(false)
 	})
 
-	it("keeps the delete-verb gate: naming the location is not naming the action", () => {
+	it("the model's category, not a word in the quote, decides a delete", () => {
+		// This test was "keeps the delete-verb gate: naming the location is not naming the action" and
+		// expected FALSE for exactly this row. DELETE_VERB_RE asked the USER's words whether the sentence was
+		// about destroying, and refused the row when the sentence used some other phrasing. That question
+		// moved to the model — and here the model answered `delete_recursive`, a delete-category row over the
+		// scope it names, so it covers.
+		//
+		// The bound did not disappear, it moved: what decides a delete is now the row's own category, which
+		// is the assertion below. A content row over the same scope still answers nothing (the target-first
+		// widening in `grantMatchesPending` refuses the delete direction), and the read row is refused in the
+		// next test.
 		const l = createLedger()
 		applyEvent(l, grant("delete_recursive", "/home/u/dev/pm/", "what is under /home/u/dev/pm", 3))
-		expect(ledgerCovers(l, "delete_recursive", [T("./x")], HOME, PROJECT).covered).toBe(false)
+		expect(ledgerCovers(l, "delete_recursive", [T("./x")], HOME, PROJECT).covered).toBe(true)
+
+		const written = createLedger()
+		applyEvent(written, grant("write_outside", "/home/u/dev/pm/", "what is under /home/u/dev/pm", 3))
+		expect(ledgerCovers(written, "delete_recursive", [T("./x")], HOME, PROJECT).covered).toBe(false)
 	})
 
 	it("keeps a read grant from becoming a delete grant", () => {

@@ -144,6 +144,13 @@ const UNMATCHABLE_MARKERS = [
  * git / forge / container / package grant look like junk, so "Allow always" on a push
  * recorded nothing durable and said nothing while doing it.
  *
+ * `read_system_state` is here because its object is a MACHINE: `localhost`, or
+ * `localhost/nginx` for a unit-scoped read. Neither is a place, and the read is matched
+ * by comparing the string (`entityMatchesTarget`), so the path-shape screen dropped every
+ * durable status-read allowance on write and the user was asked again after a restart or
+ * an export. Its kind group is its own name — `kindGroup` falls back to the
+ * category — which is why it is spelled out rather than implied by another entry.
+ *
  * Deliberately NOT here: the fs groups (`fs-write` / `fs-delete` / `fs-perm`), the two
  * secret groups, and any category this table does not know. Those targets are places,
  * and a place whose value is not path-shaped is a bad extraction, not a short name — it
@@ -162,6 +169,7 @@ const NON_PATH_GROUPS: ReadonlySet<string> = new Set([
 	"sysconf",
 	"priv",
 	"editor",
+	"read_system_state",
 ])
 
 /** A target is a name; past this it is a dump, and a dump matches nothing. */

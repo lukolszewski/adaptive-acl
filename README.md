@@ -157,13 +157,16 @@ most restrictive tier of its legs:
 
 | Tier | Examples | Outcome |
 |---|---|---|
-| **allow** | reads, writes inside the project and `/tmp`, builds, test runners, lint, local git | runs immediately |
-| **ask** | recursive deletes, `sudo`, system packages, `git push`, listeners, uploads, db/cluster/container mutations | needs authority: a grant, a ledger row, or the user |
+| **allow** | reads inside the project, writes inside the project and `/tmp`, builds, test runners, lint, local git | runs immediately |
+| **ask** | reads outside the project, machine and cluster status reads, recursive deletes, `sudo`, system packages, `git push`, listeners, uploads, db/cluster/container mutations | needs authority: a grant, a ledger row, or the user |
 | **never** | writes to disk or device nodes, `authorized_keys`, `NOPASSWD: ALL`, force-push to a protected branch, fork bombs, `docker system prune -a --volumes`, `terraform destroy`, wiping protected paths | prompt with no "always" option; nothing clicked pre-authorises it |
 | **unknown** | `python -c '…'`, an unrecognised binary, an argument whose value depends on runtime state | the effect model is asked what it does |
 
 Each *ask* verdict carries the entity it saw, which is what makes grants narrow: approving
-`docker rmi api:dev` never covers `payments:prod`.
+`docker rmi api:dev` never covers `payments:prod`. A read outside the project names the file or
+directory; a status read (`ps`, `df`, `systemctl status`, `docker ps`, `kubectl get`) names the
+machine, docker host or kube context, and one approval covers that family there. A tool's own
+`--version`/`--help` and shell state (`pwd`, `cd`, `echo`) stay free.
 
 ### Authority: what the user already said
 

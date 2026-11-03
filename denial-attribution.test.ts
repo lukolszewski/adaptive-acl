@@ -1565,10 +1565,10 @@ describe("a near miss names the row the user can still widen, instead of blaming
 	})
 
 	it("(ii) the row is a different kind of action: why = the mention, lever = the sentence about that image", async () => {
-		// The reported image-push shape: the row is `vcs_remote docker` (a `docker push` filed under the vcs kind group),
-		// the pending call is `container_mutation+network_send myrepo/app:1.0` — an image push is that
-		// compound (risk-handlers `artifactPushRows`), so the headline carries a summary per segment and the DENIED
-		// block lists both. The point of the test is unchanged: the categories still differ, so the near miss says
+		// The exact shape this near miss was reported with: the row is `vcs_remote docker` (a `docker push` filed
+		// under the vcs kind group), the pending call is `network_send myrepo/app:1.0` — a push is one upload row
+		// rather than a compound, so the headline/DENIED block carry one summary instead of two.
+		// The point of the test is unchanged: the categories still differ, so the near miss says
 		// "mentions … but names a different target" and the lever names the image — nothing in the old text said
 		// the categories differ, so the user could not see what to say differently.
 		const store = createGrantStore()
@@ -1585,12 +1585,10 @@ describe("a near miss names the row the user can still widen, instead of blaming
 		])
 		expect(lines.join("\n")).toBe(
 			[
-				"Not auto-approved: docker push myrepo/app:1.0 — publishes this artifact; docker push myrepo/app:1.0 — uploads it to a registry (authority wall)",
-				"decided by: classifier — denied: the safety model judged this and said no (its own verdict, not a rule and not layer 0) — it found no sentence covering this target; see near miss | category: container_mutation+network_send | target: myrepo/app:1.0",
+				"Not auto-approved: docker push myrepo/app:1.0 — uploads this artifact to a registry (authority wall)",
+				"decided by: classifier — denied: the safety model judged this and said no (its own verdict, not a rule and not layer 0) — it found no sentence covering this target; see near miss | category: network_send | target: myrepo/app:1.0",
 				'near miss: session grant `vcs_remote docker` — mentions "docker" but names a different target',
 				'lever: say "you can push images to `myrepo/app`"',
-				"DENIED: docker push myrepo/app:1.0 — this mutates containers or images [container_mutation]",
-				"FIX: inspect with read-only commands first, then ask before creating or removing.",
 				"DENIED: docker push myrepo/app:1.0 — this sends data off this machine [network_send]",
 				"FIX: check the payload holds no credentials, then ask before sending.",
 				"RETRY: only after you change the command. Repeating it unchanged will be denied again.",
@@ -1735,5 +1733,88 @@ describe("a near miss names the row the user can still widen, instead of blaming
 		expect(gateDenialMessage(r, { ...forgot, unattended: true })).not.toContain("near miss")
 		const passed = gateDenialAttribution({ result: r, ...knowledge({ endpoint: true, grants: store }) })
 		expect(passed.nearMiss).toHaveLength(1)
+	})
+})
+
+/**
+ * The wall a user reads has to describe the action the model reported.
+ *
+ * The defect was not only a wrong category in a log line — the sentence that reached the terminal was
+ * DENIAL_GUIDANCE's `write_outside` one, "this writes outside the project (…)", about a `cat`, with a FIX
+ * telling the user to "write inside the project". A read the model reported is now reported as a read:
+ * either the wall says nothing about writing, or it names the read it actually refused.
+ */
+describe("a read the model reported is not described to the user as a write", () => {
+	/** Answer the two calls the gate makes: the effect model names an effect, the authoriser says no.
+	 *
+	 *  These effect answers are hand-built shapes, which is fair where the point is the TEXT rather than the
+	 *  verdict: the recorded completions for the same command live in `gate-effect-read.test.ts`.
+	 *  Layer 0 now decides `cat $(echo /tmp/…)` — an unresolved read has a verdict without the model —
+	 *  so the model-path rows here are driven with a command layer 0 hands over as `unknown` outright. */
+	function stubEffect(effect: string, targets: string[]) {
+		return vi.stubGlobal("fetch", async (_url: string, init: Record<string, unknown>) => {
+			const body = JSON.parse(String(init.body)) as { response_format?: { json_schema?: { name?: string } } }
+			const answer = body.response_format?.json_schema?.name === "effect"
+				// A recorded shape: read_only with `outside_project: true`.
+				? { effect, targets, outside_project: true, confidence: "high" }
+				: { authorized: "no", effects: [], allowed_targets: [], forbidden_targets: [], quote: "" }
+			return {
+				ok: true,
+				status: 200,
+				json: async () => ({ choices: [{ message: { content: JSON.stringify(answer) } }] }),
+			} as unknown as Response
+		})
+	}
+
+	async function denied(command: string, effect: string, targets: string[]) {
+		stubEffect(effect, targets)
+		const r = await runGate("bash", { command }, { policy: GATE_POLICY, endpoint: ENDPOINT, userMessages: ONE_MESSAGE })
+		const ctx = gateDenialAttribution({ result: r, ...knowledge({ endpoint: true }) })
+		return { r, text: gateDenialMessage(r, { ...ctx, unattended: true }) }
+	}
+
+	/** A command layer 0 has no tables for: its only leg is `unknown/unknown_command`, so the category, the
+	 *  objects and the sentence all come from the model path. */
+	const UNKNOWN_READ = "parallel cat :::: /tmp/list"
+
+	it("an outside read nobody could check asks as a read, and never borrows the write sentence", async () => {
+		const { r, text } = await denied(UNKNOWN_READ, "read_only", [])
+		expect(r.outcome).toBe("prompt")
+		expect(r.category).toBe("read_only")
+		expect(text).not.toContain("this writes outside the project")
+		expect(text).not.toContain("write inside the project")
+		// Still attributed, still a prompt the user can act on — nothing here went quiet.
+		expect(text).toContain("category: read_only")
+		// The read is an authority question (`read_only` is not an analysis category); the wall stays
+		// analysis only because layer 0 bailed on the shape, which is a separate rule, not this change's.
+		expect(wallFor(r.category)).toBe("authority")
+		expect(denialWall(r)).toBe("analysis")
+	})
+
+	it("a secret named as the read's target is reported as a read, not as a write", async () => {
+		const { r, text } = await denied(UNKNOWN_READ, "read_only", ["~/.ssh/id_ed25519"])
+		expect(r.outcome).toBe("prompt")
+		expect(r.category).toBe("read_secret")
+		expect(text).not.toContain("this writes outside the project")
+		// What the reader is told the model said — a read of a secret, which is what layer 0 would have
+		// called the same command written without the substitution.
+		expect(text).toContain("category: read_secret")
+		expect(text).toContain("`read_secret` is what the safety model called")
+	})
+
+	it("the substitution read layer 0 decides asks as a read, on the authority wall", async () => {
+		// This command used to be driven through the model because an unresolved read had no verdict at all.
+		// Layer 0 answers it now — an outside read needs the user either way — so there is no effect call to
+		// attribute, the wall is the authority one, and the sentence is still a READ naming the object.
+		const { r, text } = await denied("cat $(echo /tmp/cpu_gpu.txt)", "read_only", [])
+		expect(r.modelCalls.filter((c) => c.task === "effect")).toHaveLength(0)
+		expect(r.outcome).toBe("prompt")
+		expect(r.category).toBe("read_only")
+		expect(text).not.toContain("this writes outside the project")
+		expect(text).toContain("category: read_only")
+		expect(denialWall(r)).toBe("authority")
+		// An outside read needs the user either way, so the advice is permission, not the generic split-and-rewrite.
+		expect(text).toContain("rewriting will not help")
+		expect(text).not.toContain("Split this into separate calls, each with literal arguments")
 	})
 })

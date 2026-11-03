@@ -205,10 +205,12 @@ describe("a forbid written in the gate's own scope spelling binds every branch o
 	})
 })
 
-describe("the artifact-publish bridge", () => {
-	// `docker push myrepo/app:1.0` is ONE intent and layer 0 files it as two effects:
-	// container_mutation+network_send. The sentence that grants it can only name the artifact, so a
-	// container row whose own words named the publish answers the send half of THAT compound.
+describe("the artifact-publish bridge is gone", () => {
+	// Layer 0 files `docker push myrepo/app:1.0` as ONE effect — `network_send` on the image ref, a push
+	// mutates no container. The compound `container_mutation+network_send` is still a shape the code can
+	// meet (a durable approval or a grants.json written when that was the category stored it verbatim), which
+	// is why these pins stay: a row reaches only its own kind group in either shape, so a container row never
+	// answers a send. The bridge that used to cross that gap is deleted; nothing here restores it.
 	const IMAGE = "myrepo/app:1.0"
 	const COMPOUND = "container_mutation+network_send"
 
@@ -226,27 +228,34 @@ describe("the artifact-publish bridge", () => {
 		return ledger
 	}
 
-	it("a container row naming the artifact covers both halves of the publish compound", () => {
+	it("a container row naming the artifact covers only its own half of the publish compound", () => {
+		// Its words say "push"; the code no longer reads them. The send half needs its own row.
 		const ledger = imageRow("container_mutation", "myrepo/app", "you can push images to myrepo/app")
-		expect(ledgerCovers(ledger, COMPOUND, [target(IMAGE)]).covered).toBe(true)
+		expect(ledgerCovers(ledger, COMPOUND, [target(IMAGE)]).covered).toBe(false)
+		// The half it IS in, it still covers — the refusal is about reach, not about the row being useless.
+		expect(ledgerCovers(ledger, "container_mutation", [target(IMAGE)]).covered).toBe(true)
 	})
 
-	it("never reaches a plain network_send, which has no container segment to hang the bridge on", () => {
+	it("never reaches a plain network_send, which was never the container row's segment", () => {
 		const ledger = imageRow("container_mutation", "myrepo/app", "you can push images to myrepo/app")
 		// A push to a registry and a curl to a URL are different authorities: that is why the two
-		// groups were split, and the bridge must not undo that split.
+		// groups were split, and with the bridge gone nothing crosses it in either direction.
 		expect(ledgerCovers(ledger, "network_send", [target("https://collector.example.com/beacon")]).covered).toBe(false)
 		expect(ledgerCovers(ledger, "network_send", [target(IMAGE)]).covered).toBe(false)
 	})
 
-	it("needs the publish verb in the row's own words, not just an artifact noun", () => {
+	it("reads no verb out of the row's own words at all", () => {
+		// Used to pin that an artifact NOUN without a publish verb failed the bridge. Now both spellings
+		// fail, and for the same reason: the row's category, not its sentence, decides reach.
 		const ledger = imageRow("container_mutation", "myrepo/app", "look at what is in myrepo/app")
 		expect(ledgerCovers(ledger, COMPOUND, [target(IMAGE)]).covered).toBe(false)
 	})
 
-	it("reaches the send half from anything in the cluster group (the group the row is in, not its name)", () => {
+	it("the cluster group buys a group-mate nothing outside its own segment", () => {
+		// Same kind group as the container half, publish wording in the quote — that shape used to cover
+		// the compound. Reach is now the row's own category segments, so it does not.
 		const ledger = imageRow("cluster_mutation", "myrepo/app", "you can publish myrepo/app")
-		expect(ledgerCovers(ledger, COMPOUND, [target(IMAGE)]).covered).toBe(true)
+		expect(ledgerCovers(ledger, COMPOUND, [target(IMAGE)]).covered).toBe(false)
 	})
 
 	it("is one-way: a network_send row never authorises the container half", () => {
@@ -263,7 +272,7 @@ describe("the artifact-publish bridge", () => {
 /* ------------------------------------------------------------------ extraction */
 
 /** One sentence, one grant the model answered with `answer`. */
-function extract(message: string, answer: { action: string; category?: string; targets: string[]; kind?: string }): ExtractedEvent[] {
+function extract(message: string, answer: { action: string; category?: string; targets: string[]; kind?: string; scope?: string }): ExtractedEvent[] {
 	return eventsFromExtraction({ grants: [{ quote: message, ...answer }], revocations: [] } as never, "m1", 1, message)
 }
 
@@ -278,42 +287,54 @@ function ledgerFrom(events: ExtractedEvent[]): Ledger {
 	return ledger
 }
 
-describe("the noun in the sentence outranks the verb the model read", () => {
-	it("files 'docker push' under the publish compound and remembers what the model said", () => {
-		resetExtractionStats()
-		const events = extract("you are allowed to run docker push", {
-			action: "docker push",
-			category: "vcs_remote",
-			targets: ["docker"],
+describe("the model's category is stored; a disagreement is counted, never applied", () => {
+	// This block used to pin an OVERRIDE: a deterministic noun table beat the model's category and rewrote
+	// `vcs_remote` into `container_mutation+network_send`. That table and the override are both deleted —
+	// code may count a disagreement, never apply it. What replaces the override is the honest
+	// cost of a wrong label: the row is stored as the model filed it, it does not reach the pending action,
+	// and the call goes to the gate's model instead of being auto-allowed. Fewer allows, never more.
+
+	it("stores what the model filed, and an image push it filed under git does not cover the push", () => {
+		// Recorded answer for this very sentence, verbatim — including the error: an image
+		// push wearing the git category. The row is kept as the model answered it; the compound the gate
+		// files `docker push` under is therefore NOT covered, which is one model call, not an allow.
+		const message = "you can push registry.internal.acme/api:2"
+		const events = extract(message, {
+			action: "push image", category: "vcs_remote", kind: "entity", scope: "named", targets: ["registry.internal.acme/api:2"],
 		})
-		expect(events).toHaveLength(1)
-		expect(events[0]).toEqual(expect.objectContaining({
-			type: "grant",
-			category: "container_mutation+network_send",
-			value: "*",
-			kind: "entity",
-			modelCategory: "vcs_remote",
-		}))
+		expect(stored(events)).toEqual(["vcs_remote 2"])
+		const ledger = ledgerFrom(events)
+		expect(ledger.grants.map((g) => `${g.category} ${g.value}`)).toEqual(["vcs_remote 2"])
+		expect(ledgerCovers(ledger, "container_mutation+network_send", [target("registry.internal.acme/api:2")]).covered).toBe(false)
+	})
+
+	it("counts the rows whose own grammar refuses their category, and still keeps the model's answer", () => {
+		// The counter is the audit trail the override used to be. It fires on SHAPE, not vocabulary: the
+		// target parses under the OTHER publish grammar and not under the one the category selects
+		// (`host:port/repo:tag` is the shape the git grammar refuses — machine syntax, not English). The
+		// recorded row above is deliberately NOT counted: the git grammar reads `host/repo:tag` as a ref,
+		// so both grammars claim it and code has nothing to assert.
+		resetExtractionStats()
+		const message = "you can push registry.internal.acme:5000/api:2"
+		const events = extract(message, {
+			action: "push image", category: "vcs_remote", kind: "entity", scope: "named", targets: ["registry.internal.acme:5000/api:2"],
+		})
 		expect(extractionStats.crossChecked).toBe(1)
+		// Nothing is stored under the git grammar, so nothing is authorised — the count is the only output.
+		expect(stored(events)).toEqual([])
 	})
 
-	it("and that row then covers the image push layer 0 files as the same compound", () => {
-		const ledger = ledgerFrom(extract("you are allowed to run docker push", {
-			action: "docker push",
-			category: "vcs_remote",
-			targets: ["docker"],
-		}))
-		expect(ledgerCovers(ledger, "container_mutation+network_send", [target("myrepo/app:1.0")]).covered).toBe(true)
-	})
-
-	it("never turns the model's wrong label into a second segment", () => {
-		// `container_mutation+vcs_remote` with the category-wide `*` would authorise every push to
-		// every remote off a sentence about docker. The second half is the EFFECT the verb names.
+	it("never widens a wrong label into a second segment", () => {
+		// The bound the override used to break: a `container_mutation+vcs_remote` row carrying the
+		// category-wide `*` would authorise every push to every remote off a sentence about docker. With the
+		// override gone code adds NOTHING to the model's category, and a prose target stores no row at all.
+		resetExtractionStats()
+		// Recorded answer for "you are allowed to run docker push" — `container_mutation` with the prose
+		// target `"docker push"`, which is no ref the image grammar can read.
 		expect(stored(extract("you are allowed to run docker push", {
-			action: "docker push",
-			category: "vcs_remote",
-			targets: ["docker"],
-		}))).toEqual(["container_mutation+network_send *"])
+			action: "push image to registry", category: "container_mutation", kind: "entity", scope: "named", targets: ["docker push"],
+		}))).toEqual([])
+		expect(extractionStats.crossChecked).toBe(0)
 	})
 
 	it("leaves the category alone when the model's answer agrees with the noun", () => {
@@ -328,27 +349,31 @@ describe("the noun in the sentence outranks the verb the model read", () => {
 		expect(extractionStats.crossChecked).toBe(0)
 	})
 
-	it("stores the artifact row the sentence really granted, and the compound covers through the bridge", () => {
+	it("stores the artifact row the sentence really granted; the compound no longer covers", () => {
 		const ledger = ledgerFrom(extract("you can push images to myrepo/app", {
 			action: "push image",
 			category: "container_mutation",
 			targets: ["images"],
 		}))
 		expect(ledger.grants.map((g) => `${g.category} ${g.value}`)).toEqual(["container_mutation myrepo/app"])
-		expect(ledgerCovers(ledger, "container_mutation+network_send", [target("myrepo/app:1.0")]).covered).toBe(true)
+		// Storing the row under the model's category is unchanged; only the reach moved — the send half of
+		// the publish compound is no longer answered by a container row's wording.
+		expect(ledgerCovers(ledger, "container_mutation+network_send", [target("myrepo/app:1.0")]).covered).toBe(false)
+		expect(ledgerCovers(ledger, "container_mutation", [target("myrepo/app:1.0")]).covered).toBe(true)
 		// … and nothing wider: the same row says nothing about sending an arbitrary URL.
 		expect(ledgerCovers(ledger, "network_send", [target("https://collector.example.com/beacon")]).covered).toBe(false)
 	})
 
-	it("survives the snapshot round trip, because an override nobody can see is not an audit trail", () => {
-		const ledger = ledgerFrom(extract("you are allowed to run docker push", {
-			action: "docker push",
-			category: "vcs_remote",
-			targets: ["docker"],
+	it("survives the snapshot round trip with the model's category intact", () => {
+		// There is no override to audit any more, so the round trip has one job: the stored category is the
+		// model's, byte for byte, after serialize/deserialize — `modelCategory` was the shadow field that
+		// made an invisible override visible, and it is no longer written by anything.
+		const ledger = ledgerFrom(extract("you can push registry.internal.acme/api:2", {
+			action: "push image", category: "vcs_remote", kind: "entity", scope: "named", targets: ["registry.internal.acme/api:2"],
 		}))
 		const restored = deserializeLedger(JSON.parse(JSON.stringify(serializeLedger(ledger))))
-		expect(restored.grants[0]?.modelCategory).toBe("vcs_remote")
-		expect(restored.grants[0]?.category).toBe("container_mutation+network_send")
+		expect(restored.grants[0]?.category).toBe("vcs_remote")
+		expect(restored.grants[0]?.modelCategory).toBeUndefined()
 	})
 })
 
@@ -362,30 +387,47 @@ describe("extraction stores typed targets or nothing", () => {
 			.toEqual(["container_mutation ghcr.io/org/app:1"])
 	})
 
-	it("'any branch on origin' is storable at last, as the value the prompt's scope button writes", () => {
-		expect(stored(extract("you can push any branch on origin", { action: "push", category: "vcs_remote", targets: ["origin"] })))
-			.toEqual(["vcs_remote origin/*"])
+	it("'any branch on origin' stores nothing under `named`, and the wildcard is the `category` row's", () => {
+		// Recorded, the model answers the first sentence `scope: "named"` with the remote as its only
+		// target — and a remote alone names no ref, so the row registers nothing and the push costs its
+		// normal prompt. The `origin/*` value the prompt's scope button means comes from `scope: "category"`,
+		// which is the second recorded row below.
+		expect(stored(extract("you can push any branch on origin", {
+			action: "push to remote", category: "vcs_remote", kind: "entity", scope: "named", targets: ["origin"],
+		}))).toEqual([])
+		expect(stored(extract("you can push every branch to origin", {
+			action: "push branches", category: "vcs_remote", kind: "entity", scope: "category", targets: [],
+		}))).toEqual(["vcs_remote origin/*"])
 	})
 
-	it("a quantifier with no remote and only the tool as a target is the category-wide row", () => {
-		expect(stored(extract("you can push any branch", { action: "push", category: "vcs_remote", targets: ["branch"] })))
-			.toEqual(["vcs_remote *"])
+	it("a `category` row with no place named in the sentence is the category-wide row", () => {
+		// Recorded row, verbatim: `scope: "category"`, empty targets.
+		expect(stored(extract("you can push any branch", {
+			action: "push to remote", category: "vcs_remote", kind: "entity", scope: "category", targets: [],
+		}))).toEqual(["vcs_remote *"])
 	})
 
-	it("reads the quantifier in both numbers, because a regex that matches nothing reads as a rule", () => {
-		// `branches?` in a regex is "branche" + optional s. Pinned in both numbers so a typo in the
-		// kind-word table cannot pass by matching nothing.
+	it("the field decides the wildcard in every wording, and a `named` row never gets one", () => {
+		// This block used to pin a quantifier regex (`any|all|every` within three words of a kind-word,
+		// spelled `branch(?:es)?` because `branches?` matches no plural). Deleted. The field decides, so the
+		// two directions are both worth pinning: a `category` row is the wildcard in every wording and in
+		// both grammars, and the same sentences under `named` store nothing — a regex may no longer stand in
+		// for the field, which is the whole point.
 		for (const message of ["you can push any branch", "you can push any branches", "you can push every branch", "you can push all branches"]) {
-			expect(stored(extract(message, { action: "push", category: "vcs_remote", targets: ["branch"] })), message).toEqual(["vcs_remote *"])
+			expect(stored(extract(message, { action: "push", category: "vcs_remote", kind: "entity", scope: "category", targets: [] })), message).toEqual(["vcs_remote *"])
+			expect(stored(extract(message, { action: "push", category: "vcs_remote", kind: "entity", scope: "named", targets: ["branch"] })), message).toEqual([])
 		}
-		// … and the remote half still wins when the sentence names one: a quantifier with a place
-		// attached is a scoped row, not the category-wide one.
+		// … and the remote half still wins when the sentence names one: a `category` row with a place
+		// attached is the scoped wildcard, not the category-wide one.
 		for (const message of ["you can push every branch to origin", "you can push all branches on origin"]) {
-			expect(stored(extract(message, { action: "push", category: "vcs_remote", targets: ["branch"] })), message).toEqual(["vcs_remote origin/*"])
+			expect(stored(extract(message, { action: "push", category: "vcs_remote", kind: "entity", scope: "category", targets: [] })), message).toEqual(["vcs_remote origin/*"])
 		}
 		for (const message of ["you can push any tag to ghcr.io", "you can push all tags to ghcr.io"]) {
-			expect(stored(extract(message, { action: "push", category: "container_mutation", targets: ["tag"] })), message).toEqual(["container_mutation ghcr.io"])
+			expect(stored(extract(message, { action: "push", category: "container_mutation", kind: "entity", scope: "category", targets: [] })), message).toEqual(["container_mutation ghcr.io"])
 		}
+		// A place the model's target list names but the message does not drops the whole row — `*` would
+		// be wider than what the model asked for, so nothing registers.
+		expect(stored(extract("you can push any branch", { action: "push", category: "vcs_remote", kind: "entity", scope: "category", targets: ["origin"] }))).toEqual([])
 	})
 
 	it("prose is never stored, however sure the model sounds about it", () => {
@@ -396,41 +438,45 @@ describe("extraction stores typed targets or nothing", () => {
 		}
 	})
 
-	it("a quantifier without the publish verb grants nothing either", () => {
-		expect(extract("what is in any branch", { action: "branch listing", category: "vcs_remote", targets: ["branch"] })).toEqual([])
+	it("prose under a `named` row grants nothing, whatever quantifier words sit next to it", () => {
+		// Used to be "a quantifier without the publish verb": the verb regex was what told a noun phrase
+		// from a permission. The field does that job now — a row that did not ask for the width gets no
+		// wildcard, no matter how the sentence reads.
+		expect(extract("what is in any branch", { action: "branch listing", category: "vcs_remote", kind: "entity", scope: "named", targets: ["branch"] })).toEqual([])
 	})
 
 	it("keeps working for the categories that have no grammar", () => {
 		// The normalisation is scoped to grammar categories: a path target still goes through
 		// targetNamedByUser and is stored the way it always was.
-		expect(stored(extract("you can write into /home/u/dev/wt/one.ts", { action: "write", category: "write_outside", targets: ["/home/u/dev/wt/one.ts"] })))
-			.toEqual(["write_outside /home/u/dev/wt/one.ts"])
+		expect(stored(extract("you can write into /home/u/dev/wt/one.ts", { action: "write file", category: "write_project", kind: "entity", scope: "named", targets: ["/home/u/dev/wt/one.ts"] })))
+			.toEqual(["write_project /home/u/dev/wt/one.ts"])
 	})
 
 	it("no sentence in a generated batch leaves a value the grammar cannot read (no dead rows)", () => {
 		const remotes = ["origin", "upstream", "git.example.com"]
 		const branches = ["ABC123", "feature/ABC123", "refs/heads/tickets/9", "hotfix/x"]
 		const openers = ["you can push", "go ahead and publish", "you may release", "i allow you to push"]
-		const batch: Array<{ message: string; targets: string[] }> = []
+		const batch: Array<{ message: string; targets: string[]; scope: string }> = []
 		for (const opener of openers) {
 			branches.forEach((branch, i) => {
 				const remote = remotes[i % remotes.length]!
-				batch.push({ message: `${opener} ${branch} to ${remote}`, targets: [branch] })
+				batch.push({ message: `${opener} ${branch} to ${remote}`, targets: [branch], scope: "named" })
 			})
 			for (const remote of remotes) {
-				batch.push({ message: `${opener} any branch on ${remote}`, targets: ["branch", remote] })
-				batch.push({ message: `${opener} every branch to ${remote}`, targets: ["branches"] })
+				batch.push({ message: `${opener} any branch on ${remote}`, targets: [], scope: "category" })
+				batch.push({ message: `${opener} every branch to ${remote}`, targets: [], scope: "category" })
 			}
-			batch.push({ message: `${opener} any branch`, targets: ["branch"] })
-			batch.push({ message: `${opener} the new branch`, targets: ["the new branch"] })
-			batch.push({ message: `${opener} it`, targets: ["it"] })
-			batch.push({ message: `${opener} docker push`, targets: ["docker"] })
+			batch.push({ message: `${opener} any branch`, targets: [], scope: "category" })
+			batch.push({ message: `${opener} any branch`, targets: ["branch"], scope: "named" })
+			batch.push({ message: `${opener} the new branch`, targets: ["the new branch"], scope: "named" })
+			batch.push({ message: `${opener} it`, targets: ["it"], scope: "named" })
+			batch.push({ message: `${opener} docker push`, targets: ["docker"], scope: "named" })
 		}
 		expect(batch.length).toBeGreaterThanOrEqual(50)
 
 		let rows = 0
-		for (const { message, targets } of batch) {
-			for (const ev of extract(message, { action: "push", category: "vcs_remote", targets })) {
+		for (const { message, targets, scope } of batch) {
+			for (const ev of extract(message, { action: "push", category: "vcs_remote", kind: "entity", scope, targets })) {
 				if (!ev.category.startsWith("vcs_remote")) continue
 				rows++
 				expect(parseVcsTarget(ev.value), `${message} -> ${ev.value}`).toBeDefined()

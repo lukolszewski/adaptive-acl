@@ -881,6 +881,16 @@ const DENIAL_GUIDANCE: Record<string, { mechanism: string; fix: string }> = {
 		mechanism: "an interpreter is running code the analyzer cannot classify (-c, heredoc or inline script)",
 		fix: "write the script to a file with the write tool, then run that file by path.",
 	},
+	// A plain read is only ever refused for WHERE it reads, so the fallback's "split it, keep it literal" sent the
+	// agent rewriting a call that has nothing to split. Permission comes only from what the user said, never a file.
+	read_only: {
+		mechanism: "this reads outside the project ({target}) and nothing the user said permits it",
+		fix: "rewriting will not help — the path itself needs permission. Carry on with what you have; if you truly need it, name the exact path so the user can permit reading it.",
+	},
+	read_system_state: {
+		mechanism: "this reads machine state ({target}) that nothing the user said permits",
+		fix: "rewriting will not help — reading this needs permission. Carry on with what you have; if you truly need it, name the exact target so the user can permit it.",
+	},
 	read_secret: {
 		mechanism: "this reads a secret-bearing path ({target})",
 		fix: "Never print the contents. If one value is needed, have the user supply that value, or move it somewhere not secret-bearing. For durable access the user can add a rule naming the exact path, e.g. Read({target}) - a folder glob will not reach a secret, by design.",

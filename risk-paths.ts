@@ -4,10 +4,199 @@
  * See LICENSE.
  *
  * Path classification for the auto-mode risk policy (docs/CLASSIFIER-SPEC.md §2.3, §2.5).
- * Pure functions; `home` and `project` are injected so tests are hermetic.
+ * Pure functions; `home` and `project` are injected so tests are hermetic. The two machine probes
+ * ({@link kubeContexts} and the package-script probe in risk-policy.ts) are the only filesystem reads here,
+ * both switch off with the same `fs: false` option, and both answer "nothing" when they are off.
  */
 
 import path from "node:path"
+import { existsSync, readFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+
+/**
+ * The temporary locations a TEMP-CLASS permission stands for.
+ *
+ * The user says "you may write temporary files" and names no path — the class is the only object the
+ * sentence has. Code must not read the word "temporary" out of English, so the model marks
+ * the row with a structured class and this function is the one place that says what the class means. It
+ * names the writable temp roots the gate already treats as routine for writes: `/tmp`, `/var/tmp` and
+ * `$TMPDIR` (via `os.tmpdir()`, which is where a per-user temp dir actually is).
+ *
+ * `/dev/shm` is deliberately NOT here. Layer 0 files a write there as a temp write (it is fast scratch
+ * space), but it is shared memory rather than the "temp files" of a shell conversation, and the class names
+ * the three above. Leaving it out costs one prompt; guessing it would be authorising an object nobody named.
+ */
+export function tempGrantDirs(): string[] {
+	const dirs = ["/tmp", "/var/tmp", tmpdir()]
+	const seen = new Set<string>()
+	const out: string[] = []
+	for (const d of dirs) {
+		const norm = normalize(d)
+		if (!norm || seen.has(norm)) continue
+		seen.add(norm)
+		out.push(norm)
+	}
+	return out
+}
+
+/**
+ * The object a status read of THIS machine is about.
+ *
+ * A status read — processes, disks, sockets, units, containers on this box — has no path to name, so its
+ * object is a machine or a cluster, defaulting to this machine. One stable token for that machine is what
+ * makes the approval one per machine rather than one per command: every local status read carries this same
+ * object, so the user answers once and the whole family is answered.
+ *
+ * It is a machine address, not a sentence: the model never has to spell it, because a grant says so with the
+ * structured field `targetClass: "local_machine"` and the code maps that field to this value.
+ */
+export const LOCAL_MACHINE_OBJECT = "localhost"
+
+/** The kubeconfig's own field names — keys of a machine format, like a CLI flag, and never prose. Two of them
+ *  carry a value this scanner is allowed to look at (`current-context`, `name`); the third is a section header.
+ *  Everything else in the file — tokens, client certificates, server addresses — is never read past its key. */
+const KUBE_CONTEXTS_SECTION = "contexts"
+const KUBE_CURRENT_CONTEXT = "current-context"
+const KUBE_NAME_FIELD = "name"
+
+/** `key: value` — a YAML mapping entry, or the part of a `- ` list item that follows the dash. */
+const YAML_FIELD = /^([A-Za-z0-9_-]+):(.*)$/
+/** A YAML list item and the gap after its dash; the gap's width is what makes a line one of the item's own
+ *  fields rather than a field of the map nested inside it. A lone `-` is an item too; `---` is not. */
+const YAML_LIST_ITEM = /^-(\s*)(.*)$/
+
+/** One layer of matching quotes off a YAML scalar. */
+function scalar(raw: string): string {
+	const v = raw.trim()
+	const quoted = v.length > 1 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))
+	return quoted ? v.slice(1, -1) : v
+}
+
+/**
+ * The context entries one kubeconfig text declares, and its current context.
+ *
+ * `kubectl` writes each context as a list item whose first line is `- context:` and whose `name:` sits on its own
+ * line, indented to the item's own field column. Hand-written files usually put `- name: prod` on the dash line,
+ * and some tools indent the whole list. All three are the same shape to this scanner: one slot per list item
+ * under `contexts:`, and the name is read from whichever line carries it **at the item's own field column** — so
+ * a `name` inside the nested `context:` map is not mistaken for the entry's name, and the deeper fields
+ * (`cluster`, `user`, and anything credential-shaped) are never looked at at all.
+ *
+ * The section ends at the next top-level key, which is what keeps the `clusters:` and `users:` lists — both of
+ * which also hold `- name:` items — out of the count.
+ */
+function contextEntriesIn(text: string): { names: string[]; entries: number; current?: string } {
+	const names: string[] = []
+	let entries = 0
+	let current: string | undefined
+	let inContexts = false
+	/** The open list item's name, until the item ends. */
+	let open: string | undefined
+	/** Column of the open item's own fields; -1 while no item is open. */
+	let fieldCol = -1
+	const closeItem = (): void => {
+		if (open) names.push(open)
+		open = undefined
+		fieldCol = -1
+	}
+	for (const line of text.split("\n")) {
+		const body = line.trim()
+		if (!body || body.startsWith("#")) continue
+		const col = line.length - body.length
+		const field = YAML_FIELD.exec(body)
+		if (col === 0 && body[0] !== "-") {
+			// A top-level key: it names the current context, continues the contexts section, or ends both.
+			closeItem()
+			if (field?.[1] === KUBE_CURRENT_CONTEXT) {
+				if (field[2].trim()) current = current ?? scalar(field[2])
+				continue
+			}
+			inContexts = field !== null && field[1] === KUBE_CONTEXTS_SECTION
+			continue
+		}
+		if (!inContexts) continue
+		if (body === "-" || body.startsWith("- ") || body.startsWith("-\t")) {
+			const item = YAML_LIST_ITEM.exec(body)
+			closeItem()
+			entries += 1
+			fieldCol = col + 1 + (item?.[1]?.length ?? 0)
+			const own = YAML_FIELD.exec(item?.[2] ?? "")
+			if (own?.[1] === KUBE_NAME_FIELD && own[2].trim()) open = scalar(own[2])
+			continue
+		}
+		if (col === fieldCol && field?.[1] === KUBE_NAME_FIELD && !open && field[2].trim()) open = scalar(field[2])
+	}
+	closeItem()
+	return { names, entries, current }
+}
+
+/**
+ * The contexts a kubeconfig defines, and the current one — the two fields a cluster object can be derived from.
+ *
+ * A kubeconfig holds credentials, so this returns **names only**: the `current-context` scalar and the names
+ * under `contexts:`. Nothing else is parsed, returned, or logged, and the caller is expected to print the same
+ * two things or nothing. The cluster class needs exactly these: `current_cluster` may stand for the current
+ * context when there
+ * is one context to mean, and must stand for nothing when the file offers several.
+ *
+ * `contexts` are the names that could be read; `entries` is how many context entries the file declares, which is
+ * a larger number when an entry has no readable name. Ambiguity is judged on `entries`, because that is how many
+ * referents a sentence about "my cluster" could have — an unreadable entry makes the answer ambiguous, it does
+ * not narrow the file down to one cluster.
+ *
+ * Returns `{ contexts: [], entries: 0, current: undefined }` for a missing, unreadable or over-large file, which
+ * every caller reads as "no cluster can be derived from this machine" — the answer that costs a prompt.
+ */
+export function kubeContexts(
+	home: string,
+	env?: Record<string, string | undefined>,
+	/** Probes off in unit tests (the same `fs: false` the package-script probe honours), so a test never reads
+	 *  the machine's real kubeconfig and never depends on which cluster the developer is logged into. */
+	enabled?: boolean,
+): { contexts: string[]; entries: number; current?: string } {
+	if (enabled === false) return { contexts: [], entries: 0 }
+	const files: string[] = []
+	for (const piece of (env?.KUBECONFIG ?? process.env.KUBECONFIG ?? "").split(path.delimiter)) {
+		if (piece.trim()) files.push(expandTilde(piece.trim(), home))
+	}
+	if (files.length === 0) files.push(path.join(home, ".kube", "config"))
+	const contexts: string[] = []
+	let entries = 0
+	let current: string | undefined
+	for (const file of files) {
+		let text: string
+		try {
+			if (!existsSync(file)) continue
+			text = readFileSync(file, "utf-8")
+		} catch {
+			continue
+		}
+		if (text.length > 2_000_000) continue
+		const found = contextEntriesIn(text)
+		contexts.push(...found.names)
+		entries += found.entries
+		if (!current && found.current) current = found.current
+	}
+	return { contexts, entries, current }
+}
+
+/**
+ * The cluster a `kubectl`-family command is addressed to: the context the command names, else the
+ * kubeconfig's current context, else the client's own name.
+ *
+ * The last of those is not a guess at a cluster — it is the fallback kept for the case where the
+ * machine says nothing, so a grant has to be spelled with the client's name rather than code inventing one.
+ */
+export function currentClusterObject(
+	named: string | undefined,
+	client: string,
+	home: string,
+	env?: Record<string, string | undefined>,
+	probes?: boolean,
+): string {
+	if (named && named.trim()) return named.trim()
+	return kubeContexts(home, env, probes).current ?? client
+}
 
 export type PathContext = {
 	/** Effective working directory for relative paths. */
@@ -220,7 +409,22 @@ const SECRET_EXAMPLE_RE = /\.(example|sample|template|dist|schema)$/i
  *  classifier endpoint — provider keys live in the agent's models/settings files, not here). */
 const NON_SECRET_UNDER_HOME = new Set([".pi/agent/adaptive-acl.json"])
 
-const SECRET_DIRS_UNDER_HOME = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config/gh", ".config/gcloud", ".azure", ".password-store", ".pi/agent", ".claude", ".config/pi", ".vault-token"]
+/**
+ * Home-relative locations whose contents are a credential, one line per CLI that keeps its keys there.
+ *
+ * Matching is by directory component (`hrel === d || hrel.startsWith(d + "/")`), so `.config/op` covers
+ * `~/.config/op/config` and NOT `~/.config/openstatus` — the trailing-slash half of that test is what keeps
+ * this list from becoming a prefix tree of near-misses.
+ */
+const SECRET_DIRS_UNDER_HOME = [
+	".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config/gh", ".config/gcloud", ".azure", ".password-store",
+	".pi/agent", ".claude", ".config/pi", ".vault-token",
+	// Cloud/provider CLIs measured to hold live API keys in plaintext:
+	// vast.ai, rclone remotes, Operator (op), DigitalOcean, Hetzner Cloud, Terraform's own CLI credentials
+	// dir (which stores S3/OCI tokens, not just state), and the HF token `huggingface-cli login` writes.
+	".config/vastai", ".config/rclone", ".config/op", ".config/doctl", ".config/hcloud",
+	".terraform.d", ".cache/huggingface",
+]
 
 const SENSITIVE_HOME_FILES = new Set([
 	".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zprofile", ".zshenv", ".zlogin",

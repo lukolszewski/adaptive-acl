@@ -158,6 +158,74 @@ describe("envChangesExecution: where a rule stops being able to speak for a leg"
 	)
 })
 
+/**
+ * The pager/editor family is decided by the VALUE, not by the name.
+ *
+ * `PAGER=cat git log -5` was refused for coverage and could never be offered an always-allow, because
+ * `PAGER` is on the execution-changing name list — the value was never looked at, so `cat`, `less` and
+ * `/bin/rm` were treated identically. A display-only program runs the command and prints its output; every
+ * other value is a program, a path or a decision a rule cannot see.
+ */
+describe("envChangesExecution with the value: the pager / editor family", () => {
+	const FAMILY = ["PAGER", "GIT_PAGER", "MANPAGER", "LESS", "EDITOR", "VISUAL", "BROWSER", "SYSTEMD_PAGER", "GIT_SEQUENCE_EDITOR"]
+
+	it.each(["cat", "less", "more", "head", "tail", "true", "false"])(
+		"%s is a display-only program, so the command is the command",
+		(value) => {
+			for (const name of FAMILY) expect(envChangesExecution(name, value), `${name}=${value}`).toBe(false)
+		},
+	)
+
+	it.each([
+		["PAGER", "/bin/rm"],
+		["PAGER", "rm"],
+		["PAGER", "sh -c rm"],
+		["PAGER", "cat /etc/passwd"],
+		["PAGER", "cat;rm -rf /"],
+		["PAGER", "cat "],
+		["PAGER", ""],
+		["PAGER", "$SHELL"],
+		["EDITOR", "vim"],
+		["BROWSER", "xdg-open"],
+		["LESS", "-R"],
+	])("%s=%s keeps the refusal", (name, value) => {
+		// Exact bare words only: a path, an argument, a second command or an empty value is not one.
+		expect(envChangesExecution(name, value)).toBe(true)
+	})
+
+	it("keeps refusing the loader, PATH, hook and interpreter names, whatever the value says", () => {
+		// The value IS the code that runs in these, so no value makes one neutral.
+		for (const name of ["LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "PATH", "HOME", "BASH_ENV", "ENV",
+			"NODE_OPTIONS", "PYTHONPATH", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL", "CC", "ADAPTIVE_ACL_INHERITED_MODE"]) {
+			expect(envChangesExecution(name, "cat"), name).toBe(true)
+		}
+	})
+
+	it("a name with no value is the fail-closed reading", () => {
+		// A caller holding only a name (a wrapper peel that reported names) cannot see the value.
+		expect(envChangesExecution("PAGER")).toBe(true)
+		expect(envChangesExecution("EDITOR")).toBe(true)
+	})
+})
+
+describe("a leg carries the pairs as well as the names", () => {
+	it("so a caller can ask about the value", () => {
+		const audit = auditBashCommand("PAGER=cat GIT_PAGER=less git log -5")
+		if (!audit.proven) throw new Error(audit.reason)
+		expect(audit.legs[0]!.envNames).toEqual(["PAGER", "GIT_PAGER"])
+		expect(audit.legs[0]!.env).toEqual([
+			{ name: "PAGER", value: "cat" },
+			{ name: "GIT_PAGER", value: "less" },
+		])
+	})
+
+	it("including the ones a wrapper peel stepped over", () => {
+		const audit = auditBashCommand("env PAGER=cat git log -5")
+		if (!audit.proven) throw new Error(audit.reason)
+		expect(audit.legs[0]!.env).toEqual([{ name: "PAGER", value: "cat" }])
+	})
+})
+
 describe("hitsNeverFloor", () => {
 	it.each(["rm -rf /", "sudo rm -rf /", "timeout 5 rm -rf /", "dd if=/dev/zero of=/dev/sda", "chmod -R 777 /"])(
 		"%s is floored",

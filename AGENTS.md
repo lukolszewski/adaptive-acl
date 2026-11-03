@@ -21,12 +21,12 @@ undo, per-mode model profiles, subagent approval forwarding, and an adaptive foo
 
 ## Module map
 
-Every file matching `git ls-files '*.ts' | grep -v '\.test\.ts$'` (60 entries; the last two are test
+Every file matching `git ls-files '*.ts' | grep -v '\.test\.ts$'` (61 entries; the last two are test
 harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ### Entry point and pi surface
 
-- `index.ts` — the extension. Registers the mode commands (`index.ts:1768-1773`), shortcuts, start flags,
+- `index.ts` — the extension. Registers the mode commands (`index.ts:1770-1775`), shortcuts, start flags,
   the `tool_call` gate, the footer, plan mode, prompts, session persistence. ~3 900 lines; everything a user
   sees is wired here, almost nothing is decided here.
 - `session-branch.ts` — typed port over `ctx.sessionManager`. The only file that writes down pi's session
@@ -62,9 +62,9 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 - `bash-rule-argv.ts` — the allow matcher: do the words a rule names sit, unchanged, at the front of these
   argv words (and, for a redirecting leg, is the file it writes the file the rule names).
 - `permissions.ts` — the decision: `deny → ask → allow → passthrough` (`permissions.ts:3`), allow over argv,
-  deny/ask over text, on purpose (`permissions.ts:8-17`).
+  deny/ask over text, on purpose (`permissions.ts:8-19`).
 - `permissions-loader.ts` — global + project rule files (`permissions.json`, `permissions.local.json`) and
-  their merge/persist; owns the one derivation of where project state lives (`permissions-loader.ts:37-61`).
+  their merge/persist; owns the one derivation of where project state lives (`permissions-loader.ts:38-62`).
 - `path-permission-match.ts` — Read/Edit/Write path globs over project-relative, `~/` and absolute paths,
   and the path rules offered after an approval.
 - `dangerous-permissions.ts` — which allow rules hand the shell to the model (`Bash(python:*)`, `Bash(git:*)`,
@@ -93,7 +93,7 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 - `bash-walker-golden.ts` — loads and compares `bash-walker.golden.jsonl`. Deliberately not a `*.test.ts`
   name because several suites import it; it therefore ships in the tarball (`package.json:29-38`).
 - `shell-lexer.ts` — the older hand-written lexer. Still produces segments for the text tier tables and for
-  the legacy engine, and its verdicts are escalation-only (`risk-policy.ts:593-602`).
+  the legacy engine, and its verdicts are escalation-only (`risk-policy.ts:642-651`).
 
 ### Auto-mode gate
 
@@ -106,7 +106,7 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 - `bash-tiers.ts` — the positive allowlists (read-only verbs, test runners, routine build/git verbs, the
   runner flags that turn a test into an execution vector) computed from the parse instead of from text.
 - `gate.ts` — the pipeline: layer 0 → session grants → transcript authorisation → effect classification,
-  returned as a `GateResult` (`gate.ts:140`). No UI, no pi imports, so it can be run end to end in a test.
+  returned as a `GateResult` (`gate.ts:160`). No UI, no pi imports, so it can be run end to end in a test.
 - `gate-bridge.ts` — pi ↔ gate helpers: endpoint resolution including the Copilot cases, ledger sync, and
   the wording and attribution of every denial the user reads.
 - `utils.ts` — the older pure helpers: text tier tables, the plan file and its numbered `Plan:` / `[DONE:n]`
@@ -120,7 +120,7 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
   allocate nothing.
 - `classifier-client.ts` — the single-shot classifier (pi-ai `completeSimple`): prompt assembly, stages, XML
   and JSON verdict formats, retries. Reachable only through the `classifier.engine: "legacy"` path
-  (`config.ts:534`, wired at `index.ts:3254`).
+  (`config.ts:534`, wired at `index.ts:3256`).
 - `classifier-prompt.ts` — assembles the system prompt out of `classifier-prompts/` with index arithmetic on
   `{{rules:*}}` / `{{include:*}}` markers; the verdict block is built here, not in the template
   (`classifier-prompt.ts:40-46`).
@@ -155,7 +155,10 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 - `session-grants.ts` — prompt-once grants `{category, value, kind}` and the revocation ("tombstone")
   vocabulary that every store shares, which is the only reason a merge can revoke.
 - `grant-verify.ts` — code-side verification of what the model extracted: verbatim quote, whole-token entity
-  match, `canonicalPath`, forbidden-target veto.
+  match, `canonicalPath`, forbidden-target veto — and `grantDirection`, the one answer to what else a grant
+  implies (write → read, write → single-file delete; `docs/CLASSIFIER-SPEC.md` §4.3c).
+- `category-meanings.ts` — one definition per grant category, plus the lines where neighbours divide. The
+  grant, extraction and effect prompts all render this text; never restate a definition inside a prompt.
 - `target-grammar.ts` — the shape of a publish target: git refs as a `remote/branch` lattice with a
   protected-branch list, image refs as registry/repo/tag. Asked before string equality for the publish
   categories; its `false` is a verdict, never a fall-through to the string rule
@@ -183,10 +186,10 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ```bash
 npm install --ignore-scripts --no-audit --no-fund   # what CI does; nothing here has a build step
-npx vitest run        # 89 files, all green. The test count moves with the suite, so quote CI's
+npx vitest run        # 99 files, all green. The test count moves with the suite, so quote CI's
                       # log rather than a figure copied out of a doc.
 npm run typecheck     # tsc --noEmit -p tsconfig.json — zero errors
-npm run pack:dry      # 65 files, ~643 kB tarball, 2.8 MB unpacked
+npm run pack:dry      # 66 files, ~643 kB tarball, 2.8 MB unpacked
 ```
 
 Run all four before you call a change done, and paste the real output into your result. Notes that cost an
@@ -196,10 +199,10 @@ hour each if you learn them by hand:
   native build. Keep it that way: an `install` script in the dependency chain breaks the publish workflow,
   which installs exactly this way (`.github/workflows/test.yml`, `.github/workflows/release.yml`).
 - **`npx vitest run` must be run from the repository root.** The corpora are loaded relative to the module
-  that reads them (`bash-walker-golden.ts:31`, `bash-allow-layer0.test.ts:609-610`).
+  that reads them (`bash-walker-golden.ts:31`, `bash-allow-layer0.test.ts:689-690`).
 - **`tsconfig.json:15` includes `*.ts` and `tools/*.ts`, root level only**, with `eval` and `spike` excluded
   (neither directory exists here). A new file in a subdirectory is not typechecked by `npm run typecheck`.
-- **`npm run pack:dry` counts 65** because `package.json:29-38` ships `*.ts` minus `*.test.ts`. That glob is
+- **`npm run pack:dry` counts 66** because `package.json:29-38` ships `*.ts` minus `*.test.ts`. That glob is
   why `bash-walker-golden.ts` ships and `docs/`, the `.jsonl` corpora and `testcases/` do not. If a runtime
   path starts reading a non-`.ts` file, this list has to change with it.
 - The publish contract adds a **leak scan**: grep every tracked file for a fixed list of private tokens —
@@ -214,12 +217,12 @@ hour each if you learn them by hand:
 pi -e ./index.ts        # from the repository root — the same entry a published install reads (package.json:24-26)
 ```
 
-What you can then exercise by hand: the four mode names as commands (`index.ts:1768-1773`), plus `/mode`,
+What you can then exercise by hand: the four mode names as commands (`index.ts:1770-1775`), plus `/mode`,
 `/permissions`, `/grants`, `/plan-execute`, `/model-profile`, `/classifier-status`, `/outside-writes`,
-`/undo-outside-writes`, `/unattended`, `/msg` and `/injection-note` (registered between `index.ts:1768` and
-`index.ts:2882`); Shift+Tab for the mode cycle (`index.ts:2978`), Alt+T for thinking level
-(`index.ts:3022`), Alt+I for profiles (`index.ts:3055`); `--permission-mode` (`index.ts:3063`) and
-`--model-profile` (`index.ts:3070`) at start-up. Outside-cwd write tracking caps at 100 snapshots and evicts
+`/undo-outside-writes`, `/unattended`, `/msg` and `/injection-note` (registered between `index.ts:1770` and
+`index.ts:2884`); Shift+Tab for the mode cycle (`index.ts:2980`), Alt+T for thinking level
+(`index.ts:3024`), Alt+I for profiles (`index.ts:3057`); `--permission-mode` (`index.ts:3065`) and
+`--model-profile` (`index.ts:3072`) at start-up. Outside-cwd write tracking caps at 100 snapshots and evicts
 the oldest (`utils.ts:19`, `utils.ts:1005-1008`) — relevant if you touch the undo path.
 
 ## Invariants
@@ -229,23 +232,23 @@ Each line names where the code enforces it. These are the things a confident, pl
 ### Modes and the tool-call gate
 
 - The four modes are the cycle `ask → plan → auto → bypass` (`index.ts:242`), which `/mode`
-  (`index.ts:2408`) and Shift+Tab (`index.ts:2978`) step through. The per-mode commands are registered from
-  their own literal array (`index.ts:1768-1773`) rather than from that constant, so a rename has to be made
+  (`index.ts:2410`) and Shift+Tab (`index.ts:2980`) step through. The per-mode commands are registered from
+  their own literal array (`index.ts:1770-1775`) rather than from that constant, so a rename has to be made
   in both places or `/mode` offers a mode with no command of its own.
-- The start flag is `--permission-mode` because pi owns `--mode` for output format (`index.ts:3061-3063`).
+- The start flag is `--permission-mode` because pi owns `--mode` for output format (`index.ts:3063-3065`).
   Do not "tidy" the name.
 - Configured rules evaluate **before** any mode gate, in the order deny → ask → allow → passthrough
-  (`permissions.ts:3`, the loops at `permissions.ts:85` and `permissions.ts:428`). An allow short-circuits the
+  (`permissions.ts:3`, the loops at `permissions.ts:131` and `permissions.ts:591`). An allow short-circuits the
   gate entirely, which is exactly why broad `Bash(...)` allow rules are stripped before auto mode runs
   (`dangerous-permissions.ts:190`) and restored after it (`dangerous-permissions.ts:215`).
 - Allow matches argv, deny and ask match text, and the split is load-bearing
-  (`permissions.ts:8-17`, `permissions.ts:283-284`): a command layer 0 refuses to vouch for has no argv, so no
+  (`permissions.ts:8-19`, `permissions.ts:446-447`): a command layer 0 refuses to vouch for has no argv, so no
   allow rule can cover it, while `Bash(rm *)` must still stop
   `for f in *; do rm -f $f; done`, which has no argv either. Do not "unify" the two matchers.
 - No UI means the session behaves as unattended: a prompt that cannot be drawn is a denial, never a pass
   (`index.ts:1108-1118`), and `never`-tier stays blocked regardless (`index.ts:1126-1130`). Every failure path
   in this package points the same way — fail closed, and say why.
-- Plan mode writes only the plan file (`index.ts:3142-3145`) and runs only the read-only allowlist.
+- Plan mode writes only the plan file (`index.ts:3144-3147`) and runs only the read-only allowlist.
 - Writes outside the project in bypass mode are **tracked, not blocked** (`utils.ts:998`
   `trackOutsideWrite`, surfaced by `/outside-writes` and `/undo-outside-writes`). Blocking them would be a
   behaviour change, not a safety fix.
@@ -264,17 +267,17 @@ Each line names where the code enforces it. These are the things a confident, pl
   golden corpus never asserts it.
 - The walker holds no policy (`docs/LAYER0-WALKER-SPEC.md:525` §14.5): it does not know what a project
   directory is. Path and risk judgement lives in `risk-paths.ts` and `risk-handlers.ts`.
-- The legacy lexer is escalation-only (`risk-policy.ts:593-602`): its `ask`/`never` verdicts survive, its
+- The legacy lexer is escalation-only (`risk-policy.ts:642-651`): its `ask`/`never` verdicts survive, its
   `allow` verdicts are demoted to `unknown`. It can never lower a tier or authorise anything
   (`risk-policy.ts:16-17`).
 - If the grammar fails to load, every bash command is refused `parser-unavailable` (`bash-parser.ts:186`) — a
-  dead analyzer, never a pass. Initialisation happens at load (`index.ts:3649`) and in `vitest.setup.ts`; the
+  dead analyzer, never a pass. Initialisation happens at load (`index.ts:3651`) and in `vitest.setup.ts`; the
   fact a packaging bug is caught by is which wasm file was used (`bash-parser.ts:229`).
 
 ### Authority
 
 - A grant never widens itself: a grant is `{category, value, kind}` and `grantsCover` matches that and
-  nothing else (`session-grants.ts:1-5`, `session-grants.ts:368`). Approving `docker rmi api:dev` must never
+  nothing else (`session-grants.ts:1-5`, `session-grants.ts:394`). Approving `docker rmi api:dev` must never
   cover `payments:prod`.
 - **A durable row may never express more than the invocation that earned it**
   (`durable-approval.ts:9-14`): where no row can say exactly what was approved, the click is honoured once and
@@ -282,7 +285,7 @@ Each line names where the code enforces it. These are the things a confident, pl
   row is indistinguishable from permission.
 - Importing is not declaring. Rule files are user-authored and evaluate before the mode gate; imported rows
   are background authority that anything said in the current session outranks
-  (`grants-file.ts:7-10`, implemented in `importLedger`, `auth-ledger.ts:1865`).
+  (`grants-file.ts:7-10`, implemented in `importLedger`, `auth-ledger.ts:2154`).
 - Adopting an orphan project's state may take its **tightening** rules (deny/ask) without asking and must
   never apply its **widening** ones — every allow rule and every journal row comes back as a candidate
   (`grants-adopt.ts:10-20`, `grants-adopt.ts:402`).
@@ -298,7 +301,7 @@ Each line names where the code enforces it. These are the things a confident, pl
   rules" and take down every wall the session had.
 - The project id comes from `getProjectId()` and nowhere else (`utils.ts:822`) — both rule files, the grants
   journal, the plan file and the outside-write snapshots hang off it
-  (`permissions-loader.ts:37-49`). Re-deriving it (a git root, a hash taken locally) points a session at a
+  (`permissions-loader.ts:38-50`). Re-deriving it (a git root, a hash taken locally) points a session at a
   state directory its rules were never written into.
 
 ### Model calls
@@ -307,7 +310,7 @@ Each line names where the code enforces it. These are the things a confident, pl
   `classifier-prompts/auto_mode_system_prompt.txt`, whose first line says it is the auto-mode safety check.
   The user prompt then names the live mode in its header (`classifier-client.ts:221`, filled from
   `currentMode` at `index.ts:1327`), and the classifier is only reachable from auto mode
-  (`index.ts:3160-3180`, with the legacy path at `index.ts:3254`). Route another mode through this prompt and
+  (`index.ts:3162-3182`, with the legacy path at `index.ts:3256`). Route another mode through this prompt and
   you hand a model a header describing one mode and rules describing another; `classifier-client.test.ts:483`
   pins the header.
 - The transcript holds user messages and tool calls only. Assistant prose is excluded on purpose — the model
@@ -322,10 +325,10 @@ Each line names where the code enforces it. These are the things a confident, pl
   falls back to 4 096 (`context-budget.ts:25`) and the transcript is then quietly shortened — items are
   dropped whole from the oldest end (`context-budget.ts:51`) — so a sizing bug reads as "the model forgot",
   not as an error. Never clip a string instead: whole items only (`context-budget.ts:15-20`).
-- A truncated answer is a transport failure, never a verdict (`model-client.ts:282-287`,
+- A truncated answer is a transport failure, never a verdict (`model-client.ts:399-404`,
   `classifier-client.ts:824-834`). The answer reserve is a different knob from the window —
   `classifier.copilot.maxOutputTokens` (`config.ts:63-67`): too small is no answer at all.
-- The Copilot session token header travels **only** on the Auto pick (`model-client.ts:43-44`); measured, it
+- The Copilot session token header travels **only** on the Auto pick (`model-client.ts:46-47`); measured, it
   restricts the request to the Auto models, so an explicitly named model must never carry it.
 - Every model failure is rendered as "there is no verdict", never as silence or approval
   (`classifier-messages.ts:66-67`).
@@ -334,8 +337,8 @@ Each line names where the code enforces it. These are the things a confident, pl
 
 - pi's session entry shape is written down in exactly one file (`session-branch.ts:1-8`). A private shape
   guess elsewhere once left the injection probe dead at runtime while its test, using the same guess, passed.
-- Session state travels in two custom entries: `modes` (written `index.ts:377`, restored `index.ts:3687`) and
-  `gate-ledger` (written `index.ts:830`, restored `index.ts:3729`). Renaming either silently discards every
+- Session state travels in two custom entries: `modes` (written `index.ts:377`, restored `index.ts:3689`) and
+  `gate-ledger` (written `index.ts:830`, restored `index.ts:3731`). Renaming either silently discards every
   saved session's mode, grants and ledger.
 - `pi.setModel()` runs only inside an explicitly configured profile: `index.ts:1421` returns when no profile
   is active, `index.ts:1461` is the only call. Profiles are opt-in and live in
@@ -343,8 +346,8 @@ Each line names where the code enforces it. These are the things a confident, pl
   provider definitions.
 - Mode context is injected through the `<!-- adaptive-acl:context -->` anchor
   (`utils.ts:1163-1164`, `resolveModePrompt` at `utils.ts:1189`), not as per-turn messages. Per-mode skill
-  filtering strips skill blocks from the prompt string (`utils.ts:1437`, called `index.ts:3442`, and
-  `index.ts:3449` warns loudly if the strip changed nothing).
+  filtering strips skill blocks from the prompt string (`utils.ts:1437`, called `index.ts:3444`, and
+  `index.ts:3451` warns loudly if the strip changed nothing).
 
 ## What does not live here
 
@@ -369,7 +372,7 @@ feature is noise to the person who has to maintain it next.
 - **No vendored third-party source**, except the one grammar blob that has to ship: `wasm/tree-sitter-bash.wasm`
   with its MIT notice (`wasm/LICENSE-tree-sitter-bash`), for the reasons in `bash-parser.ts:13-33`.
 - **The behavioural contracts are in the tree.** `bash-walker.golden.jsonl` (via `bash-walker-golden.ts:31`)
-  and `testcases/cases-v2.jsonl` + `testcases/cases-ledger.jsonl` (read by `bash-allow-layer0.test.ts:609-610`)
+  and `testcases/cases-v2.jsonl` + `testcases/cases-ledger.jsonl` (read by `bash-allow-layer0.test.ts:689-690`)
   are the accept/refuse corpus for layer 0 and the bash allow matcher. Change the behaviour and the corpus
   changes in the same commit — they are not shipped to users, they are what tells you the change is right.
 

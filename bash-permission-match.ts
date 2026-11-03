@@ -607,7 +607,7 @@ function escapeBashRuleContent(content: string): string {
 //   - `rulesFromArgv` (the normal path) asks layer 0 for the legs of the command and spells each leg's
 //     argv: quoting resolved, one word per argument, assignments and redirections already separated from
 //     it. Those are the very words `bash-rule-argv.ts` compares a specifier against, so a specifier spelled
-//     out of them matches by construction — a redirect, a here-document, a quoted `&&` or a line break
+//     out of them matches by construction — a redirect, a here-document's body, a quoted `&&` or a line break
 //     costs a correct specifier instead of costing the offer.
 //   - `rulesFromText` is the fallback for the only two cases in which there are no words to spell: the
 //     grammar has not loaded yet, and the walker refuses the construct (§12). It is the old scanner, and
@@ -746,13 +746,22 @@ function ruleForWords(words: string[], redirects: readonly AstRedirect[], genera
  * what the user approved:
  *
  *   - **no words at all** (`> /tmp/x`): a write with no command, which no `Bash(...)` rule speaks for;
- *   - **a here-document or here-string**: the body is data on the step, never an argument;
+ *   - **a here-string**: `cat <<< "$x"` carries its data on the step, so there is no word a rule could name
+ *     for it;
  *   - **a run-time value** (`opaque`, §5.10): a rule could only name the placeholder — including a
  *     redirect target that is one, which is why `echo x > $(printf /etc/x)` is refused here and stays
  *     uncovered however the operator is spelled;
  *   - **an environment that changes execution**: the walker keeps `NAME=value` out of argv, which is right
  *     for classification and blind here, so `Bash(git status:*)` would carry
- *     `LD_PRELOAD=/tmp/e.so git status` — the same refusal `legSpellings` makes.
+ *     `LD_PRELOAD=/tmp/e.so git status` — the same refusal `legSpellings` makes. A pager or editor set to a
+ *     display-only program is not one of those (`bash-audit.ts` reads the value, not just the name).
+ *
+ * A **here-document** is NOT in this list either, and that is worth stating: the body is data on the step
+ * and never an argument, which is exactly why a rule cannot name it and does not need to — the rule is the
+ * argv plus the redirect targets, the same one the identical command without a body gets. Only a
+ * quoted-delimiter body reaches this function at all (the walker refuses an unquoted one, whose body is
+ * expanded), and the matching side never consults heredocs, so the rule an offer writes here is honoured by
+ * the same round trip ({@link suggestBashAllowRuleSet} → `permissions.ts`) as every other one.
  *
  * A file redirect is NOT in this list, and that is the deliberate exception. It used to be: coverage compared
  * argv, so the only rule that would cover `echo hi > /tmp/out.txt` was `Bash(echo hi)`, which covers
@@ -764,13 +773,13 @@ function refusalForLeg(leg: AstCommand): string | null {
 	if (leg.argv.length === 0) {
 		return "this step runs no command, so there is nothing for a rule to authorise"
 	}
-	if (leg.heredocs.length > 0 || leg.text.includes(HERE_STRING)) {
-		return `${NOT_HONOURABLE}: the step reads a here-document body or here-string, which is data on the step and never part of a rule`
+	if (leg.text.includes(HERE_STRING)) {
+		return `${NOT_HONOURABLE}: the step reads a here-string, which is data on the step and never part of a rule`
 	}
 	if (leg.opaque) {
 		return "one of its arguments is only known at run time; a rule could name the placeholder, never the value"
 	}
-	if (leg.envVars.some((e) => envChangesExecution(e.name))) {
+	if (leg.envVars.some((e) => envChangesExecution(e.name, e.value))) {
 		return "its environment decides what runs (PATH, LD_PRELOAD, …), and argv carries none of that"
 	}
 	return null

@@ -1732,6 +1732,8 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       input,
       ctx.cwd,
       mergedPermissionRules,
+      // A redirect target is cleared by the same grants and mode a direct write/read would use.
+      { grants: gateGrants, ledger: gateLedger, mode: currentMode },
     );
     if (verdict.behavior === "deny") {
       return {
@@ -3272,14 +3274,14 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
           // Prior authorisation first. Permission rules ARE consulted above
           // (applyConfiguredPermissionRules), but NEITHER grant store was consulted on this path, so
           // approving one outside-cwd read prompted again forever - the original complaint. This is
-          // also the only place write-implies-read (auth-ledger.ts:237) can bite: layer 0 answers
+          // also the only place write-implies-read (grant-verify.ts:165) can bite: layer 0 answers
           // every read_only verdict with tier allow, so the gate never needs the ledger for reads.
           const pctx = { cwd: ctx.cwd, project: ctx.cwd, home: homedir() };
           const pc = classifyPath(pathStr, pctx);
           const resolved = pc.abs ?? pathStr;
-          // Secrets keep their own gate. Asking the ledger for `read_only` over a credentials file
-          // would let a folder grant open it, which is the asymmetry 4414553 and 1f69702 established:
-          // a scope grant never reaches a secret, only a grant naming that exact path does.
+          // A secret is asked for as `read_secret`, not `read_only`: a read grant on a folder never opens a
+          // credentials file in it. A WRITE grant covering the file does: an edit needs a read first, so the
+          // shared direction table in grant-verify.ts answers it.
           const readCategory = pc.isSecret ? "read_secret" : "read_only";
           const ents = [{ kind: "target" as const, value: resolved }];
           if (

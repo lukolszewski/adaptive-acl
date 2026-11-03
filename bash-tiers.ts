@@ -73,7 +73,7 @@ import type { Tier } from "./risk-policy.ts"
  * | `no-command` | the command has no legs to classify |
  * | `runtime-value` | the leg carries a `__CMDSUB_OUTPUT__`/`__TRACKED_VAR__` placeholder (§6) |
  * | `assignment-prefix` | the leg runs with a `NAME=value` prefix, which no anchored table could see |
- * | `writes-a-file` | the leg redirects into a file |
+ * | `writes-a-file` | the leg redirects into a file (an inert sink such as `/dev/null` is not one) |
  * | `read-only-table` / `workflow-table` / `fallback-table` | not admitted by that face's allowlist |
  * | `excluded-word` | a word the face's deny list names (`rm`, `sudo`, `--force`, …) |
  * | `runner-flag` | an argument that turns a test/build command into an execution vector |
@@ -256,11 +256,28 @@ function structuralBlock(leg: BashLeg): string | null {
  * Descriptor dups (`2>&1`, `<&0`) never reach here — {@link BashLeg.targets} holds only the redirects that
  * name a file, which is what makes `ls 2>&1` read-only for both engines. `>&file` (a non-digit target) is a
  * write; `<` and `<<<` move bytes in, so they are not.
+ *
+ * A redirect at an **inert sink** is not a write either: `/dev/null` keeps nothing and `/dev/stdout` and
+ * `/dev/stderr` are the streams the command already has, so `ls 2>/dev/null` reads the same bytes the same
+ * way `ls` does. Disqualifying them made ask mode and plan mode prompt for `git status 2>/dev/null`,
+ * `find . -name x 2>/dev/null` and every `> /dev/null` in a script, which is a prompt about a device that
+ * cannot hold anything. The distinction is about the *target*, not the operator: a redirect into a real file
+ * is still a write to that file, and layer 0 files it as one (`read_only+write_project`, the path's own
+ * category — `write_sensitive`, `persistent_access` where the file is one of those), so the write is judged
+ * on its own verdict by the gate rather than by this ladder.
  */
 const WRITE_OPERATORS = new Set([">", ">>", ">|", ">&", "&>", "&>>"])
 
+/** Device files a write redirect may name without the leg writing anything that can be read back. */
+const INERT_SINK_PATHS: readonly string[] = ["/dev/null", "/dev/stdout", "/dev/stderr"]
+
+/** `/dev/null`, `/dev/stdout`, `/dev/stderr` — spelled as written, with no path resolution to get wrong. */
+function writesToInertSink(target: string): boolean {
+	return INERT_SINK_PATHS.includes(target)
+}
+
 function writesToAFile(leg: BashLeg): boolean {
-	return leg.targets.some((t) => WRITE_OPERATORS.has(t.op))
+	return leg.targets.some((t) => WRITE_OPERATORS.has(t.op) && !writesToInertSink(t.target))
 }
 
 // ------------------------------------------------------------------ the allowlists

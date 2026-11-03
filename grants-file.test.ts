@@ -18,6 +18,8 @@ import {
 	type GrantsFile,
 } from "./grants-file.ts"
 import type { SessionGrant } from "./session-grants.ts"
+import { createGrantStore, grantsCover, importSessionGrants } from "./session-grants.ts"
+import { NO_OBJECT_TARGET } from "./grant-verify.ts"
 
 const tmp = mkdtempSync(join(tmpdir(), "pm-journal-"))
 const at = (name: string) => join(tmp, name)
@@ -230,3 +232,152 @@ describe("mergeIntoGrantsFile — the rest of the file", () => {
 })
 
 afterAll(() => rmSync(tmp, { recursive: true, force: true }))
+
+/**
+ * The shape on disk did not change when a revocation started naming several kinds.
+ *
+ * A revocation may now name several kinds, or every kind, on one thing, and the ledger writes one row per kind
+ * (or one row whose category is `any`). A row is still `{category, value, kind, …}`, so the file format is the
+ * same `v: 1` file and a journal written today must load in a build that has never heard of `any` — and a
+ * journal written yesterday must still load today. The first test below is the mechanical half of that claim:
+ * nothing in a file written with an `any` row is new syntax.
+ */
+describe("`any` travels in the shape that already existed", () => {
+	it("a file written with an `any` forbid row uses no key the base build does not have", () => {
+		const path = at("any-shape.json")
+		const written = mergeIntoGrantsFile(
+			path,
+			{
+				v: 1,
+				grants: [{ category: "write_project", value: "/srv/warehouse", kind: "entity", seq: 1, quote: "you can work in /srv/warehouse", messageId: "m1" }],
+				forbids: [
+					{ category: "any", value: "/srv/warehouse/", kind: "scope", seq: 4, quote: "leave /srv/warehouse alone", messageId: "m4" },
+					{ category: "delete_outside", value: "/srv/warehouse/", kind: "scope", seq: 4, quote: "leave /srv/warehouse alone", messageId: "m4" },
+				],
+				seen: ["m1", "m4"],
+			},
+			[row("/srv/warehouse")],
+			{ sourceCwd: "/srv/project" },
+		)
+		expect(written.ok, written.error).toBe(true)
+		const parsed = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>
+		// The keys of the file, and of every row in it, are the key set the format had before `any`.
+		expect(Object.keys(parsed).sort()).toEqual(["exportedAt", "grants", "ledger", "revoked", "sourceCwd", "v"].sort())
+		const forbids = (parsed.ledger as { forbids: Record<string, unknown>[] }).forbids
+		expect(forbids.length).toBeGreaterThan(0)
+		const baseKeys = new Set(["category", "value", "kind", "quote", "messageId", "seq", "at", "origin", "includesSecrets", "sourceSeq", "sourceMessageId", "modelCategory", "lastMatchedAt"])
+		for (const f of forbids) {
+			for (const key of Object.keys(f)) expect(baseKeys, key).toContain(key)
+			// A LIST never appears in a row: the fan-out happened in the ledger, not on the wire to disk.
+			expect(Array.isArray(f.category), JSON.stringify(f)).toBe(false)
+		}
+		expect(forbids.some((f) => f.category === "any")).toBe(true)
+	})
+
+	it("a journal written before `any` existed (no `any` anywhere) reads and merges unchanged", () => {
+		const path = at("base-shape.json")
+		// Byte-for-byte what an earlier build writes: v1, plain rows, no key `any` introduced (there is none) and
+		// no category value it introduced on the GRANT side.
+		writeFileSync(
+			path,
+			JSON.stringify({
+				v: 1,
+				exportedAt: "2026-10-28T00:00:00.000Z",
+				sourceCwd: "/srv/project",
+				ledger: { v: 1, grants: [{ category: "write_project", value: "./src/a.ts", kind: "entity", seq: 2, quote: "you can edit ./src/a.ts" }], forbids: [], seen: ["m2"] },
+				grants: [{ category: "delete_outside", value: "/tmp/scratch/", kind: "scope", at: 1_700_000_000_000 }],
+				revoked: [{ category: "write_outside", value: "/etc/things.conf", kind: "entity", at: 1_700_000_000_500 }],
+			}),
+			"utf-8",
+		)
+		const read = readGrantsFile(path)
+		expect(read.ok, read.ok ? "" : read.error).toBe(true)
+		if (!read.ok) return
+		expect(read.file.grants).toHaveLength(1)
+		expect(read.file.revoked ?? []).toHaveLength(1)
+		// Merging into it still works, and adds the new row without touching the old ones.
+		const merged = mergeIntoGrantsFile(path, undefined, [row("./src/b.ts")], { sourceCwd: "/srv/project" })
+		expect(merged.ok, merged.error).toBe(true)
+		expect(merged.added).toBe(1)
+		// Both halves survive: the session-grants half keeps its own row and gains the new one; the ledger half
+		// keeps the row an earlier build wrote, which is the half a rename of the category vocabulary could break.
+		expect(load(path).grants.map((g) => g.value).sort()).toEqual(["./src/b.ts", "/tmp/scratch/"])
+		const ledgerHalf = (load(path).ledger ?? {}) as { grants?: Array<{ value: string; category: string }> }
+		expect((ledgerHalf.grants ?? []).map((g) => `${g.category} ${g.value}`).sort()).toEqual(["write_project ./src/a.ts"])
+	})
+
+	it("a GRANT row that names `any` is refused on the way in, never honoured", () => {
+		// The value means "every action on the target"; only a forbid may claim it. Here it arrives in the
+		// session-grants half of a file, where `asGrantRow` is the door.
+		const path = at("grant-any.json")
+		writeFileSync(
+			path,
+			JSON.stringify({
+				v: 1,
+				exportedAt: "2026-10-30T00:00:00.000Z",
+				sourceCwd: "/srv/project",
+				ledger: { v: 1, grants: [], forbids: [], seen: [] },
+				grants: [
+					{ category: "any", value: "/srv/warehouse/", kind: "scope", at: 1 },
+					{ category: "write_outside", value: "/srv/other/", kind: "scope", at: 1 },
+				],
+				revoked: [],
+			}),
+			"utf-8",
+		)
+		const merged = mergeIntoGrantsFile(path, undefined, [], { sourceCwd: "/srv/project" })
+		expect(merged.ok, merged.error).toBe(true)
+		// Nothing was added from a row this build does not honour, and the file keeps the row it already had
+		// untouched — refusing to USE a value is not a licence to rewrite somebody's file.
+		expect(merged.added).toBe(0)
+		expect(readGrantsFile(path).ok).toBe(true)
+	})
+})
+
+describe("the values a status read and an agent spawn name survive the journal", () => {
+	// Both shapes were thrown away on write by the path-shape screen: `localhost` is not a place, and the
+	// screen only knew the categories whose object is a NAME. A durable "always" that is dropped on the way
+	// into the journal is the complaint in one line — the user answered, the file forgot, and the prompt came
+	// back after a restart or an export.
+	const statusRow = (value: string): SessionGrant => ({ category: "read_system_state", value, kind: "entity", at: 1_000, durable: true })
+
+	it("keeps a machine object and a unit-scoped one, and reads them back whole", () => {
+		const p = at("system-state.json")
+		const r = mergeIntoGrantsFile(p, ledgerOf([]), [statusRow("localhost"), statusRow("localhost/nginx")])
+		expect(r.dropped).toBe(0)
+		expect(r.written).toBe(2)
+		const back = load(p).grants.map((g) => [g.category, g.value, g.durable])
+		expect(back).toEqual([
+			["read_system_state", "localhost", true],
+			["read_system_state", "localhost/nginx", true],
+		])
+	})
+
+	it("the restored rows answer the read they were granted for, and the service-scoped one stays scoped", () => {
+		const p = at("system-state-match.json")
+		mergeIntoGrantsFile(p, ledgerOf([]), [statusRow("localhost"), statusRow("localhost/nginx")])
+		const store = createGrantStore()
+		importSessionGrants(store, load(p).grants)
+		const target = (value: string) => ({ kind: "target" as const, value })
+		expect(grantsCover(store, "read_system_state", [target("localhost")]).covered).toBe(true)
+		expect(grantsCover(store, "read_system_state", [target("localhost/nginx")]).covered).toBe(true)
+		// A service-named grant does not reach the whole machine either.
+		const scoped = createGrantStore()
+		importSessionGrants(scoped, [statusRow("localhost/nginx")])
+		expect(grantsCover(scoped, "read_system_state", [target("localhost")]).covered).toBe(false)
+	})
+
+	it("keeps an agent-name target and the no-object marker", () => {
+		const p = at("agent-name.json")
+		const rows: SessionGrant[] = [
+			{ category: "agent_spawn", value: "pi", kind: "entity", at: 1_000, durable: true },
+			{ category: "privilege", value: NO_OBJECT_TARGET, kind: "entity", at: 1_000, durable: true },
+		]
+		const r = mergeIntoGrantsFile(p, ledgerOf([]), rows)
+		expect(r.dropped).toBe(0)
+		expect(load(p).grants.map((g) => [g.category, g.value])).toEqual([
+			["agent_spawn", "pi"],
+			["privilege", NO_OBJECT_TARGET],
+		])
+	})
+})

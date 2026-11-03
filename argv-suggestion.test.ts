@@ -92,6 +92,10 @@ describe("the offer is the round trip: a rule that is made is a rule that covers
 		"sed -i.bak s/a/b/ f",
 		"tar czf x.tgz src",
 		"FOO=1 git status",
+		// A here-document is data on the leg, so the rule is argv plus the redirect target — the same
+		// one the identical command without a body gets. Only a quoted delimiter reaches the offer
+		// (the walker refuses an unquoted one, whose body bash expands).
+		"cat > notes.md <<'EOF'\n{\"a\": 1}\nEOF",
 	]
 
 	for (const command of OFFERED) {
@@ -142,7 +146,6 @@ describe("withheld, exactly as W3 left it", () => {
 		["echo $HOME/x", "a variable's value is not argv"],
 		['cat "$HOME/x"', "an opaque value cannot be covered by a rule"],
 		["grep x <<<hello", "a here-string is input the rule does not name"],
-		["cat <<'EOF'\n{\"a\": 1}\nEOF", "a here-document body is data on the leg, never argv"],
 		["for f in a b; do rm -f $f; done", "control flow: no argv, no rule"],
 		["LD_PRELOAD=/tmp/e.so git status", "the environment decides what runs, and argv cannot carry it"],
 		["PATH=/usr/bin ls", "same"],
@@ -158,12 +161,14 @@ describe("withheld, exactly as W3 left it", () => {
 		})
 	}
 
-	it("still refuses the three cases whose refusal W3 pinned by wording", () => {
+	it("still refuses the cases whose refusal is pinned by wording", () => {
 		// `bash-allow-layer0.test.ts` pins this phrase for these commands; it stays true because the
 		// refusals that remain are all the same shape: nothing writable would be honoured. (`echo hi >
 		// /tmp/out.txt` used to be one of them: a redirect could not be described, so no rule was offered.
-		// Once a specifier could name a target, it became an offer — see the block below.)
-		for (const command of ["rm -rf /", "cat <<'EOF'\n{\"a\": 1}\nEOF"]) {
+		// A specifier naming a target made it an offer — see the block below. A here-document left this
+		// table for the same reason: the body needs no part in the rule, so the rule for the argv and
+		// the redirect targets is honoured and the offer is honest.)
+		for (const command of ["rm -rf /", "grep x <<<hello"]) {
 			expect(offerFor(command).reason, command).toContain("no rule would cover this command again")
 		}
 	})
@@ -171,26 +176,34 @@ describe("withheld, exactly as W3 left it", () => {
 
 describe("a redirect is offered as an exact rule that names the target", () => {
 	// These three rows sat in the withheld table above, with the argument that "the write IS the
-	// approval, and argv alone would cover writing anywhere". That argument still holds — which is why the
-	// offer is not `Bash(echo hi)` but a rule naming the file, the operator and the descriptor, and why the
-	// target-less spelling of the same rule stops covering the command. Both directions are pinned here;
+	// approval, and argv alone would cover writing anywhere". The offer is not `Bash(echo hi)` but a rule
+	// naming the file, the operator and the descriptor, and that rule is pinned here. What changed is
+	// the OTHER half of the old argument: a target-less rule no longer stops covering the command merely
+	// because a file is involved — it stops covering it when the file is somewhere the session may not
+	// write, which is the assertion the loop used to make for every row.
 	// `redirect-coverage.test.ts` holds the full truth table and the classes this still refuses.
-	const RECOVERED: Array<[string, string, string]> = [
-		["echo hi > /tmp/out.txt", "echo hi > /tmp/out.txt", "Bash(echo hi)"],
-		["echo hi > /dev/null", "echo hi > /dev/null", "Bash(echo:*)"],
-		["cat < /etc/passwd", "cat < /etc/passwd", "Bash(cat:*)"],
+	const RECOVERED: Array<[string, string]> = [
+		["echo hi > /tmp/out.txt", "echo hi > /tmp/out.txt"],
+		["echo hi > /dev/null", "echo hi > /dev/null"],
+		["cat < /etc/passwd", "cat < /etc/passwd"],
 	]
 
-	for (const [command, specifier, targetLessRule] of RECOVERED) {
-		it(`${command}: offered, honoured, and unreachable by ${targetLessRule}`, () => {
+	for (const [command, specifier] of RECOVERED) {
+		it(`${command} is offered as Bash(${specifier}) and honoured`, () => {
 			const set = offerFor(command)
 			expect(set.persistable, set.reason ?? "").toBe(true)
 			expect(permissionRuleValueFromString(set.rules[0]!).ruleContent, command).toBe(specifier)
 			expect(behaviourOf(command, set.rules), command).toBe("allow")
-			// The whole safety argument in one line: the rule that covers this write covers nothing else.
-			expect(behaviourOf(command, [targetLessRule]), command).toBe("passthrough")
 		})
 	}
+
+	it("a target-less rule reaches the file only where a direct write/read of it was allowed anyway", () => {
+		// `/tmp` is the mode's own write area and `/dev/null` holds nothing, so both are covered by the
+		// words alone; `/etc/passwd` is a read outside the project, which asks. That asymmetry IS the rule.
+		expect(behaviourOf("echo hi > /tmp/out.txt", ["Bash(echo hi)"]), "temp target").toBe("allow")
+		expect(behaviourOf("echo hi > /dev/null", ["Bash(echo:*)"]), "inert sink").toBe("allow")
+		expect(behaviourOf("cat < /etc/passwd", ["Bash(cat:*)"]), "outside-project read").toBe("passthrough")
+	})
 
 	it("still refuses a redirect whose target only exists at run time", () => {
 		// Hard constraint: the walker cannot prove the target, so no rule may speak for it.
@@ -202,7 +215,7 @@ describe("a redirect is offered as an exact rule that names the target", () => {
 
 describe("a destructive leg is offered as the exact argv, never as a shorter prefix", () => {
 	// The rule this table guards: where the verdict is set by the targets the command names — the categories
-	// listed in `STRICT_OPERAND_CATEGORIES` (`bash-audit.ts:475-492`) — coverage requires argv equality: no
+	// listed in `STRICT_OPERAND_CATEGORIES` (`bash-audit.ts:537-554`) — coverage requires argv equality: no
 	// extension, options included (the `coverage.strictOperands` branch of `bashRuleCoversArgv` in
 	// `bash-rule-argv.ts`). A suggestion that dropped words would therefore be an offer the matcher refuses
 	// to honour — a rule written into the file and never fired, the dead offer the withheld table above exists

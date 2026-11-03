@@ -14,6 +14,9 @@ import {
 	suggestAllowRuleSetForToolCall,
 	type PermissionVerdict,
 } from "./permissions.ts"
+import { bashRuleView } from "./bash-audit.ts"
+import { evaluateToolCall } from "./risk-policy.ts"
+import { homedir } from "node:os"
 
 /**
  * The bash ALLOW path, end to end, now that it is layer 0's answer rather than a re-split of the text.
@@ -234,11 +237,17 @@ describe("wrappers: the six the decision names, and nothing else", () => {
 		expect(behaviorOf("timeout git status", { allow: ["Bash(git status:*)"] })).toBe("passthrough")
 	})
 
-	it("tightening: xargs is no longer seen through", () => {
+	it("tightening: xargs is read only through a `:*` prefix", () => {
 		// The text matcher let `git status:*` cover `xargs git status …`, whose arguments arrive from a
 		// pipe at run time — one of the reasons dangerous-permissions.ts lists xargs as a broad grant.
-		expect(behaviorOf("xargs git status", { allow: ["Bash(git status:*)"] })).toBe("passthrough")
+		// Moving allow onto argv dropped that reading entirely; it is restored for the `:*` form only,
+		// because such a rule already covers arbitrary trailing words by construction.
+		expect(behaviorOf("xargs git status", { allow: ["Bash(git status:*)"] })).toBe("allow")
+		expect(behaviorOf("xargs -0 git status", { allow: ["Bash(git status:*)"] })).toBe("allow")
+		expect(behaviorOf("xargs -n 2 git status", { allow: ["Bash(git status:*)"] })).toBe("passthrough")
 		expect(behaviorOf("xargs git status", { allow: ["Bash(xargs:*)"] })).toBe("allow")
+		// an exact rule describes one invocation, and xargs adds words to it
+		expect(behaviorOf("xargs git status", { allow: ["Bash(git status)"] })).toBe("passthrough")
 	})
 })
 
@@ -338,25 +347,45 @@ describe("strict operands: for a target-bearing command an exact rule means THIS
 	// passes — options included. The asymmetry is the point: `deny`/`ask` stay textual and broad below, so a
 	// denial keeps firing when the command adds words. Every row here was measured, not reasoned about.
 
-	it("tightening: one extra word — a second target or a flag — is no longer covered", () => {
+	it("tightening: one extra operand — a second target — is no longer covered", () => {
 		// [the call, the exact rule that was written for a shorter invocation of the same command]
+		// The unit of comparison is "every operand", not "every word": a value-free flag
+		// (`--verbose`, `--force`, `-v`) does not cost the approval, because it names no target — the rows
+		// below are the ones where a *second operand* or a fused cluster is what voids coverage.
 		const EXTRA = [
 			["rm -rf /tmp/x extra", "Bash(rm -rf /tmp/x)"],
 			["rm -rf /tmp/x /tmp/z", "Bash(rm -rf /tmp/x)"],
-			["rm -rf /tmp/x --verbose", "Bash(rm -rf /tmp/x)"],
-			["rm -rf node_modules --force", "Bash(rm -rf node_modules)"],
-			["chmod -R 777 /tmp/x --no-preserve-root", "Bash(chmod -R 777 /tmp/x)"],
+			["rm -rf /tmp/x -t /tmp/z", "Bash(rm -rf /tmp/x)"],
+			["rm -rf /tmp/x --output=/tmp/z", "Bash(rm -rf /tmp/x)"],
+			["chmod -R 777 /tmp/x -f /tmp/z", "Bash(chmod -R 777 /tmp/x)"],
 			["mv /tmp/a /tmp/b /dest", "Bash(mv /tmp/a /tmp/b)"],
 			["git reset --hard HEAD~1", "Bash(git reset --hard)"],
 			["cat ~/.ssh/id_rsa ~/.ssh/id_ed25519", "Bash(cat ~/.ssh/id_rsa)"],
 			["chown -R www-data /etc/x /etc/y", "Bash(chown -R www-data /etc/x)"],
-			["rsync -a ./out /srv/exports --delete", "Bash(rsync -a ./out /srv/exports)"],
 			["find . -name x -delete -xdev", "Bash(find . -name x -delete)"],
 			["rm -rf ./build ../outside", "Bash(rm -rf ./build)"],
 		]
 		for (const [call, rule] of EXTRA) {
 			expect(behaviorOf(call, { allow: [rule] }), `${call} ← ${rule}`).toBe("passthrough")
 		}
+	})
+
+	it("loosening: an added flag that names no target keeps the approval", () => {
+		// The complaint this answers: `Bash(rm -rf ./build)` stopped covering `rm -rf ./build -v`, so a user
+		// who added a harmless flag was asked again for a delete they had already approved. The flag carries
+		// no path, so the set of things deleted is unchanged.
+		const COVERED = [
+			["rm -rf /tmp/x --verbose", "Bash(rm -rf /tmp/x)"],
+			["rm -rf /tmp/x -v", "Bash(rm -rf /tmp/x)"],
+			["rm -rf node_modules --force", "Bash(rm -rf node_modules)"],
+			["chmod -R 777 /tmp/x --no-preserve-root", "Bash(chmod -R 777 /tmp/x)"],
+			["rsync -a ./out /srv/exports --delete", "Bash(rsync -a ./out /srv/exports)"],
+		]
+		for (const [call, rule] of COVERED) {
+			expect(behaviorOf(call, { allow: [rule] }), `${call} ← ${rule}`).toBe("allow")
+		}
+		// …and the rule cannot name a flag the call does not pass: it described a different invocation.
+		expect(behaviorOf("rm -rf /tmp/x", { allow: ["Bash(rm -rf /tmp/x -v)"] })).toBe("passthrough")
 	})
 
 	it("an allow-tier target stays prefix-covered, because strictness there would buy no decision", () => {
@@ -400,7 +429,7 @@ describe("strict operands: for a target-bearing command an exact rule means THIS
 		// not `never` — so strictness has to reach the wrapper-stripped spelling too.
 		expect(behaviorOf("sudo rm -rf /tmp/x", { allow: ["Bash(rm -rf /tmp/x)"] })).toBe("allow")
 		expect(behaviorOf("sudo rm -rf /tmp/x /tmp/z", { allow: ["Bash(rm -rf /tmp/x)"] })).toBe("passthrough")
-		expect(behaviorOf("timeout 5 rm -rf /tmp/x --force", { allow: ["Bash(rm -rf /tmp/x)"] })).toBe(
+		expect(behaviorOf("timeout 5 rm -rf /tmp/x -t /tmp/z", { allow: ["Bash(rm -rf /tmp/x)"] })).toBe(
 			"passthrough",
 		)
 		// A rule that spells the wrapper names the wrapped form exactly, and that is honoured.
@@ -414,6 +443,29 @@ describe("strict operands: for a target-bearing command an exact rule means THIS
 		expect(behaviorOf("FOO=1 rm -rf /tmp/x extra", { allow: ["Bash(FOO=1 rm -rf /tmp/x)"] })).toBe(
 			"passthrough",
 		)
+	})
+
+	it("a pager or editor set to a display-only program keeps the rule", () => {
+		// The refusal was by NAME (`bash-audit.ts` EXECUTION_ENV_NAMES), so `PAGER=cat git log -5` matched no
+		// rule and could never be offered one, while `cat`, `less` and `/bin/rm` were treated identically.
+		// The value is now read for this family alone: a bare display program is neutral, everything else
+		// keeps the refusal (a path, a shell, an argument, a second command).
+		for (const prefix of ["PAGER=cat", "GIT_PAGER=less", "MANPAGER=more", "EDITOR=cat", "VISUAL=head", "BROWSER=false"]) {
+			expect(behaviorOf(`${prefix} git log -5`, { allow: ["Bash(git log:*)"] }), prefix).toBe("allow")
+		}
+		// the offer exists again, and it is the rule the user would have written
+		expect(suggestAllowRuleSetForToolCall("bash", { command: "PAGER=cat git log -5" }, cwd).rules).toEqual([
+			"Bash(git log:*)",
+		])
+		// `env` sets the same variable through a wrapper the peel sees, and the value travels with it
+		expect(behaviorOf("env PAGER=cat git log -5", { allow: ["Bash(git log:*)"] })).toBe("allow")
+		for (const prefix of ["PAGER=/bin/rm", "PAGER=rm", "PAGER=sh -c rm", "EDITOR=vim", "PAGER=cat;rm"]) {
+			expect(behaviorOf(`${prefix} git log -5`, { allow: ["Bash(git log:*)"] }), prefix).toBe("passthrough")
+		}
+		// …and the loader / PATH / hook family is unchanged whatever the value says
+		for (const prefix of ["LD_PRELOAD=cat", "PATH=cat", "BASH_ENV=cat", "NODE_OPTIONS=cat"]) {
+			expect(behaviorOf(`${prefix} git log -5`, { allow: ["Bash(git log:*)"] }), prefix).toBe("passthrough")
+		}
 	})
 
 	it("the never floor is still the floor when the rule is a perfect match", () => {
@@ -437,11 +489,18 @@ describe("strict operands: for a target-bearing command an exact rule means THIS
 		// The verdict is per command, not per leg: a verdict row is not labelled with the leg it came from
 		// (`SegmentDecision.command` is display text like "cp to b"), and guessing at that mapping would
 		// fail by leaving a target-bearing leg UNMARKED. Cost: this prompt. It can never cost authority.
+		// The extra word on the innocent leg is an OPERAND here: a value-free flag on it is covered (that
+		// is the whole of the change), a second target is not.
+		expect(
+			behaviorOf("git status ./extra && rm -rf ./build", {
+				allow: ["Bash(git status)", "Bash(rm -rf ./build)"],
+			}),
+		).toBe("passthrough")
 		expect(
 			behaviorOf("git status --short && rm -rf ./build", {
 				allow: ["Bash(git status)", "Bash(rm -rf ./build)"],
 			}),
-		).toBe("passthrough")
+		).toBe("allow")
 		// A `:*` rule on the innocent leg is unaffected, which is why the cost is small in practice.
 		expect(
 			behaviorOf("git status --short && rm -rf ./build", {
@@ -569,7 +628,7 @@ describe("an always-allow offer is only made when it will be honoured", () => {
 	it.each([
 		["rm -rf /", "never floor: coverage refuses it, so a rule would only hide the reason"],
 		["git push --force origin main", "same, for a force push"],
-		["cat <<'EOF'\n{\"a\": 1}\nEOF", "a here-document body is data on the leg, never argv"],
+		["grep x <<<hello", "a here-string is data on the step, so there is no word a rule could name"],
 		["git log $(whoami)", "an unproven command has no argv to authorise"],
 		['cat "$HOME/x"', "an opaque value cannot be covered by a rule"],
 	])("withheld: %s — %s", (command) => {
@@ -591,10 +650,12 @@ describe("an always-allow offer is only made when it will be honoured", () => {
 		expect(behaviorOf("echo hi > /tmp/out.txt", { allow: set.rules })).toBe("allow")
 		// `loosening:` the one class this task recovers, stated as the pin it replaced.
 		expect(behaviorOf("echo hi > /tmp/out.txt", { allow: ["Bash(echo hi > /tmp/out.txt)"] })).toBe("allow")
-		// …and the direction that keeps it a narrowing rather than a widening: every spelling that names no
-		// target stops covering it. `Bash(echo:*)` covered this command BEFORE this task (argv alone matched);
-		// it does not now, which is the same over-grant the suggestion engine already refuses to write.
-		for (const rule of ["Bash(echo hi)", "Bash(echo:*)", "Bash(echo *)", "Bash(echo hi > /tmp/other.txt)", "Bash(echo hi >> /tmp/out.txt)"]) {
+		// …and the direction that keeps a clause a clause: a rule for a DIFFERENT file does not cover this
+		// one, whatever its words. What no longer withholds the command is a rule that names no target at
+		// all: `/tmp/out.txt` is somewhere a direct write is allowed, so `Bash(echo:*)` covers it —
+		// refusing that only cost a prompt on every `pi -p x > log.txt`.
+		expect(behaviorOf("echo hi > /tmp/out.txt", { allow: ["Bash(echo:*)"] })).toBe("allow")
+		for (const rule of ["Bash(echo hi > /tmp/other.txt)", "Bash(echo hi >> /tmp/out.txt)"]) {
 			expect(behaviorOf("echo hi > /tmp/out.txt", { allow: [rule] }), rule).toBe("passthrough")
 		}
 		// The floor still outranks a rule that names the target exactly.
@@ -603,7 +664,26 @@ describe("an always-allow offer is only made when it will be honoured", () => {
 		)
 	})
 
-	it.each(["rm -rf /", "cat <<'EOF'\n{\"a\": 1}\nEOF"])(
+	it("offers a here-document the same rule it offers without the body", () => {
+		// The refusal used to be "the body is data on the step and never part of a rule", which is true
+		// and was never the question: the body needs no part in the rule, because the rule is argv plus the
+		// redirect targets — the same one `cat > notes.md` gets. Coverage never consults heredocs, which is
+		// why the round trip honours it. Only a QUOTED delimiter reaches here; the walker refuses an
+		// unquoted body, which bash expands.
+		const heredoc = "cat > notes.md <<'EOF'\n{\"a\": 1}\nEOF"
+		const set = offered(heredoc)
+		const plain = offered("cat > notes.md")
+		expect(set.persistable, set.reason ?? "").toBe(true)
+		expect(set.rules).toEqual(plain.rules)
+		expect(set.rules).toEqual(["Bash(cat > notes.md)"])
+		expect(behaviorOf(heredoc, { allow: set.rules })).toBe("allow")
+		// still one invocation: a different file is a different approval
+		expect(behaviorOf(heredoc, { allow: ["Bash(cat > other.md)"] })).toBe("passthrough")
+		// …and the here-string keeps its refusal, because there is no file or word for a rule to name
+		expect(offered("cat <<< 'hi' > notes.md").persistable).toBe(false)
+	})
+
+	it.each(["rm -rf /", "grep x <<<hello"])(
 		"the refusal for %s says the round trip is what failed", (command) => {
 			// These reach the new check (the suggestion engine's own bails fire earlier on a
 			// substitution or control flow), and the user is told WHY the offer disappeared.
@@ -627,6 +707,69 @@ describe("an always-allow offer is only made when it will be honoured", () => {
 		}
 		// A vacuous pass would be the failure mode of every property test like this one.
 		expect(checked).toBeGreaterThan(10)
+	})
+
+	it("the loosening, stated as an invariant over every command a word rule covers", () => {
+		// One sentence: a rule naming no target covers a redirecting leg only when every file the leg
+		// redirects to is somewhere a direct write/read of it would have gone through. Here that is checked
+		// independently of the matcher — the rule is `Bash(<verb>:*)`, the targets come from `bashRuleView`,
+		// and each target is asked the direct-call question with no session state at all, so only the
+		// default write area and the rules channel can answer.
+		//
+		// The population is the curated corpus PLUS the redirecting commands at issue here, because the
+		// curated corpus is a safety corpus: it has exactly one redirecting row (authorized_keys, floored),
+		// and a property test over a population of zero redirects passes silently. Measured when written:
+		// 68 commands, 59 of them covered, 4 of those redirecting, 9 refusals.
+		const corpus = [readFileSync(join(import.meta.dirname, "testcases", "cases-v2.jsonl"), "utf8"),
+			readFileSync(join(import.meta.dirname, "testcases", "cases-ledger.jsonl"), "utf8")].join("\n")
+			.split("\n")
+			.map((line) => (line.trim() ? JSON.parse(line)?.input?.command : undefined))
+			.filter((c): c is string => typeof c === "string" && c.trim().length > 0)
+		const redirecting = [
+			"pi -p x > log.txt 2>&1",
+			"make > build.log 2>&1",
+			"npm test > /tmp/out.txt",
+			"grep foo src/a.ts 2>/dev/null",
+			"echo key >> ~/.ssh/authorized_keys",
+			"echo hi > ~/.bashrc",
+			"cat < ~/.ssh/id_rsa",
+			'echo x > "$TARGET"',
+			"cd folder && nohup pi -p x > log.txt 2>&1 &",
+		]
+		let covered = 0
+		let redirected = 0
+		let refusals = 0
+		for (const command of [...corpus, ...redirecting]) {
+			const view = bashRuleView(command, cwd)
+			if (!view.proven || view.floored) {
+				refusals++
+				continue
+			}
+			const verb = view.legs[0]?.argv[0]
+			if (!verb) continue
+			if (behaviorOf(command, { allow: [`Bash(${verb}:*)`] }) !== "allow") {
+				refusals++
+				continue
+			}
+			covered++
+			if (view.legs.some((l) => l.targets.length > 0)) redirected++
+			for (const leg of view.legs) {
+				for (const target of leg.targets) {
+					// A secret, `~/.ssh`, `/etc` or an outside-cwd write must never come back allowed here: with
+					// no grants and no ledger in play, the mode's own write area (tier `allow`) is the only thing
+					// that can clear a target.
+					const tier = evaluateToolCall(
+						target.op === "<" || target.op === "<&" ? "read" : "write",
+						{ path: target.target },
+						{ cwd, project: cwd, home: homedir(), env: process.env },
+					).tier
+					expect(tier, `${command} → ${target.target}`).toBe("allow")
+				}
+			}
+		}
+		// Both halves have to be non-empty or this measures nothing.
+		expect(redirected, "covered commands that redirect").toBeGreaterThan(3)
+		expect(refusals, "commands a word rule still may not cover").toBeGreaterThan(3)
 	})
 })
 
@@ -660,6 +803,11 @@ describe("the duplicate stays deleted", () => {
 		// its own opinion about either.
 		expect(source).not.toContain("hitsNeverFloor")
 		expect(source).not.toContain("evaluateBash")
-		expect(source).not.toContain("risk-policy")
+		// `evaluateToolCall` is not that second opinion and is named here so the next reader does not have to
+		// guess: it is the question the WRITE TOOL asks about one path (`gate.ts` runGate → the same call),
+		// asked again for a redirect target so the two agree by construction instead of by a copied table.
+		// A command-severity verdict from this file is still exactly what the ban is about.
+		expect(source).not.toContain("evaluateBashLegacy")
+		expect(source).not.toContain("bashTierView")
 	})
 })
