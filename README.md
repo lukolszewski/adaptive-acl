@@ -484,6 +484,8 @@ lifts it.
 | `timeoutMs` | `15000` | Per call. A timeout is "no verdict", never a refusal. |
 | `contextTokens` | `4096` | The classifier model's window. Every call is sized to fit it; the transcript is trimmed oldest-first, whole messages only, never mid-sentence. |
 | `includeAgentsMd` | `true` | Put `AGENTS.md` / `CLAUDE.md` in the classifier context. |
+| `maxOutputTokens` | unset | The answer limit (`max_tokens` / `max_output_tokens`) for every classifier call, on every endpoint. Unset, each call uses its built-in reserve (300 for the grant call, 400 for extraction, 512 per legacy stage), which a reasoning model can spend on thinking before any answer exists. A floor: a call that needs more keeps its own number. At most 32768 and smaller than `contextTokens`. On Copilot `copilot.maxOutputTokens` still applies. |
+| `extraRequestFields` | `{}` | An object merged into every classifier request body after the extension builds it, on every endpoint and both engines. Objects merge key by key; `null` removes a field, so `{"temperature": null}` drops the extension's `temperature: 0`. The model, the prompt, the output schema, `stream` and the answer limit cannot be set here. See [Turning thinking off](#turning-thinking-off). |
 | `ledger` / `ledgerBackfillLimit` | `true` / `400` | Turn the ledger off, or cap how many of the newest messages of a resumed session are ever extracted. |
 | `copilot` | see below | Transport knobs for GitHub Copilot. |
 
@@ -501,6 +503,60 @@ within the capability of a 4B-parameter model served locally.
   }
 }
 ```
+
+### Turning thinking off
+
+A classifier call needs a short, structured answer; a model that reasons first spends the answer
+limit on thinking and returns nothing. The extension sends no thinking-off field of its own, because
+which field works depends on the server. Put it in `extraRequestFields`. "Tested" means measured
+against that server; "documented" means the server's own documentation; "unverified" is known usage
+not yet measured here, so check it against your server before relying on it.
+
+| Provider / API | `extraRequestFields` | Reliability |
+|---|---|---|
+| LiteLLM gateway, Claude Haiku 5.5 backend | nothing (`reasoning_effort: "none"` turned thinking *on*) | tested |
+| LiteLLM gateway, GPT-6 Luna backend | `{"reasoning_effort": "none"}` | tested |
+| LiteLLM gateway, Gemini 3.8 Flash backend | `{"reasoning_effort": "none"}` | tested |
+| OpenAI chat completions, GPT-5.1 and newer | `{"reasoning_effort": "none"}` | unverified |
+| OpenAI chat completions, GPT-5 (has no `none`) | `{"reasoning_effort": "minimal"}` | unverified |
+| OpenAI Responses API | `{"reasoning": {"effort": "none"}}` | unverified |
+| Anthropic Messages API | nothing: thinking runs only when a request asks for it | unverified |
+| Gemini, OpenAI-compatible endpoint | `{"reasoning_effort": "none"}` | unverified |
+| vLLM / SGLang, Qwen3 | `{"chat_template_kwargs": {"enable_thinking": false}}` | documented (vLLM) |
+| vLLM / SGLang, DeepSeek-V3.1, Granite (off by default) | `{"chat_template_kwargs": {"thinking": false}}` | documented (vLLM) |
+| llama.cpp server, Qwen-style templates | `{"chat_template_kwargs": {"enable_thinking": false}}` | unverified |
+| NVIDIA hosted (integrate.api.nvidia.com), MiniMax-M3 | `{"chat_template_kwargs": {"thinking_mode": "disabled"}}` | documented (NVIDIA) |
+| OpenRouter | `{"reasoning": {"effort": "none"}}` or `{"reasoning": {"enabled": false}}` | unverified |
+| Ollama, OpenAI-compatible endpoint | `{"reasoning_effort": "none"}` | unverified, varies by version |
+
+Other uses of the field:
+
+| Purpose | `extraRequestFields` | Note |
+|---|---|---|
+| Repeatable answers | `{"seed": 42}` | |
+| Providers that reject `temperature` | `{"temperature": null}` | `null` removes the field |
+| Sampling for local models | `{"top_k": 20, "min_p": 0}` | vLLM / llama.cpp |
+| Tag classifier spend on a LiteLLM gateway | `{"metadata": {"app": "adaptive-acl"}}` | |
+
+Example, a vLLM server running Qwen3 with a larger answer limit:
+
+```json
+{
+  "classifier": {
+    "baseUrl": "http://127.0.0.1:8000/v1",
+    "modelId": "qwen3-8b",
+    "contextTokens": 32768,
+    "maxOutputTokens": 1024,
+    "extraRequestFields": { "chat_template_kwargs": { "enable_thinking": false } }
+  }
+}
+```
+
+An invalid value in either key is reported by `/classifier-status` and once at session start, and
+the value is ignored. To see what a call sent and got back, start pi with
+`ADAPTIVE_ACL_CLASSIFIER_DEBUG=1`: each classifier request logs its URL, answer limit and extra field
+names, and each reply its `finish_reason`, token usage (reasoning tokens included when the server
+reports them) and the first 300 characters of the reply.
 
 ### GitHub Copilot as the classifier
 

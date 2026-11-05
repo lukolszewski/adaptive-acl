@@ -37,6 +37,7 @@ import {
 } from "./classifier-transcript.ts"
 import { toClassifierInput } from "./classifier-tool-projection.ts"
 import { callBudget } from "./context-budget.ts"
+import { mergeRequestFields } from "./request-fields.ts"
 
 export type ClassifierVerdict = {
 	allow: boolean
@@ -271,8 +272,25 @@ const STAGE_ANSWER_TOKENS: Record<ClassifierStage, number> = {
 	thinking: 512,
 }
 
-export function classifierAnswerReserveTokens(stage?: ClassifierStage): number {
-	return (stage && STAGE_ANSWER_TOKENS[stage]) || 512
+/** `classifier.maxOutputTokens`, as a number this module can do arithmetic with. A missing, negative or
+ *  absurd value contributes nothing: the per-stage number then stands, exactly as before the setting.
+ *  Config loading is what refuses an out-of-range value; here it is only ever a floor. */
+function answerFloor(maxOutputTokens: number | undefined): number {
+	if (typeof maxOutputTokens !== "number" || !Number.isFinite(maxOutputTokens)) return 0
+	return Math.max(0, Math.floor(maxOutputTokens))
+}
+
+/**
+ * The answer limit for one stage: its own number, raised to `classifier.maxOutputTokens` when the user
+ * configured a larger one. A floor and never a cap — a stage that needs 1 024 tokens for a forced tool
+ * call cannot be handed 120, because too small is not a shorter answer but no answer at all.
+ */
+export function classifierAnswerReserveTokens(
+	stage?: ClassifierStage,
+	maxOutputTokens?: number,
+): number {
+	const own = (stage && STAGE_ANSWER_TOKENS[stage]) || 512
+	return Math.max(own, answerFloor(maxOutputTokens))
 }
 
 /** The `<transcript>` wrapper and the stage-1 "block immediately" suffix the XML stages bolt on.
@@ -287,6 +305,9 @@ export function buildClassifierUserPrompt(opts: {
 	/** The model's context window. When set, the transcript is sized to fit what the window has
 	 *  left after this prompt's fixed part and the answer reserve; unset keeps the old 40/12 000 cap. */
 	contextTokens?: number
+	/** `classifier.maxOutputTokens`: the answer limit floor, so the budget below reserves the same room
+	 *  the call will actually ask for. */
+	maxOutputTokens?: number
 	/** The system prompt sent alongside this one — part of the same window. */
 	systemPrompt?: string
 }): string {
@@ -300,7 +321,7 @@ export function buildClassifierUserPrompt(opts: {
 		budgetTokens = callBudget(
 			opts.contextTokens,
 			fixedChars,
-			classifierAnswerReserveTokens(opts.stage),
+			classifierAnswerReserveTokens(opts.stage, opts.maxOutputTokens),
 		)
 	}
 	const transcript = buildTranscriptForClassifier(
@@ -561,23 +582,28 @@ function extractClassifierResponseText(
 // (measured: 1.06 s with thinking off, 5.2 s and a truncated answer without it). So each text stage
 // has to arrive with thinking already switched off — for its own call only.
 //
-// The knob is in two different places depending on the transport. Anthropic takes it per request
-// (`thinkingEnabled`). OpenAI-compatible transports do not: pi-ai derives `chat_template_kwargs`
-// from the *model object* (`model.reasoning` + `model.compat.thinkingFormat`), and that object comes
-// from `ctx.modelRegistry` and is shared by the whole session. Writing the knob onto it would switch
-// off the user's reasoning everywhere — the old bug with its polarity reversed, and silent in the
-// same way. So the client builds a stage-scoped view and hands the registry's object back untouched.
-
-/** The chat-template knob the one endpoint we could actually measure answers to. */
-const QWEN_CHAT_TEMPLATE = "qwen-chat-template"
+// Where that knob lives depends on the transport, and the two are not interchangeable. Anthropic takes
+// it per request (`thinkingEnabled`), which is a real option of this call and belongs here. An
+// OpenAI-compatible server has no such option: pi-ai derives `chat_template_kwargs` from the *model
+// object* (`model.reasoning` + `model.compat.thinkingFormat`), and that object comes from
+// `ctx.modelRegistry` and is shared by the whole session. This client used to hand every text stage a
+// copy carrying `thinkingFormat: "qwen-chat-template"` and `reasoning: true`; writing the knob onto the
+// registry's object would switch off the user's reasoning everywhere, so it built a copy instead.
+//
+// The copy is gone, and it is not missed: which of those fields a given server understands is a fact
+// about that server, not about the classifier's job, and guessing wrong means either an HTTP 400 or a
+// request that quietly says nothing at all. That guess is now the user's, made once in config —
+// `classifier.extraRequestFields` merges whatever the server wants into the payload through `onPayload`
+// (see `request-fields.ts`), on every stage and every transport. The default is nothing extra.
+//
+// What is left here is the one knob this transport actually has: the Anthropic per-request option.
 
 /**
  * How this transport is told "answer without thinking".
  * - `option`: a per-request field the adapter reads.
- * - `chat-template`: pi-ai derives the request field from the model object, so the stage view has to
- *   declare the template knob (`classifierStageModel`).
- * - `unknown`: no knob we can reach. Nothing is invented for such a model — the stage's answer, or
- *   the absence of one, is what has to speak (`ClassifierStageFailure`).
+ * - `unknown`: no knob this client may set. Nothing is invented for such a model: a server that needs a
+ *   field the classifier does not know about is what `classifier.extraRequestFields` is for, and otherwise
+ *   the stage's answer — or the absence of one — is what has to speak (`ClassifierStageFailure`).
  *
  * Note what `unknown` covers: transports like openai-responses / azure / bedrock that only think when
  * asked to (`reasoningEffort`, which this client never sends) are already off by default, so "no knob"
@@ -585,65 +611,25 @@ const QWEN_CHAT_TEMPLATE = "qwen-chat-template"
  */
 export type ClassifierThinkingOff =
 	| { via: "option"; options: Record<string, unknown> }
-	| { via: "chat-template" }
 	| { via: "unknown" }
 
 export function classifierThinkingOff(
 	model: Model<Api>,
 ): ClassifierThinkingOff {
+	// A real option of this call, read by pi-ai's anthropic adapter per request — unlike the OpenAI-shaped
+	// transports, nothing about it is derived from the shared model object.
 	if (model.api === "anthropic-messages") {
 		return { via: "option", options: { thinkingEnabled: false } }
-	}
-	// Measured, not imagined, on the endpoint we can reach: for a chatty alias pi does NOT
-	// declare as reasoning, this field is accepted without an HTTP 400 and the model answers in 758 ms with
-	// a parseable verdict — instead of 5.1 s of reasoning that hits the token cap with no text at all. The
-	// old `model.reasoning` gate existed to dodge a 400 that does not occur on any endpoint we can test, and
-	// keeping it cost five worker runs spent reasoning about someone else's server instead of asking it.
-	// Both ways this can go wrong stay fail-closed: a server that rejects the field errors, which the caller
-	// already treats as unavailable, and a server that accepts-and-ignores answers with prose, which the
-	// stage now reports by name. Neither shape can turn into an allow.
-	if (model.api === "openai-completions") {
-		return { via: "chat-template" }
 	}
 	return { via: "unknown" }
 }
 
-/**
- * The model object one stage should be run with. Returns the registry's own object whenever there is
- * nothing to declare, and a copy otherwise — never a mutated input.
- */
-export function classifierStageModel(
-	model: Model<Api>,
-	stage: ClassifierStage,
-): Model<Api> {
-	// The tool stage answers with a forced `classify_result` call and works today, on every transport;
-	// it is left exactly as it was found, including its own `thinkingEnabled` option below.
-	if (stage === "tool") return model
-	if (classifierThinkingOff(model).via !== "chat-template") return model
-	// `compat` is per-api, so the union only carries `thinkingFormat` on the OpenAI-shaped members; this
-	// branch has already established the api, so read the one field instead of restating the union.
-	const compat = model.compat as { thinkingFormat?: string } | undefined
-	// A declared format means pi already knows how to turn this server off (`enable_thinking: false`,
-	// `thinking: {type:"disabled"}`, … depending on the format). Overwriting it would be a guess.
-	if (compat?.thinkingFormat) return model
-	// What this cannot see: pi also *detects* a format from the baseUrl (openrouter, deepseek, zai,
-	// together, else "openai"), and that detection is private. So a hosted OpenAI-compatible server whose
-	// detected format was something else gets the qwen knob anyway. Accepted deliberately: re-implementing
-	// pi's host table here would drift the moment pi adds a host, and the bound is fail-closed — a server
-	// that ignores the field answers with prose and the stage now reports that by name, and a server that
-	// rejects the field answers with an HTTP error, which the caller already treats as unavailable. Neither
-	// shape can become an allow.
-	return {
-		...model,
-		// pi-ai writes the knob only under `compat.thinkingFormat === "qwen-chat-template" && model.reasoning`
-		// (its openai-completions.js:642), and with `enable_thinking: !!options.reasoningEffort` — so with no
-		// effort passed, the request that reaches the server says `enable_thinking: false`. Setting the format
-		// without `reasoning` therefore sends nothing at all, which is exactly how the earlier version of this
-		// function looked applied while doing nothing. `reasoning` here describes what the server does, not what
-		// pi's catalogue believes, and it applies to this copy for classifier text stages only.
-		reasoning: true,
-		compat: { ...compat, thinkingFormat: QWEN_CHAT_TEMPLATE },
-	} as Model<Api>
+/** `classifier.extraRequestFields` as the body merge wants it: a plain object, or nothing to merge. */
+function extraFieldsOf(
+	extraRequestFields: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+	if (!extraRequestFields) return undefined
+	return Object.keys(extraRequestFields).length > 0 ? extraRequestFields : undefined
 }
 
 function buildClassifierCompletionOptions(
@@ -656,6 +642,7 @@ function buildClassifierCompletionOptions(
 		signal: AbortSignal
 		maxTokens: number
 	},
+	extraRequestFields?: Record<string, unknown>,
 ): Record<string, unknown> {
 	const options: Record<string, unknown> = {
 		...base,
@@ -666,6 +653,14 @@ function buildClassifierCompletionOptions(
 	// transport other than anthropic the text stages ran a reasoning model with thinking on.
 	const thinkingOff = classifierThinkingOff(model)
 	if (thinkingOff.via === "option") Object.assign(options, thinkingOff.options)
+
+	// The user's own fields, merged into whatever the adapter built, last. `onPayload` is installed only
+	// when there is something to merge: the default request stays byte-for-byte what pi-ai produced.
+	const extra = extraFieldsOf(extraRequestFields)
+	if (extra) {
+		options.onPayload = (payload: unknown) =>
+			mergeRequestFields((payload ?? {}) as Record<string, unknown>, extra)
+	}
 
 	if (stage !== "tool") return options
 
@@ -704,7 +699,14 @@ async function runClassifierCompletion(
 	timeoutMs: number,
 	abortMeta: { timedOut: boolean; parentSignal?: AbortSignal },
 	stage: ClassifierStage,
-	opts?: { maxTokens?: number; userSuffix?: string },
+	opts?: {
+		maxTokens?: number
+		userSuffix?: string
+		/** `classifier.maxOutputTokens`: raises the stage's own answer limit, never lowers it. */
+		maxOutputTokens?: number
+		/** `classifier.extraRequestFields`, merged into the provider payload last. */
+		extraRequestFields?: Record<string, unknown>
+	},
 ): Promise<AssistantMessage> {
 	const context: Context = {
 		systemPrompt,
@@ -726,15 +728,22 @@ async function runClassifierCompletion(
 	}
 
 	const response = await completeSimple(
-		classifierStageModel(model, stage),
+		model,
 		context,
-		buildClassifierCompletionOptions(model, stage, {
-			apiKey: auth.apiKey,
-			headers: auth.headers,
-			env: auth.env,
-			signal,
-			maxTokens: opts?.maxTokens ?? classifierAnswerReserveTokens(stage),
-		}) as Parameters<typeof completeSimple>[2],
+		buildClassifierCompletionOptions(
+			model,
+			stage,
+			{
+				apiKey: auth.apiKey,
+				headers: auth.headers,
+				env: auth.env,
+				signal,
+				maxTokens:
+					opts?.maxTokens ??
+					classifierAnswerReserveTokens(stage, opts?.maxOutputTokens),
+			},
+			opts?.extraRequestFields,
+		) as Parameters<typeof completeSimple>[2],
 	)
 
 	if (response.stopReason === "aborted") {
@@ -970,8 +979,16 @@ async function classifyWithStagePipeline(opts: {
 	abortMeta: { timedOut: boolean; parentSignal?: AbortSignal }
 	stage: ClassifierStage
 	debug?: boolean
+	/** `classifier.maxOutputTokens`: raises every stage's answer limit that is smaller. */
+	maxOutputTokens?: number
+	/** `classifier.extraRequestFields`, merged into the payload of every call in this pipeline. */
+	extraRequestFields?: Record<string, unknown>
 }): Promise<ClassifierVerdict> {
 	const { stage } = opts
+	const answerOpts = {
+		maxOutputTokens: opts.maxOutputTokens,
+		extraRequestFields: opts.extraRequestFields,
+	}
 
 	if (stage === "tool") {
 		const message = await runClassifierCompletion(
@@ -983,6 +1000,7 @@ async function classifyWithStagePipeline(opts: {
 			opts.timeoutMs,
 			opts.abortMeta,
 			"tool",
+			answerOpts,
 		)
 		const verdict = extractToolClassifierVerdict(message)
 		if (!verdict) {
@@ -994,7 +1012,7 @@ async function classifyWithStagePipeline(opts: {
 			}
 			throw stageFailure(
 				"tool",
-				classifierAnswerReserveTokens("tool"),
+				classifierAnswerReserveTokens("tool", opts.maxOutputTokens),
 				message,
 				{ call: "tool-call", carriedVerdict: toolCallArrived(message) },
 			)
@@ -1012,6 +1030,7 @@ async function classifyWithStagePipeline(opts: {
 			opts.timeoutMs,
 			opts.abortMeta,
 			"single",
+			answerOpts,
 		)
 		const text = extractClassifierResponseText(message.content)
 		const verdict = parseClassifierResponse(text, "single")
@@ -1019,7 +1038,7 @@ async function classifyWithStagePipeline(opts: {
 			if (opts.debug) debugStageReply("single-stage raw text", text)
 			throw stageFailure(
 				"single",
-				classifierAnswerReserveTokens("single"),
+				classifierAnswerReserveTokens("single", opts.maxOutputTokens),
 				message,
 				{ call: "text" },
 			)
@@ -1031,9 +1050,12 @@ async function classifyWithStagePipeline(opts: {
 	const wrappedUserPrompt = `<transcript>\n${opts.userPrompt}\n</transcript>\n`
 
 	const runXmlStage = async (
-		maxTokens: number,
+		asked: number,
 		suffix: string,
 	): Promise<ClassifierVerdict> => {
+		// The stage's own number is a floor too: `classifier.maxOutputTokens` was configured because the
+		// server spends answer room on thinking, so every call gets it, not only the largest one.
+		const maxTokens = Math.max(asked, answerFloor(opts.maxOutputTokens))
 		const message = await runClassifierCompletion(
 			opts.model,
 			opts.auth,
@@ -1043,7 +1065,7 @@ async function classifyWithStagePipeline(opts: {
 			opts.timeoutMs,
 			opts.abortMeta,
 			stage,
-			{ maxTokens, userSuffix: suffix },
+			{ maxTokens, userSuffix: suffix, ...answerOpts },
 		)
 		const text = extractClassifierResponseText(message.content)
 		const verdict = parseClassifierResponse(text, stage)
@@ -1120,6 +1142,10 @@ export async function classifyToolCall(opts: {
 	/** The classifier model's context window (from `classifier.contextTokens`). When set, the
 	 *  transcript is sized to fit it; unset keeps the historical 40-entry / 12 000-char cap. */
 	contextTokens?: number
+	/** `classifier.maxOutputTokens`: the answer limit for every call this pipeline makes, as a floor. */
+	maxOutputTokens?: number
+	/** `classifier.extraRequestFields`: merged into every request body this client sends. */
+	extraRequestFields?: Record<string, unknown>
 	debug?: boolean
 }): Promise<ClassifierVerdict> {
 	const encoded = toClassifierInput(
@@ -1175,6 +1201,7 @@ export async function classifyToolCall(opts: {
 			jsonlTranscript: opts.jsonlTranscript,
 			stage,
 			contextTokens: opts.contextTokens,
+			maxOutputTokens: opts.maxOutputTokens,
 			systemPrompt,
 		})
 
@@ -1186,6 +1213,13 @@ export async function classifyToolCall(opts: {
 					tool: opts.pendingTool.name,
 					stage,
 					thinkingOff: classifierThinkingOff(model).via,
+					maxTokens: classifierAnswerReserveTokens(
+						stage,
+						opts.maxOutputTokens,
+					),
+					extraFields: Object.keys(
+						extraFieldsOf(opts.extraRequestFields) ?? {},
+					),
 					systemChars: systemPrompt.length,
 					userChars: userPrompt.length,
 				}),
@@ -1202,6 +1236,8 @@ export async function classifyToolCall(opts: {
 			abortMeta,
 			stage,
 			debug: opts.debug,
+			maxOutputTokens: opts.maxOutputTokens,
+			extraRequestFields: opts.extraRequestFields,
 		})
 
 		if (opts.debug) {

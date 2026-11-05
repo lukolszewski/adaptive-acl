@@ -25,6 +25,7 @@ import { dirname, join } from "node:path"
 
 import type { AutoModeRules } from "./classifier-prompt.ts"
 import { DEFAULT_CONTEXT_TOKENS } from "./context-budget.ts"
+import { extraRequestFieldsProblem } from "./request-fields.ts"
 
 export type ClassifierStage = "tool" | "single" | "fast" | "both" | "thinking"
 
@@ -165,7 +166,40 @@ export interface ClassifierConfig {
 	 *  `classifier.baseUrl` still outranks the whole block: an explicit endpoint means "plain OpenAI-compatible,
 	 *  bypass the registry", Copilot config included. */
 	copilot?: CopilotClassifierConfig
+	/** Answer limit (`max_tokens` / `max_output_tokens`) for every classifier call on every endpoint. A floor: a
+	 *  call that already asks for more keeps its own number. Unset = each call's built-in reserve. At most
+	 *  {@link MAX_CLASSIFIER_OUTPUT_TOKENS}. `copilot.maxOutputTokens` still wins on a Copilot endpoint. */
+	maxOutputTokens?: number
+	/** Fields merged into every classifier request body after the client builds it (all dialects, all endpoints).
+	 *  Objects merge key by key; a `null` value removes the key instead of sending null. Keys in
+	 *  {@link REFUSED_EXTRA_REQUEST_FIELDS} are a config error. Default `{}`: nothing extra is sent. */
+	extraRequestFields?: Record<string, unknown>
+	/** Every value in this block that {@link resolveClassifierConfig} refused, one line each, in key order —
+	 *  filled by that resolver and empty in the common case. A refused value is DROPPED (the field stays
+	 *  `undefined`, i.e. today's behaviour) but never silently: the reader needs both halves, which is why this
+	 *  is a list on the resolved object rather than a `console.warn` in a hand-edited-file path nobody watches.
+	 *  `/classifier-status` is where it belongs (it already holds the resolved config); a caller that forwards
+	 *  the config elsewhere can ignore the field. */
+	problems?: readonly string[]
 }
+
+/** Ceiling for `classifier.maxOutputTokens`, the same as Copilot's. */
+export const MAX_CLASSIFIER_OUTPUT_TOKENS = 32_768
+
+/** Top-level body keys `classifier.extraRequestFields` may not set or remove: the model, the prompt, the
+ *  output schema the verdict depends on, streaming, and the answer limit (which has its own setting). */
+export const REFUSED_EXTRA_REQUEST_FIELDS: readonly string[] = [
+	"model",
+	"messages",
+	"input",
+	"system",
+	"response_format",
+	"text",
+	"output_config",
+	"stream",
+	"max_tokens",
+	"max_output_tokens",
+] as const
 
 /**
  * Where a standing "Allow always" answer is written down.
@@ -536,6 +570,7 @@ const DEFAULT_CLASSIFIER: ClassifierConfig = {
 	includeAgentsMd: true,
 	engine: "gate",
 	contextTokens: DEFAULT_CONTEXT_TOKENS,
+	problems: [],
 }
 
 /** A hand-edited config is not type-checked: anything that is not a usable positive
@@ -583,10 +618,61 @@ export function resolveCopilotConfig(
 	}
 }
 
+/** `classifier.maxOutputTokens` — the answer-limit floor, or `undefined` (each call keeps its own reserve).
+ *
+ *  Three ways a hand-typed value is unusable, and all three are REFUSED rather than clamped or floored: a value
+ *  that is not a positive whole number (`300.5` would silently become 300 — a number the user did not type), one
+ *  past {@link MAX_CLASSIFIER_OUTPUT_TOKENS}, and one that leaves no room for the prompt inside the configured
+ *  window — `max_tokens` equal to the whole context asks a server for an answer with no question in front of it. */
+function resolveMaxOutputTokens(
+	raw: unknown,
+	contextTokens: number,
+	problems: string[],
+): number | undefined {
+	if (raw === undefined) return undefined
+	if (typeof raw !== "number" || !Number.isInteger(raw) || raw <= 0) {
+		problems.push(
+			`classifier.maxOutputTokens=${showValue(raw)} is not a positive whole number of tokens — ignored, every call keeps its built-in reserve`,
+		)
+		return undefined
+	}
+	if (raw > MAX_CLASSIFIER_OUTPUT_TOKENS) {
+		problems.push(
+			`classifier.maxOutputTokens=${raw} is above the ceiling of ${MAX_CLASSIFIER_OUTPUT_TOKENS} — ignored, every call keeps its built-in reserve`,
+		)
+		return undefined
+	}
+	if (raw >= contextTokens) {
+		problems.push(
+			`classifier.maxOutputTokens=${raw} leaves no prompt room inside classifier.contextTokens=${contextTokens} — ignored, every call keeps its built-in reserve`,
+		)
+		return undefined
+	}
+	return raw
+}
+
+/** `classifier.extraRequestFields`, or `undefined` (nothing extra is sent). The check is the one the merge path
+ *  runs as well (`extraRequestFieldsProblem`), so a value that arrives here is one `mergeRequestFields` will not
+ *  have to strip: a refused key is a config line the user asked for and did not get, and that is a report. */
+function resolveExtraRequestFields(
+	raw: unknown,
+	problems: string[],
+): Record<string, unknown> | undefined {
+	if (raw === undefined) return undefined
+	const problem = extraRequestFieldsProblem(raw)
+	if (problem) {
+		problems.push(`${problem} — ignored, no extra request fields are sent`)
+		return undefined
+	}
+	return raw as Record<string, unknown>
+}
+
 export function resolveClassifierConfig(
 	config: PermissionModesConfig,
 ): ClassifierConfig {
 	const c = config.classifier ?? {}
+	const contextTokens = positiveInt(c.contextTokens, DEFAULT_CLASSIFIER.contextTokens!)
+	const problems: string[] = []
 	return {
 		enabled: c.enabled ?? DEFAULT_CLASSIFIER.enabled,
 		model: c.model ?? DEFAULT_CLASSIFIER.model,
@@ -600,8 +686,11 @@ export function resolveClassifierConfig(
 		includeAgentsMd: c.includeAgentsMd ?? DEFAULT_CLASSIFIER.includeAgentsMd,
 		ledger: c.ledger ?? true,
 		ledgerBackfillLimit: c.ledgerBackfillLimit ?? 400,
-		contextTokens: positiveInt(c.contextTokens, DEFAULT_CLASSIFIER.contextTokens!),
+		contextTokens,
+		maxOutputTokens: resolveMaxOutputTokens(c.maxOutputTokens, contextTokens, problems),
+		extraRequestFields: resolveExtraRequestFields(c.extraRequestFields, problems),
 		copilot: resolveCopilotConfig(c.copilot),
+		problems: Object.freeze(problems),
 	}
 }
 

@@ -192,6 +192,26 @@ export async function syncLedger(opts: {
 	return { processed, pending, changed }
 }
 
+/** The two answer-shaping settings that apply to EVERY endpoint kind: `classifier.maxOutputTokens` (a floor every
+ *  call on this endpoint starts from) and `classifier.extraRequestFields` (merged into the body by the client).
+ *
+ *  One helper, spread on all three resolution paths, because forgetting one of them is silent: the gate would keep
+ *  sending the built-in reserve to that endpoint and nothing would say so. Copilot is not an exception — it keeps
+ *  its own reserve on `ep.copilot` (`classifier.copilot.maxOutputTokens`, which wins there) and carries the general
+ *  one alongside it, so a reader of the endpoint sees both numbers the config named.
+ *
+ *  Absent when unset, never `undefined` keys on the object: a config that does not use these settings must produce
+ *  the byte-identical endpoint it produced before they existed.
+ */
+function answerSettings(
+	config: Pick<ClassifierConfig, "maxOutputTokens" | "extraRequestFields">,
+): Pick<ModelEndpoint, "maxOutputTokens" | "extraRequestFields"> {
+	const out: Pick<ModelEndpoint, "maxOutputTokens" | "extraRequestFields"> = {}
+	if (config.maxOutputTokens !== undefined) out.maxOutputTokens = config.maxOutputTokens
+	if (config.extraRequestFields !== undefined) out.extraRequestFields = config.extraRequestFields
+	return out
+}
+
 /**
  * Resolve the HTTP endpoint for the gate's model calls.
  * Priority: explicit classifier.baseUrl override → pi model registry entry.
@@ -238,6 +258,7 @@ async function classifyEndpointResolution(
 				model: config.modelId ?? config.model.split("/").pop() ?? config.model,
 				timeoutMs: config.timeoutMs,
 				contextTokens: config.contextTokens,
+				...answerSettings(config),
 			},
 		}
 	}
@@ -263,6 +284,7 @@ async function classifyEndpointResolution(
 				headers: auth.headers,
 				timeoutMs: config.timeoutMs,
 				contextTokens: config.contextTokens,
+				...answerSettings(config),
 			},
 		}
 	} catch {
@@ -381,6 +403,7 @@ async function resolveCopilotEndpoint(
 		headers: auth.headers,
 		timeoutMs: config.timeoutMs,
 		contextTokens: config.contextTokens,
+		...answerSettings(config),
 	}
 	const configuredModel = config.model
 

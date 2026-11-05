@@ -20,6 +20,7 @@
 import { homedir } from "node:os"
 import { classifyPath, type PathContext } from "./risk-paths.ts"
 import { chunkMessage, EXTRACTION_CHUNK_CHARS } from "./message-chunks.ts"
+import { mergeRequestFields } from "./request-fields.ts"
 import { expandHome, type GrantExtraction } from "./grant-verify.ts"
 import { FORBID_ANY_CATEGORY, GRANT_CATEGORY_VALUES, isGrantCategory, MAX_REVOCATION_CATEGORIES, REVOCATION_CATEGORY_VALUES } from "./auth-ledger.ts"
 import {
@@ -66,8 +67,6 @@ export type ModelEndpoint = {
 	model: string
 	apiKey?: string
 	headers?: Record<string, string>
-	/** Ask the server to disable thinking via chat_template_kwargs (Qwen-style). */
-	disableThinking?: boolean
 	timeoutMs?: number
 	/** The server's context window in tokens (default 4096, see `context-budget.ts`). Every call
 	 *  is sized to fit inside it: the fixed part of the prompt plus its answer reserve. */
@@ -76,6 +75,14 @@ export type ModelEndpoint = {
 	api?: ModelApi
 	/** Set only for a GitHub Copilot endpoint; see {@link CopilotTransport}. */
 	copilot?: CopilotTransport
+	/** `classifier.maxOutputTokens`: answer-limit floor for every call on this endpoint. */
+	maxOutputTokens?: number
+	/** `classifier.extraRequestFields`: merged into the body last; `null` removes a key. Already validated. */
+	extraRequestFields?: Record<string, unknown>
+	/** Per-call diagnostic sink (`ADAPTIVE_ACL_CLASSIFIER_DEBUG`, wired in index.ts). Two lines per
+	 *  request: the URL, dialect, answer limit and extra-field NAMES before it leaves, then the status,
+	 *  stop reason, usage and the head of the reply. Never the values — a gateway field can hold a key. */
+	debug?: (line: string) => void
 }
 
 export type EffectClassification = {
@@ -273,18 +280,21 @@ export function anthropicCompatibleSchema(schema: unknown): unknown {
 }
 
 /**
- * The answer reserve for one call.
+ * The answer limit for one call — the one function every request and every budget goes through.
  *
- * On a Copilot endpoint the configured reserve WINS, because the per-task numbers below (200–400) were chosen
- * for a non-reasoning server and a reasoning model spends them on thinking: measured, a one-line classification
- * burned 192 of 269 output tokens on reasoning at `effort: low`, and at 120 the answer came back empty with
- * `incomplete_details.reason: "max_output_tokens"`. Never smaller than what the task asked for — the reserve is
- * an allowance, so raising it for a caller is safe and lowering it is not.
+ * Three numbers, and the largest wins. `requested` is what the task itself needs (200–400 today).
+ * `classifier.maxOutputTokens` is the user's floor for the endpoint, because those per-task numbers were
+ * chosen for a non-reasoning server and a reasoning model spends them on thinking: measured, a one-line
+ * classification burned 192 of 269 output tokens on reasoning at `effort: low`, and at 120 the answer came
+ * back empty with `incomplete_details.reason: "max_output_tokens"`. On Copilot the older per-Copilot setting
+ * still applies on top of that, keeping its own default of 512 so nothing there changes. Never smaller than
+ * what the task asked for — the reserve is an allowance, so raising it for a caller is safe and lowering it
+ * is not.
  */
 export function answerReserveTokens(ep: ModelEndpoint, requested: number): number {
-	if (!ep.copilot) return requested
-	const configured = ep.copilot.maxOutputTokens ?? DEFAULT_COPILOT_ANSWER_RESERVE
-	return Math.max(requested, configured)
+	const copilot = ep.copilot ? ep.copilot.maxOutputTokens ?? DEFAULT_COPILOT_ANSWER_RESERVE : 0
+	const configured = ep.maxOutputTokens ?? 0
+	return Math.max(requested, copilot, configured)
 }
 
 /** `{baseUrl}{path}` with no doubled slash, whatever spelling the config used. */
@@ -370,12 +380,10 @@ export function buildChatCompletionsBody(
 			json_schema: { name: schemaName, strict: true, schema },
 		},
 	}
-	// A llama.cpp/vLLM chat-template knob. Sending it to Copilot is an unknown field on an endpoint that
-	// validates its parameters strictly, and it means nothing there — thinking is sized by the reserve instead.
-	if (!copilot && ep.disableThinking !== false) {
-		body.chat_template_kwargs = { enable_thinking: false }
-	}
-	return body
+	// No chat-template knob: which field turns thinking off depends on the server (vLLM's `chat_template_kwargs`,
+	// OpenAI's `reasoning_effort`, a gateway's own spelling), so it is `classifier.extraRequestFields`, merged in
+	// last, and a server that has never heard of the field never sees one.
+	return mergeRequestFields(body, ep.extraRequestFields)
 }
 
 /** `/responses` — with `json_schema` on this dialect too (`text.format`), which is the reason this client does
@@ -409,7 +417,7 @@ export function buildResponsesBody(
 			body.reasoning = { effort }
 		}
 	}
-	return body
+	return mergeRequestFields(body, ep.extraRequestFields)
 }
 
 /** `/v1/messages` — Anthropic's dialect, with structured output via `output_config.format`.
@@ -426,7 +434,7 @@ export function buildAnthropicMessagesBody(
 	schema: Record<string, unknown>,
 	maxTokens: number,
 ): Record<string, unknown> {
-	return {
+	const body: Record<string, unknown> = {
 		model: ep.model,
 		max_tokens: maxTokens,
 		stream: false,
@@ -434,6 +442,7 @@ export function buildAnthropicMessagesBody(
 		messages: [{ role: "user", content: userPrompt }],
 		output_config: { format: { type: "json_schema", schema: anthropicCompatibleSchema(schema) } },
 	}
+	return mergeRequestFields(body, ep.extraRequestFields)
 }
 
 /** The one place the dialect is dispatched. */
@@ -544,6 +553,38 @@ export function readCompletionText(api: ModelApi, json: unknown): CompletionText
 	return api === "responses" ? readResponsesCompletion(json) : readChatCompletion(json)
 }
 
+/** The line logged before a request leaves: where it goes, in which dialect, how many answer tokens it asks
+ *  for, and the NAMES of the extra fields it carries. Never the values — `classifier.extraRequestFields` is
+ *  where a gateway key or an account tag would live, and a debug log is a file that outlives the session. */
+function describeRequest(ep: ModelEndpoint, url: string, api: ModelApi, reserve: number): string {
+	const extra = Object.keys(ep.extraRequestFields ?? {})
+	return `[classifier] → ${url} ${api} max_tokens=${reserve} extra=${extra.length ? extra.join(",") : "none"}`
+}
+
+/** The line logged after the reply: the status, why the answer stopped, what it cost (reasoning tokens
+ *  included — they are the reason a small reserve returns nothing), and the head of the reply itself. */
+function describeReply(api: ModelApi, status: number, payload: string): string {
+	let json: unknown
+	let parsed = true
+	try {
+		json = JSON.parse(payload)
+	} catch {
+		parsed = false
+	}
+	if (!parsed) return `[classifier] ← HTTP ${status} reason=unreadable reply=${payload.slice(0, 300)}`
+	const completion = readCompletionText(api, json)
+	const usage = readCopilotUsage(json)
+	const parts = [`HTTP ${status}`, `reason=${completion.reason ?? "none"}`]
+	if (usage) {
+		parts.push(
+			`tokens=${usage.inputTokens}+${usage.outputTokens}` +
+				(usage.reasoningTokens ? ` reasoning=${usage.reasoningTokens}` : ""),
+		)
+	}
+	parts.push(`reply=${(completion.text || payload).slice(0, 300)}`)
+	return `[classifier] ← ${parts.join(" ")}`
+}
+
 /** A non-2xx body plus, when we recognise the shape, the reason — because four of Copilot's failures are
  *  configuration facts a reader can act on, and `HTTP 404: ` alone sends them to the wrong lever. */
 function describeHttpFailure(ep: ModelEndpoint, status: number, body: string): string {
@@ -616,12 +657,15 @@ export async function chatJson<T>(
 	const api = modelApi(ep)
 	const reserve = answerReserveTokens(ep, maxTokens)
 	const { path, body } = buildModelRequest(ep, systemPrompt, userPrompt, schemaName, schema, maxTokens)
+	const url = endpointUrl(ep, path)
+	const debug = ep.debug ?? (() => {})
 	const controller = new AbortController()
 	const timeout = setTimeout(() => controller.abort(), ep.timeoutMs ?? 10_000)
 	const onParentAbort = () => controller.abort()
 	signal?.addEventListener("abort", onParentAbort, { once: true })
 	try {
-		const res = await fetch(endpointUrl(ep, path), {
+		debug(describeRequest(ep, url, api, reserve))
+		const res = await fetch(url, {
 			method: "POST",
 			headers: modelRequestHeaders(ep),
 			body: JSON.stringify(body),
@@ -629,6 +673,7 @@ export async function chatJson<T>(
 		})
 		const ms = Date.now() - t0
 		const payload = await readResponseBody(res)
+		debug(describeReply(api, res.status, payload))
 		if (!res.ok) {
 			return { ok: false, error: describeHttpFailure(ep, res.status, payload), ms }
 		}
@@ -810,8 +855,9 @@ export function absolutize(value: string, home: string): string {
  * Room the authorisation answer needs — this call's `max_tokens`, and therefore the part of the window the
  * transcript must never spend. Named because the gate budgets against it.
  *
- * On a Copilot endpoint this is a FLOOR, not the number sent: `answerReserveTokens` raises it to the configured
- * answer reserve, because a reasoning model spends a number this small on thinking and returns no text at all.
+ * A FLOOR, not the number sent: `answerReserveTokens` raises it to `classifier.maxOutputTokens` (and, on
+ * Copilot, to the configured Copilot reserve), because a reasoning model spends a number this small on
+ * thinking and returns no text at all. Every budget must subtract the effective reserve, never this constant.
  */
 export const GRANT_CALL_RESERVE_TOKENS = 300
 
@@ -1201,13 +1247,14 @@ Examples (every sentence here is invented; none of them is a test case):
  */
 const FIXED_CHARS_PER_TOKEN = 4.17
 const PIECE_CHARS_PER_TOKEN = 4.55
-/** This call's `max_tokens`, and so the part of the window the piece must never spend. Also measured rather
- *  than round: over 47 real session messages the answer is median 49, p95 233, max 316 `completion_tokens`,
- *  and a synthetic 4 000-character piece full of instructions reaches the cap.
+/** This call's `max_tokens` — a floor, raised by `answerReserveTokens` to the endpoint's configured reserve.
+ *  Also measured rather than round: over 47 real session messages the answer is median 49, p95 233, max 316
+ *  `completion_tokens`, and a synthetic 4 000-character piece full of instructions reaches the cap.
  *  A cut-off answer is not a verdict (`chatJson` reports it as a transport failure), so the reserve has to be
  *  bigger than the largest answer this call is allowed to produce, and 400 is the smallest number the
- *  measurements support. */
-const EXTRACTION_ANSWER_RESERVE_TOKENS = 400
+ *  measurements support. `extractionChunkChars` subtracts the EFFECTIVE reserve, so raising
+ *  `classifier.maxOutputTokens` narrows the piece instead of overflowing the window. */
+export const EXTRACTION_ANSWER_RESERVE_TOKENS = 400
 /** `User message:\n…\n\nExtract granted and withdrawn permissions.` around the piece. */
 const EXTRACTION_WRAPPER_CHARS = 60
 /** Below this a piece cannot carry a quoted sentence, which is the only thing a row can be verified against.
@@ -1225,7 +1272,8 @@ function contextWindow(ep: ModelEndpoint): number {
 
 export function extractionChunkChars(ep: ModelEndpoint): number {
 	const fixedTokens = Math.ceil((MESSAGE_GRANT_SYSTEM_PROMPT.length + EXTRACTION_WRAPPER_CHARS) / FIXED_CHARS_PER_TOKEN)
-	const room = Math.floor((contextWindow(ep) - fixedTokens - EXTRACTION_ANSWER_RESERVE_TOKENS) * PIECE_CHARS_PER_TOKEN)
+	const reserve = answerReserveTokens(ep, EXTRACTION_ANSWER_RESERVE_TOKENS)
+	const room = Math.floor((contextWindow(ep) - fixedTokens - reserve) * PIECE_CHARS_PER_TOKEN)
 	return Math.max(EXTRACTION_CHUNK_FLOOR_CHARS, Math.min(EXTRACTION_CHUNK_CHARS, room))
 }
 
@@ -1240,7 +1288,7 @@ async function extractOnePiece(
 		`User message:\n${piece}\n\nExtract granted and withdrawn permissions.`,
 		"message_permissions",
 		MESSAGE_GRANT_SCHEMA,
-		400,
+		EXTRACTION_ANSWER_RESERVE_TOKENS,
 		signal,
 	)
 	if (res.ok) {

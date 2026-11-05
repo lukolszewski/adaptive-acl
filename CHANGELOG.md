@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+- **`classifier.maxOutputTokens`** — an answer-limit floor for every classifier call on every endpoint. It was configurable on Copilot only; elsewhere 300 / 400 / 512 were fixed in code, which a reasoning model can spend on thinking and answer nothing. At most 32 768 and below `contextTokens`; window budgets subtract the effective limit. On Copilot the grant window now also subtracts the reserve it actually sends.
+- **`classifier.extraRequestFields`** — an object merged into every request body (all dialects, both engines; the legacy engine through pi-ai `onPayload`). `null` removes a field; the model, prompt, schema, `stream` and the limit cannot be set. Default `{}`.
+- **Breaking:** the client no longer adds `chat_template_kwargs: {enable_thinking: false}` to every non-Copilot request, and the legacy engine no longer forces pi's `qwen-chat-template` format. A vLLM / llama.cpp Qwen server that relied on it needs `"extraRequestFields": {"chat_template_kwargs": {"enable_thinking": false}}`. The README lists the fields for other servers.
+- An invalid value in either key is reported by `/classifier-status` and once at session start, never silently ignored. `/classifier-status` also shows the effective limit and the extra field names.
+- `ADAPTIVE_ACL_CLASSIFIER_DEBUG=1` now logs every gate request and reply: URL, dialect, limit, extra field names, finish reason, usage including reasoning tokens, and the first 300 characters of the reply.
+
 ### Added
 - **Claude models through Copilot as the classifier** — a third request dialect, `anthropic-messages` (`POST /v1/messages`, `anthropic-version: 2023-06-01`, structured output via `output_config.format`). Explicit `github-copilot/claude-*` models resolve, and an Auto pick in this dialect is used instead of discarded. JSON Schema keywords Anthropic refuses (`maxItems`, `maxLength`, …) are stripped for this dialect only (`anthropicCompatibleSchema`); `stop_reason: max_tokens` is a truncation and `refusal` is never read as a verdict. Cached input tokens count toward `budgetTokens`.
 - **`/grants explain <command>`** — ask why the gate decided what it decided: layer 0 runs on the command with the same policy the session runs under, then every session grant and ledger row gets its own covered / not-covered line and the reason, printed by the gate's own predicates rather than a second implementation (`explainGrantsCover` in `session-grants.ts`, `explainLedgerCover` in `auth-ledger.ts`; registered with the other `/grants` subcommands in `index.ts`).

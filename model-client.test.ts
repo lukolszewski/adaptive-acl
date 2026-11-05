@@ -143,7 +143,7 @@ afterEach(() => {
 })
 
 describe("the OpenAI-compatible path is byte-identical", () => {
-	it("sends exactly the body it has always sent, in the same field order", async () => {
+	it("sends exactly the body it builds, in the same field order — with no chat-template knob", async () => {
 		stubFetch(() => ({ status: 200, body: chatJsonResponse('{"effect":"read_only"}') }))
 		const r = await chatJson(PLAIN, "SYS", "USR", "effect", SCHEMA, 200)
 		expect(r.ok).toBe(true)
@@ -155,7 +155,6 @@ describe("the OpenAI-compatible path is byte-identical", () => {
 			"stream",
 			"messages",
 			"response_format",
-			"chat_template_kwargs",
 		])
 		expect(lastBody()).toEqual({
 			model: "gate-model",
@@ -167,7 +166,6 @@ describe("the OpenAI-compatible path is byte-identical", () => {
 				{ role: "user", content: "USR" },
 			],
 			response_format: { type: "json_schema", json_schema: { name: "effect", strict: true, schema: SCHEMA } },
-			chat_template_kwargs: { enable_thinking: false },
 		})
 		expect(lastHeaders()).toEqual({
 			"Content-Type": "application/json",
@@ -187,10 +185,17 @@ describe("the OpenAI-compatible path is byte-identical", () => {
 		expect(lastHeaders()["X-GitHub-Api-Version"]).toBeUndefined()
 	})
 
-	it("keeps the honour of `disableThinking: false`", () => {
-		const body = buildChatCompletionsBody({ ...PLAIN, disableThinking: false }, "S", "U", "n", SCHEMA, 10)
-		expect(body.chat_template_kwargs).toBeUndefined()
-		expect(body.temperature).toBe(0)
+	it("invents no chat-template knob on any dialect unless the user's config asks for one", () => {
+		// The old client sent `chat_template_kwargs: {enable_thinking: false}` to every non-Copilot endpoint.
+		// Which field turns thinking off is a property of the server, not of this client, so the default is
+		// nothing — an endpoint that has never heard of the field must never be sent one.
+		for (const api of ["chat-completions", "responses", "anthropic-messages"] as const) {
+			const ep: ModelEndpoint = { ...PLAIN, api }
+			const body = buildModelRequest(ep, "S", "U", "n", SCHEMA, 10).body
+			expect(body.chat_template_kwargs).toBeUndefined()
+			expect(JSON.stringify(body)).not.toContain("chat_template")
+			expect(JSON.stringify(body)).not.toContain("enable_thinking")
+		}
 	})
 
 	it("keeps reporting a plain endpoint's failure with no Copilot commentary", async () => {
@@ -198,6 +203,132 @@ describe("the OpenAI-compatible path is byte-identical", () => {
 		const r = await chatJson(PLAIN, "S", "U", "n", SCHEMA, 10)
 		expect(r.ok).toBe(false)
 		if (!r.ok) expect(r.error).toBe("HTTP 404: ")
+	})
+})
+
+describe("classifier.extraRequestFields — the user's own fields, merged last", () => {
+	const ANTH: ModelEndpoint = { ...PLAIN, api: "anthropic-messages" }
+
+	it("merges into every dialect", () => {
+		const extra = { seed: 4242, metadata: { app: "adaptive-acl" } }
+		expect(buildChatCompletionsBody({ ...PLAIN, extraRequestFields: extra }, "S", "U", "n", SCHEMA, 200).seed).toBe(4242)
+		expect(
+			buildResponsesBody({ ...PLAIN, api: "responses", extraRequestFields: extra }, "S", "U", "n", SCHEMA, 200).metadata,
+		).toEqual({ app: "adaptive-acl" })
+		expect(buildAnthropicMessagesBody({ ...ANTH, extraRequestFields: extra }, "S", "U", SCHEMA, 200).seed).toBe(4242)
+	})
+
+	it("merges into a Copilot endpoint too, where the client already sends less", async () => {
+		stubFetch(() => ({ status: 200, body: responsesJson('{"effect":"read_only"}') }))
+		await chatJson({ ...AUTO, extraRequestFields: { reasoning: { effort: "none" } } }, "S", "U", "n", SCHEMA, 200)
+		// replaces the client's own value for the same key, on the dialect that had one
+		expect(lastBody().reasoning).toEqual({ effort: "none" })
+	})
+
+	it("`null` removes a field the client would otherwise send", () => {
+		// `temperature: 0` is sent to every non-Copilot endpoint and some providers refuse the field; `null`
+		// is how a config drops it rather than setting it to something else.
+		const body = buildChatCompletionsBody({ ...PLAIN, extraRequestFields: { temperature: null } }, "S", "U", "n", SCHEMA, 200)
+		expect("temperature" in body).toBe(false)
+		expect(body.temperature).toBeUndefined()
+	})
+
+	it("reaches the wire: chatJson sends the merged body, not the bare one", async () => {
+		stubFetch(() => ({ status: 200, body: chatJsonResponse('{"effect":"read_only"}') }))
+		await chatJson(
+			{ ...PLAIN, extraRequestFields: { chat_template_kwargs: { enable_thinking: false } } },
+			"S",
+			"U",
+			"n",
+			SCHEMA,
+			200,
+		)
+		expect(lastBody().chat_template_kwargs).toEqual({ enable_thinking: false })
+	})
+
+	it("cannot replace what the verdict depends on", () => {
+		const body = buildChatCompletionsBody(
+			{ ...PLAIN, extraRequestFields: { model: "other", max_tokens: 1, response_format: {} } },
+			"S",
+			"U",
+			"n",
+			SCHEMA,
+			200,
+		)
+		expect(body.model).toBe("gate-model")
+		expect(body.max_tokens).toBe(200)
+		expect(body.response_format).toEqual({ type: "json_schema", json_schema: { name: "n", strict: true, schema: SCHEMA } })
+	})
+})
+
+describe("the per-call debug log", () => {
+	it("logs one line before and one after, and never a field value", async () => {
+		const lines: string[] = []
+		stubFetch(() => ({ status: 200, body: chatJsonResponse('{"effect":"read_only"}') }))
+		const r = await chatJson(
+			{
+				...PLAIN,
+				extraRequestFields: { seed: 424242, metadata: { tag: "account-xyz" } },
+				debug: (line) => lines.push(line),
+			},
+			"SYS",
+			"USR",
+			"effect",
+			SCHEMA,
+			200,
+		)
+		expect(r.ok).toBe(true)
+		expect(lines).toHaveLength(2)
+		expect(lines[0]).toContain("http://127.0.0.1:9/v1/chat/completions")
+		expect(lines[0]).toContain("chat-completions")
+		expect(lines[0]).toContain("max_tokens=200")
+		// the NAMES of the extra fields, so a reader can see what was sent...
+		expect(lines[0]).toContain("seed")
+		expect(lines[0]).toContain("metadata")
+		// ...and never their values: a gateway field can hold a key, and a log outlives the session
+		expect(lines.join("\n")).not.toContain("424242")
+		expect(lines.join("\n")).not.toContain("account-xyz")
+		expect(lines[1]).toContain("HTTP 200")
+		expect(lines[1]).toContain("reason=stop")
+		expect(lines[1]).toContain('reply={"effect":"read_only"}')
+	})
+
+	it("carries the reasoning burn that a small reserve dies of", async () => {
+		const lines: string[] = []
+		stubFetch(() => ({ status: 200, body: responsesJson('{"effect":"read_only"}') }))
+		await chatJson({ ...AUTO, debug: (line) => lines.push(line) }, "S", "U", "n", SCHEMA, 200)
+		expect(lines[0]).toContain(`${COPILOT_BASE}/responses`)
+		expect(lines[0]).toContain("max_tokens=512")
+		expect(lines[1]).toContain("reason=completed")
+		expect(lines[1]).toContain("reasoning=192")
+	})
+
+	it("still logs the reply when the answer is an HTTP failure nobody can parse", async () => {
+		const lines: string[] = []
+		stubFetch(() => ({ status: 500, body: "upstream exploded" }))
+		const r = await chatJson({ ...PLAIN, debug: (line) => lines.push(line) }, "S", "U", "n", SCHEMA, 10)
+		expect(r.ok).toBe(false)
+		expect(lines).toHaveLength(2)
+		expect(lines[1]).toContain("HTTP 500")
+		expect(lines[1]).toContain("upstream exploded")
+	})
+
+	it("costs nothing when no sink is set, and a preflight failure logs no request that never happened", async () => {
+		stubFetch(() => ({ status: 200, body: chatJsonResponse("{}") }))
+		await expect(chatJson(PLAIN, "S", "U", "n", SCHEMA, 10)).resolves.toMatchObject({ ok: true })
+
+		const lines: string[] = []
+		const r = await chatJson(
+			{ ...AUTO, copilot: { ...AUTO.copilot!, sessionToken: undefined }, debug: (line) => lines.push(line) },
+			"S",
+			"U",
+			"n",
+			SCHEMA,
+			200,
+		)
+		expect(r.ok).toBe(false)
+		expect(lines).toEqual([])
+		expect(sent).toHaveLength(1) // only the PLAIN call above reached the transport
 	})
 })
 
@@ -249,6 +380,20 @@ describe("the Auto request (case B)", () => {
 		// No Copilot block = the number the task asked for, exactly as before.
 		expect(answerReserveTokens(PLAIN, 300)).toBe(300)
 		expect(DEFAULT_COPILOT_ANSWER_RESERVE).toBe(512)
+	})
+
+	it("honours `classifier.maxOutputTokens` on a plain endpoint too", () => {
+		// The same floor every endpoint gets, not just Copilot: a reasoning model behind a plain
+		// OpenAI-compatible URL spends a 300-token answer on thinking and returns nothing at all.
+		expect(answerReserveTokens({ ...PLAIN, maxOutputTokens: 4096 }, 300)).toBe(4096)
+		// Still a floor: a call that needs more keeps its own larger number.
+		expect(answerReserveTokens({ ...PLAIN, maxOutputTokens: 100 }, 400)).toBe(400)
+		// And the number that actually goes on the wire is the effective one, not the task's.
+		const body = buildModelRequest({ ...PLAIN, maxOutputTokens: 1500 }, "S", "U", "n", SCHEMA, 300).body
+		expect(body.max_tokens).toBe(1500)
+		// On Copilot both settings are floors and the endpoint's own is still the higher one when it is set.
+		expect(answerReserveTokens({ ...AUTO, maxOutputTokens: 2048 }, 400)).toBe(2048)
+		expect(answerReserveTokens({ ...AUTO, maxOutputTokens: 2048, copilot: { ...AUTO.copilot!, maxOutputTokens: 4096 } }, 200)).toBe(4096)
 	})
 
 	it("asks for the reasoning effort only for a model the catalog says reasons", async () => {
@@ -1032,6 +1177,30 @@ describe("every category is defined, and every call is told", () => {
 		expect(mid).toBeLessThan(w)
 		expect(extractionChunkChars({ baseUrl: "http://x/v1", model: "m", contextTokens: 3400 })).toBe(EXTRACTION_CHUNK_FLOOR_CHARS)
 		expect(extractionChunkChars({ baseUrl: "http://x/v1", model: "m", contextTokens: 3000 })).toBe(EXTRACTION_CHUNK_FLOOR_CHARS)
+	})
+
+	it("subtracts the reserve actually sent, so raising maxOutputTokens narrows the piece", () => {
+		// Budgeting against the constant 400 while the request asks for 1 200 put the piece into space the
+		// answer was about to occupy: the server refuses the whole call and the message goes unread.
+		const base = { baseUrl: "http://x/v1", model: "m", contextTokens: 3700 }
+		const plain = extractionChunkChars(base)
+		expect(extractionChunkChars({ ...base, maxOutputTokens: 1200 })).toBeLessThan(plain)
+		// Copilot's own reserve is subtracted the same way, and a floor wider than the window still bottoms
+		// out at the floor rather than going negative.
+		expect(extractionChunkChars({ ...base, copilot: { auto: false, maxOutputTokens: 1200 } })).toBeLessThan(plain)
+		expect(extractionChunkChars({ ...base, maxOutputTokens: 20_000 })).toBe(EXTRACTION_CHUNK_FLOOR_CHARS)
+	})
+
+	it("asks the server for the effective reserve, not the constant", async () => {
+		const reserves: number[] = []
+		const answer = JSON.stringify({ grants: [], revocations: [] })
+		vi.stubGlobal("fetch", async (_url: string, init: Record<string, unknown>) => {
+			reserves.push((JSON.parse(String(init.body)) as { max_tokens: number }).max_tokens)
+			return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: answer } }] }) } as Response
+		})
+		const res = await extractMessageGrants({ baseUrl: "http://x/v1", model: "m", maxOutputTokens: 1500 }, "you may clear ./tmp")
+		expect(res.ok).toBe(true)
+		expect(reserves).toEqual([1500])
 	})
 
 	it("a piece the server refuses is split in half and re-read, rather than lost", async () => {

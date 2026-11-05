@@ -708,6 +708,36 @@ describe("the ledger is the summary of the turns that no longer fit (item 3)", (
 		expect(r.grantedBy).toBe("ledger")
 	})
 
+	it("the grant window subtracts the reserve actually sent, so raising maxOutputTokens takes room from the transcript", async () => {
+		// Budgeting against the constant 300 while the request asked for 1 200 would hand the messages space
+		// the answer is about to occupy, and the server would refuse the whole call.
+		const count = (prompt: string) => LONG_HISTORY.filter((m) => prompt.includes(m)).length
+
+		const base = stubGrantCall(YES_FROM_ROW)
+		await runGate("write", PENDING_WRITE, {
+			policy: POLICY,
+			endpoint: { ...EP, contextTokens: DEFAULT_CONTEXT_TOKENS },
+			userMessages: LONG_HISTORY,
+		})
+		const baseSent = JSON.parse(base.bodies[0]!) as { max_tokens: number }
+		expect(baseSent.max_tokens).toBe(GRANT_CALL_RESERVE_TOKENS)
+		const baseFitted = count(base.prompts[0]!)
+		expect(baseFitted).toBeGreaterThan(0)
+
+		vi.unstubAllGlobals()
+		const raised = stubGrantCall(YES_FROM_ROW)
+		await runGate("write", PENDING_WRITE, {
+			policy: POLICY,
+			endpoint: { ...EP, contextTokens: DEFAULT_CONTEXT_TOKENS, maxOutputTokens: 1200 },
+			userMessages: LONG_HISTORY,
+		})
+		const raisedSent = JSON.parse(raised.bodies[0]!) as { max_tokens: number }
+		// the number on the wire is the effective reserve...
+		expect(raisedSent.max_tokens).toBe(1200)
+		// ...and the window was budgeted against it, not against 300
+		expect(count(raised.prompts[0]!)).toBeLessThan(baseFitted)
+	})
+
 	it("with no row for that grant, the same answer cannot be verified", async () => {
 		const { fn } = stubGrantCall(YES_FROM_ROW)
 		const r = await runGate("write", PENDING_WRITE, {

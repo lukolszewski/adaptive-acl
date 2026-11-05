@@ -615,7 +615,8 @@ not read from there). Three cases are supported; which one is live is decided by
 **Keys that exist** (nothing else may be invented; defaults in parentheses): `enabled` (true), `model`
 (`"anthropic/claude-haiku-4-5"`, `"<provider>/<id>"`), `engine` (`"gate"` | `"legacy"`), `timeoutMs` (15000),
 `contextTokens` (4096), `failClosed` (true), `stage`, `includeAgentsMd`, `ledger`, `ledgerBackfillLimit`,
-`jsonlTranscript`, `baseUrl`, `modelId`, and the Copilot-only block `copilot` (below).
+`jsonlTranscript`, `baseUrl`, `modelId`, `maxOutputTokens`, `extraRequestFields` (both below), and the
+Copilot-only block `copilot` (below).
 
 | case | config | behaviour |
 |---|---|---|
@@ -633,6 +634,30 @@ propagated; read **only** on a `github-copilot/…` endpoint, so case A is untou
 | `reasoningEffort` | `"low"` | Sent as `reasoning.effort`, and only for a model the catalog marks as reasoning. Anything outside `low|medium|high` is refused at resolve time rather than forwarded to an endpoint that answers `400 Unsupported parameter`. |
 | `budgetTokens` | 0 (= no cap) | Tokens this process may spend on Copilot before it stops asking — a free-plan allowance is shared with the user's own chat. A spent budget is a transport failure, never a refusal, and the denial text names it. |
 | `sessionEnabled` | true | `false` turns the Auto session off: `github-copilot/auto` then resolves to **no endpoint at all** and the gate asks a person — how you leave every Copilot request for the user's own chat. |
+
+**Answer limit and extra request fields.** Two keys apply to every endpoint, cases A–C alike, and
+to both engines:
+
+- `classifier.maxOutputTokens` — a **floor** on every call's answer reserve (`max_tokens` / `max_output_tokens`):
+  the effective reserve is `max(call's own reserve, maxOutputTokens)`, and on Copilot `copilot.maxOutputTokens`
+  still applies as before (`answerReserveTokens` in `model-client.ts`; `classifierAnswerReserveTokens` in
+  `classifier-client.ts`). The built-in reserves are 300 (grant call), 400 (extraction), 512 (legacy stages).
+  Every window budget subtracts the effective reserve, never the constant, so a raised limit narrows the prompt
+  instead of overflowing the window. Valid values are whole numbers from 1 to 32 768 that are smaller than
+  `contextTokens`.
+- `classifier.extraRequestFields` — an object merged into the request body **after** the client builds it, on all
+  three dialects (`request-fields.ts` `mergeRequestFields`; the legacy engine applies it through pi-ai's
+  `onPayload`). Objects merge key by key; `null` removes a key. The top-level keys `model`, `messages`, `input`,
+  `system`, `response_format`, `text`, `output_config`, `stream`, `max_tokens` and `max_output_tokens` are refused:
+  the output schema is what makes a parse failure impossible, and the limit has its own key. Default `{}`.
+
+The client sends **no** thinking-off field of its own. It used to add `chat_template_kwargs: {enable_thinking:
+false}` to every non-Copilot request; which field a server understands (`reasoning_effort`, `reasoning.effort`,
+`chat_template_kwargs`, nothing) is a fact about that server, so it is configuration. An invalid value in either
+key is dropped and reported (`ClassifierConfig.problems`, shown by `/classifier-status` and once at session start),
+never clamped or silently replaced. With `ADAPTIVE_ACL_CLASSIFIER_DEBUG=1` each gate request logs its URL,
+dialect, effective limit and extra field **names** (never values), and each reply its status, finish reason,
+token usage (reasoning tokens included when reported) and the first 300 characters.
 
 **What the mint asks Auto for.** Copilot serves three request dialects and this client encodes
 two, so **GitHub's Auto pick may be one we cannot put on the wire** — that possibility is a fact about Auto, not a

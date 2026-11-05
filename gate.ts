@@ -17,9 +17,13 @@
 import { evaluateToolCall, policyProject, type Entity, type PolicyDecision, type PolicyOptions } from "./risk-policy.ts"
 import { verifyGrant, NO_OBJECT_TARGET, type GrantExtraction } from "./grant-verify.ts"
 import {
+	answerReserveTokens,
 	classifyEffect,
 	effectToTier,
 	extractGrant,
+	GRANT_CALL_RESERVE_TOKENS,
+	GRANT_NUMBERING_OVERHEAD_CHARS,
+	grantCallFixedChars,
 	type EffectClassification,
 	type ModelCallResult,
 	type ModelEndpoint,
@@ -28,7 +32,6 @@ import { addGrant, grantsCover, type GrantStore } from "./session-grants.ts"
 import { compoundAll, ledgerCovers, namedForbidCovers, readOnlyActive, readOnlyLiftedByGrant, type Ledger } from "./auth-ledger.ts"
 import { callBudget, estimateTokens } from "./context-budget.ts"
 import { fitLedgerRows, LEDGER_SHARE, ledgerRows } from "./ledger-render.ts"
-import { GRANT_CALL_RESERVE_TOKENS, GRANT_NUMBERING_OVERHEAD_CHARS, grantCallFixedChars } from "./model-client.ts"
 // `classifierUnavailability` is a value import from gate-bridge, which imports this module by TYPE only — so the
 // edge has no cycle. It is how the gate can say WHY it had no endpoint: the resolver records the cause, and a
 // denial that just said "no endpoint configured" would send a user with a broken Copilot session to their config.
@@ -336,13 +339,17 @@ export async function runGate(tool: string, input: Record<string, unknown>, opts
 		// (`grantCallFixedChars`) counts the section header, the blank line and every newline as sent,
 		// and any row budget the ledger could not spend returns to the raw fill by construction —
 		// no block size is hard-coded here.
-		const bareBudget = callBudget(opts.endpoint.contextTokens, grantCallFixedChars(fixed), GRANT_CALL_RESERVE_TOKENS)
+		// The reserve subtracted from the window is the one this request will really ask for, not the task's 300:
+		// with `classifier.maxOutputTokens` raised (or a Copilot reserve), budgeting against the constant sized the
+		// messages into space the answer was about to occupy.
+		const grantReserve = answerReserveTokens(opts.endpoint, GRANT_CALL_RESERVE_TOKENS)
+		const bareBudget = callBudget(opts.endpoint.contextTokens, grantCallFixedChars(fixed), grantReserve)
 		const rows = opts.ledger ? fitLedgerRows(ledgerRows(opts.ledger), Math.floor(bareBudget * LEDGER_SHARE)) : []
 		const rowTexts = rows.map((r) => r.text)
 		const budget = callBudget(
 			opts.endpoint.contextTokens,
 			grantCallFixedChars({ ...fixed, ledgerRows: rowTexts }),
-			GRANT_CALL_RESERVE_TOKENS,
+			grantReserve,
 		)
 		const userMessages = limitUserMessages(opts.userMessages ?? [], budget)
 		if (rows.length > 0) dbg(`[gate] grant window: ${rows.length} ledger row(s) + ${userMessages.length} message(s) in ${budget} tokens`)

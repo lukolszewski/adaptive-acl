@@ -21,7 +21,7 @@ undo, per-mode model profiles, subagent approval forwarding, and an adaptive foo
 
 ## Module map
 
-Every file matching `git ls-files '*.ts' | grep -v '\.test\.ts$'` (61 entries; the last two are test
+Every file matching `git ls-files '*.ts' | grep -v '\.test\.ts$'` (62 entries; the last two are test
 harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ### Entry point and pi surface
@@ -142,6 +142,8 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
   parse failure is structurally impossible where the server honours it.
 - `copilot-session.ts` — the plugin's own GitHub Copilot Auto session: mint, cache, single-flight, allowance
   counter. It owns the token, never the request bodies.
+- `request-fields.ts` — `classifier.extraRequestFields`: validates the object and merges it into a built request
+  body last (objects merge key by key, `null` removes a key, the model/prompt/schema/stream/limit keys are refused).
 - `message-chunks.ts` — cuts an oversize user message into whole pieces so grant extraction sees all of it;
   `chunkMessage(t).join("") === t` by construction.
 - `ledger-render.ts` — renders ledger rows as the summary of the turns that no longer fit the call, so an old
@@ -186,10 +188,10 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ```bash
 npm install --ignore-scripts --no-audit --no-fund   # what CI does; nothing here has a build step
-npx vitest run        # 99 files, all green. The test count moves with the suite, so quote CI's
+npx vitest run        # 101 files, all green. The test count moves with the suite, so quote CI's
                       # log rather than a figure copied out of a doc.
 npm run typecheck     # tsc --noEmit -p tsconfig.json — zero errors
-npm run pack:dry      # 66 files, ~643 kB tarball, 2.8 MB unpacked
+npm run pack:dry      # 67 files, ~713 kB tarball, 3.0 MB unpacked
 ```
 
 Run all four before you call a change done, and paste the real output into your result. Notes that cost an
@@ -202,7 +204,7 @@ hour each if you learn them by hand:
   that reads them (`bash-walker-golden.ts:31`, `bash-allow-layer0.test.ts:689-690`).
 - **`tsconfig.json:15` includes `*.ts` and `tools/*.ts`, root level only**, with `eval` and `spike` excluded
   (neither directory exists here). A new file in a subdirectory is not typechecked by `npm run typecheck`.
-- **`npm run pack:dry` counts 66** because `package.json:29-38` ships `*.ts` minus `*.test.ts`. That glob is
+- **`npm run pack:dry` counts 67** because `package.json:29-38` ships `*.ts` minus `*.test.ts`. That glob is
   why `bash-walker-golden.ts` ships and `docs/`, the `.jsonl` corpora and `testcases/` do not. If a runtime
   path starts reading a non-`.ts` file, this list has to change with it.
 - The publish contract adds a **leak scan**: grep every tracked file for a fixed list of private tokens —
@@ -327,7 +329,11 @@ Each line names where the code enforces it. These are the things a confident, pl
   not as an error. Never clip a string instead: whole items only (`context-budget.ts:15-20`).
 - A truncated answer is a transport failure, never a verdict (`model-client.ts:399-404`,
   `classifier-client.ts:824-834`). The answer reserve is a different knob from the window —
-  `classifier.copilot.maxOutputTokens` (`config.ts:63-67`): too small is no answer at all.
+  `classifier.maxOutputTokens` on every endpoint, `classifier.copilot.maxOutputTokens` on Copilot, both floors
+  applied by `answerReserveTokens` (`model-client.ts`): too small is no answer at all, and every budget subtracts
+  the effective reserve, never a constant.
+- The client adds no server-specific field of its own (no `chat_template_kwargs`, no thinking format): what a
+  given server needs is the user's `classifier.extraRequestFields`, merged last (`request-fields.ts`).
 - The Copilot session token header travels **only** on the Auto pick (`model-client.ts:46-47`); measured, it
   restricts the request to the Auto models, so an explicitly named model must never carry it.
 - Every model failure is rendered as "there is no verdict", never as silence or approval

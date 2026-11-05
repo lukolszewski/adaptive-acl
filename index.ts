@@ -942,7 +942,12 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
     const resolution = classifierConfig.enabled
       ? await resolveGateEndpointWithFailure(classifierConfig, ctx.modelRegistry as any)
       : {};
-    const endpoint = resolution.endpoint;
+    // The per-call request/reply log (model-client.ts) rides on the endpoint, so the ledger backfill started
+    // from here logs too.
+    const endpoint =
+      resolution.endpoint && debugOn
+        ? { ...resolution.endpoint, debug: (l: string) => console.debug("[adaptive-acl]", l) }
+        : resolution.endpoint;
     let branch: Array<{ type?: string; message?: { role?: string; content?: unknown } }> = [];
     try {
       branch = (ctx.sessionManager as any).getBranch?.() ?? [];
@@ -1212,6 +1217,8 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
             stage: classifierConfig.stage,
             includeAgentsMd: classifierConfig.includeAgentsMd,
             contextTokens: classifierConfig.contextTokens,
+            maxOutputTokens: classifierConfig.maxOutputTokens,
+            extraRequestFields: classifierConfig.extraRequestFields,
             signal: ctx.signal,
             debug: process.env.ADAPTIVE_ACL_CLASSIFIER_DEBUG === "1",
           });
@@ -2831,6 +2838,16 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
               ? `NOT USABLE — ${resolution.failure.detail}`
               : "none — every unknown verdict goes to the user unasked, AND natural-language grants cannot register at all: nothing parses the user's sentence into a category without a model call"
         }`,
+        `answer limit: ${
+          classifierConfig.maxOutputTokens
+            ? `at least ${classifierConfig.maxOutputTokens} tokens per call (classifier.maxOutputTokens)`
+            : "built-in per call (300 grant, 400 extraction, 512 legacy stage); set classifier.maxOutputTokens to raise it"
+        }`,
+        // Names only: a gateway field can carry a key, and this text is shown and may be logged.
+        `extra request fields: ${
+          Object.keys(classifierConfig.extraRequestFields ?? {}).join(", ") || "none (nothing beyond the classifier's own body)"
+        }`,
+        ...(classifierConfig.problems ?? []).map((p) => `CONFIG PROBLEM (value ignored): ${p}`),
         // The Copilot allowance used to be invisible: the cap lives in model-client.ts and the counter in
         // copilot-session.ts, so a user hitting it had no line to read.
         (classifierConfig.copilot?.budgetTokens ?? 0) > 0
@@ -3792,6 +3809,13 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
     publishBridgeState();
 
     classifierConfig = resolveClassifierConfig(loadPermissionModesConfig());
+    // A refused classifier value is dropped, so without this line the user's setting silently does nothing.
+    if (classifierConfig.problems?.length && ctx.hasUI) {
+      ctx.ui.notify(
+        `adaptive-acl: classifier config problem (value ignored):\n${classifierConfig.problems.join("\n")}`,
+        "warning",
+      );
+    }
     autoModeConfig = resolveAutoModeConfig(loadPermissionModesConfig());
     injectionWarningEnabled = resolveInjectionWarning(loadPermissionModesConfig());
     injectionEscalationEnabled = resolveInjectionEscalation(loadPermissionModesConfig());

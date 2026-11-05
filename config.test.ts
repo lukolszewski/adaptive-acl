@@ -20,6 +20,7 @@ import {
 	copilotModelKind,
 	DEFAULT_COPILOT_CLASSIFIER,
 	COPILOT_AUTO_MODEL_REF,
+	MAX_CLASSIFIER_OUTPUT_TOKENS,
 	loadPermissionModesConfig,
 } from "./config.ts"
 import { DEFAULT_CONTEXT_TOKENS } from "./context-budget.ts"
@@ -135,6 +136,130 @@ describe("classifier context window", () => {
 function dirnameOf(p: string): string {
 	return p.slice(0, p.lastIndexOf("/"))
 }
+
+// ------------------------------------------------- classifier.maxOutputTokens
+
+/** One rule for both settings: an unusable value is dropped (today's behaviour stays) AND reported in
+ *  `problems` — never replaced by a number the user did not type, never silently ignored. These cases pin both
+ *  halves, because either one alone is the bug this setting exists to avoid. */
+describe("classifier.maxOutputTokens", () => {
+	const resolved = (classifier: Record<string, unknown>) =>
+		resolveClassifierConfig({ classifier: classifier as never })
+
+	it("is undefined when unset, which is exactly today's behaviour", () => {
+		const c = resolved({})
+		expect(c.maxOutputTokens).toBeUndefined()
+		expect(c.problems).toEqual([])
+	})
+
+	it("honours a whole number that leaves room for the prompt", () => {
+		const c = resolved({ maxOutputTokens: 1024 })
+		expect(c.maxOutputTokens).toBe(1024)
+		expect(c.problems).toEqual([])
+		// The window's own default is the boundary: one token less than 4096 still leaves a prompt.
+		expect(resolved({ maxOutputTokens: 4095 }).maxOutputTokens).toBe(4095)
+	})
+
+	it("honours the ceiling itself, not just values under it", () => {
+		const c = resolved({ maxOutputTokens: MAX_CLASSIFIER_OUTPUT_TOKENS, contextTokens: 65_536 })
+		expect(c.maxOutputTokens).toBe(MAX_CLASSIFIER_OUTPUT_TOKENS)
+		expect(c.problems).toEqual([])
+	})
+
+	it("refuses a value above the ceiling instead of clamping it", () => {
+		const c = resolved({ maxOutputTokens: MAX_CLASSIFIER_OUTPUT_TOKENS + 1, contextTokens: 65_536 })
+		expect(c.maxOutputTokens).toBeUndefined()
+		expect(c.problems).toHaveLength(1)
+		expect(c.problems?.[0]).toContain(String(MAX_CLASSIFIER_OUTPUT_TOKENS))
+		expect(c.problems?.[0]).toContain("ignored")
+	})
+
+	it("refuses zero, negatives and non-integers rather than flooring them", () => {
+		for (const bad of [0, -1, -4096, 300.5, 1.5, NaN, Infinity]) {
+			const c = resolved({ maxOutputTokens: bad })
+			expect(c.maxOutputTokens, `maxOutputTokens=${bad}`).toBeUndefined()
+			expect(c.problems, `maxOutputTokens=${bad}`).toHaveLength(1)
+			expect(c.problems?.[0]).toContain("classifier.maxOutputTokens=")
+		}
+		// A quoted number is a string in a hand-edited file, not a token budget.
+		for (const bad of ["1024", null, true, {}]) {
+			expect(resolved({ maxOutputTokens: bad }).maxOutputTokens).toBeUndefined()
+			expect(resolved({ maxOutputTokens: bad }).problems).toHaveLength(1)
+		}
+	})
+
+	it("refuses a reserve that leaves no prompt room inside the window", () => {
+		const same = resolved({ maxOutputTokens: 4096 }) // == the default contextTokens
+		expect(same.maxOutputTokens).toBeUndefined()
+		expect(same.problems?.[0]).toContain("contextTokens=4096")
+
+		const over = resolved({ maxOutputTokens: 8000 })
+		expect(over.maxOutputTokens).toBeUndefined()
+		expect(over.problems).toHaveLength(1)
+
+		// The judgement is made against the window the user configured, not the default one.
+		const small = resolved({ maxOutputTokens: 2048, contextTokens: 2048 })
+		expect(small.maxOutputTokens).toBeUndefined()
+		expect(small.contextTokens).toBe(2048)
+		expect(small.problems?.[0]).toContain("contextTokens=2048")
+
+		const fits = resolved({ maxOutputTokens: 2048, contextTokens: 3072 })
+		expect(fits.maxOutputTokens).toBe(2048)
+		expect(fits.problems).toEqual([])
+	})
+})
+
+// ---------------------------------------------- classifier.extraRequestFields
+describe("classifier.extraRequestFields", () => {
+	const resolved = (classifier: Record<string, unknown>) =>
+		resolveClassifierConfig({ classifier: classifier as never })
+
+	it("is undefined when unset: nothing extra is sent", () => {
+		const c = resolved({})
+		expect(c.extraRequestFields).toBeUndefined()
+		expect(c.problems).toEqual([])
+	})
+
+	it("passes a valid object through untouched, nested objects included", () => {
+		const fields = { reasoning_effort: "none", chat_template_kwargs: { enable_thinking: false }, temperature: null }
+		const c = resolved({ extraRequestFields: fields })
+		expect(c.extraRequestFields).toEqual(fields)
+		expect(c.problems).toEqual([])
+	})
+
+	it("refuses anything that is not a JSON object", () => {
+		for (const bad of [null, [], "{}", 3, true]) {
+			const c = resolved({ extraRequestFields: bad })
+			expect(c.extraRequestFields, `extraRequestFields=${JSON.stringify(bad)}`).toBeUndefined()
+			expect(c.problems?.[0]).toMatch(/JSON object/)
+		}
+	})
+
+	it("refuses a key the classifier owns, and names it", () => {
+		const c = resolved({ extraRequestFields: { max_tokens: 10, seed: 42 } })
+		expect(c.extraRequestFields).toBeUndefined()
+		expect(c.problems).toHaveLength(1)
+		expect(c.problems?.[0]).toContain("max_tokens")
+		// The refused key is named, the accepted one is not turned into a second complaint.
+		expect(c.problems?.[0]).not.toContain("seed")
+	})
+
+	it("reports both settings' problems, in key order, on one resolved config", () => {
+		const c = resolved({ maxOutputTokens: -1, extraRequestFields: { model: "x" } })
+		expect(c.problems).toHaveLength(2)
+		expect(c.problems?.[0]).toContain("maxOutputTokens")
+		expect(c.problems?.[1]).toContain("extraRequestFields")
+		expect(c.maxOutputTokens).toBeUndefined()
+		expect(c.extraRequestFields).toBeUndefined()
+	})
+
+	it("keeps the rest of the block intact when one value is refused", () => {
+		const c = resolved({ model: "litellm-lab/gate-model", maxOutputTokens: 99_999, timeoutMs: 12_000 })
+		expect(c.model).toBe("litellm-lab/gate-model")
+		expect(c.timeoutMs).toBe(12_000)
+		expect(c.contextTokens).toBe(DEFAULT_CONTEXT_TOKENS)
+	})
+})
 
 describe("classifier.copilot", () => {
 	// Two rules hold this block together. It may not change any behaviour that exists today — so every value is

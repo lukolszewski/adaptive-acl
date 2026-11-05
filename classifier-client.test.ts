@@ -10,8 +10,8 @@ import { join } from "node:path"
 import {
 	buildClassifierUserPrompt,
 	ClassifierStageFailure,
-	classifierStageModel,
 	classifierThinkingOff,
+	classifierAnswerReserveTokens,
 	classifyToolCall,
 	isClassifierStageFailure,
 	parseClassifierModelRef,
@@ -649,49 +649,12 @@ describe("thinking off per stage (D23)", () => {
 		completeSimpleMock.mockReset()
 	})
 
-	it("declares the chat-template knob for a reasoning model at a text stage", () => {
-		const model = completionsModel()
-		const view = classifierStageModel(model, "single")
-		expect(view).not.toBe(model)
-		expect(view.compat).toMatchObject({ thinkingFormat: "qwen-chat-template" })
-		// pi-ai only emits chat_template_kwargs when the model says it reasons at all.
-		expect(view.reasoning).toBe(true)
-		// …and the registry's object is exactly what it was: the session shares it.
-		expect(model.compat).toBeUndefined()
-		expect(classifierStageModel(model, "fast")).not.toBe(model)
-		expect(classifierStageModel(model, "thinking")).not.toBe(model)
-		expect(classifierStageModel(model, "both")).not.toBe(model)
-	})
-
-	it("leaves the tool stage's model object untouched — identity, not a copy", () => {
-		const model = completionsModel()
-		expect(classifierStageModel(model, "tool")).toBe(model)
-		expect(model.compat).toBeUndefined()
-	})
-
-	it("sends the knob even for a model pi does not declare as a reasoning model (D28)", () => {
-		const model = completionsModel({ reasoning: false })
-		// The old pin here asserted `unknown`, on the theory that an undeclared model has no thinking to switch
-		// off and that a qwen-shaped field might 400. The endpoint was asked instead: undeclared + no field is
-		// 5.1 s of reasoning that hits the token cap with no text at all; undeclared + field is a verdict in
-		// 758 ms with a verdict, and no 400. A risk reasoned about is not a risk measured.
-		expect(classifierThinkingOff(model)).toEqual({ via: "chat-template" })
-		expect(classifierStageModel(model, "single")).not.toBe(model)
-		expect(classifierStageModel(model, "single")).toMatchObject({ reasoning: true })
-		// The registry's own object is untouched — this only describes the classifier's request.
-		expect(model.reasoning).toBe(false)
-	})
-
-	it("keeps a thinking format the user already declared", () => {
-		const model = completionsModel({
-			compat: { thinkingFormat: "deepseek", maxTokensField: "max_tokens" },
-		})
-		// pi-ai knows how to switch that format off; overwriting it would be a guess about the server.
-		expect(classifierStageModel(model, "single")).toBe(model)
-		expect(model.compat).toMatchObject({ thinkingFormat: "deepseek" })
-	})
-
-	it("sends the stage view, not the registry's object, and leaves no marks on it", async () => {
+	it("sends the registry's own model object at every stage — no stage view, no copy", async () => {
+		// The client used to hand the text stages a copy carrying `compat.thinkingFormat: "qwen-chat-template"`
+		// and `reasoning: true` so pi-ai would emit a chat-template field. That field is one server's dialect,
+		// not every server's, and the copy is gone (`classifier-thinking-knob.test.ts`). What the registry
+		// gave us is what the adapter gets, deliberately: the object is shared with the whole session, so a
+		// copy is the only safe place for a knob — and there is no knob left to place.
 		const model = completionsModel()
 		completeSimpleMock.mockResolvedValue(
 			makeAssistantResponse('{"shouldBlock":false,"reason":"routine"}'),
@@ -706,15 +669,73 @@ describe("thinking off per stage (D23)", () => {
 			stage: "single",
 		})
 
-		const [sentModel] = completeSimpleMock.mock.calls[0]!
-		expect(sentModel).not.toBe(model)
-		expect(sentModel.compat).toMatchObject({
-			thinkingFormat: "qwen-chat-template",
-		})
-		expect(model.compat).toBeUndefined()
-		// No thinking level is requested: pi-ai turns the knob off by leaving it unset.
-		const [, , options] = completeSimpleMock.mock.calls[0]!
+		const [sentModel, , options] = completeSimpleMock.mock.calls[0]!
+		expect(sentModel).toBe(model)
 		expect(options).not.toHaveProperty("reasoning")
+		expect(options).not.toHaveProperty("onPayload")
+		expect(model.compat).toBeUndefined()
+		expect(model.reasoning).toBe(true) // untouched: the registry's declaration, not ours
+	})
+
+	it("injects no chat_template_kwargs and no thinking format for any stage", async () => {
+		// The default request is what pi-ai built. Nothing about it is the classifier's opinion of the server.
+		for (const stage of ["tool", "single", "fast", "both", "thinking"] as const) {
+			invalidateClassifierVerdictCache()
+			completeSimpleMock.mockReset()
+			const model = completionsModel({ reasoning: false })
+			completeSimpleMock.mockResolvedValue(
+				stage === "tool"
+					? makeAssistantResponse("", [
+							{
+								type: "toolCall",
+								id: "t1",
+								name: CLASSIFIER_TOOL_NAME,
+								arguments: { shouldBlock: false, reason: "fine" },
+							},
+						])
+					: stage === "single"
+						? makeAssistantResponse('{"shouldBlock":false,"reason":"fine"}')
+						: makeAssistantResponse("<block>no</block>"),
+			)
+
+			await classifyToolCall({
+				modelRef: "litellm-lab/clf-text",
+				session: session(),
+				pendingTool: { name: "bash", input: { command: `ls -la # ${stage}` } },
+				registry: registryForModel(model),
+				timeoutMs: 5000,
+				stage,
+			})
+
+			const [sentModel, , options] = completeSimpleMock.mock.calls[0]!
+			expect(sentModel).toBe(model)
+			expect((sentModel.compat as { thinkingFormat?: string } | undefined)?.thinkingFormat).toBeUndefined()
+			expect(options).not.toHaveProperty("reasoning")
+			expect(options).not.toHaveProperty("chat_template_kwargs")
+			expect(options).not.toHaveProperty("onPayload")
+		}
+	})
+
+	it("leaves a thinking format the user already declared alone", () => {
+		const model = completionsModel({
+			compat: { thinkingFormat: "deepseek", maxTokensField: "max_tokens" },
+		})
+		// Nothing here reads or rewrites it: the user's declaration reaches pi-ai exactly as they wrote it.
+		expect(classifierThinkingOff(model)).toEqual({ via: "unknown" })
+		completeSimpleMock.mockResolvedValue(
+			makeAssistantResponse('{"shouldBlock":false,"reason":"routine"}'),
+		)
+		return classifyToolCall({
+			modelRef: "litellm-lab/clf-text",
+			session: session(),
+			pendingTool: { name: "bash", input: { command: "tokei src" } },
+			registry: registryForModel(model),
+			timeoutMs: 5000,
+			stage: "single",
+		}).then(() => {
+			expect(completeSimpleMock.mock.calls[0]![0]).toBe(model)
+			expect(model.compat).toMatchObject({ thinkingFormat: "deepseek" })
+		})
 	})
 
 	it("switches thinking off on anthropic at the text stages, not only at the tool stage", async () => {
@@ -763,6 +784,258 @@ describe("thinking off per stage (D23)", () => {
 			type: "function",
 			function: { name: CLASSIFIER_TOOL_NAME },
 		})
+	})
+})
+
+describe("classifier.extraRequestFields through onPayload", () => {
+	// The field a server needs to stop thinking (or to be tagged, seeded, or asked for a particular effort) is
+	// the user's config, not a guess made here. pi-ai hands the built payload to `onPayload` and uses the
+	// return value as the payload when it is not undefined, so the merge is one hook and no dialect knowledge.
+	function completionsModel(): any {
+		return {
+			id: "clf-text",
+			name: "clf-text",
+			api: "openai-completions",
+			provider: "litellm-lab",
+			baseUrl: "http://127.0.0.1:9/v1",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			reasoning: false,
+			contextWindow: 4096,
+			maxTokens: 512,
+		}
+	}
+
+	function registryForModel(model: any): ClassifierRegistry {
+		return {
+			find: () => model,
+			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k" }),
+		}
+	}
+
+	const payload = {
+		model: "clf-text",
+		messages: [{ role: "user", content: "hi" }],
+		temperature: 0,
+		max_tokens: 512,
+	}
+
+	beforeEach(() => {
+		invalidateClassifierVerdictCache()
+		completeSimpleMock.mockReset()
+		completeSimpleMock.mockResolvedValue(
+			makeAssistantResponse('{"shouldBlock":false,"reason":"fine"}'),
+		)
+	})
+
+	/** The options the client passed to completeSimple on its one call, with the hook already applied. */
+	async function sentPayload(
+		fields: Record<string, unknown> | undefined,
+	): Promise<{ options: any; payload: any }> {
+		await classifyToolCall({
+			modelRef: "litellm-lab/clf-text",
+			session: session(),
+			pendingTool: { name: "bash", input: { command: `ls ${JSON.stringify(fields)}` } },
+			registry: registryForModel(completionsModel()),
+			timeoutMs: 5000,
+			stage: "single",
+			extraRequestFields: fields,
+		})
+		const [, , options] = completeSimpleMock.mock.calls[0]!
+		const sent = options.onPayload
+			? await options.onPayload(structuredClone(payload))
+			: structuredClone(payload)
+		return { options, payload: sent }
+	}
+
+	it("installs no hook at all by default — the request is exactly what pi-ai built", async () => {
+		const { options, payload: sent } = await sentPayload(undefined)
+		expect(options).not.toHaveProperty("onPayload")
+		expect(sent).toEqual(payload)
+		const { options: empty, payload: withEmpty } = await sentPayload({})
+		expect(empty).not.toHaveProperty("onPayload")
+		expect(withEmpty).toEqual(payload)
+	})
+
+	it("merges the user's fields into the payload, key by key", async () => {
+		const { options, payload: sent } = await sentPayload({
+			chat_template_kwargs: { enable_thinking: false },
+			seed: 42,
+		})
+		expect(typeof options.onPayload).toBe("function")
+		expect(sent).toEqual({
+			...payload,
+			chat_template_kwargs: { enable_thinking: false },
+			seed: 42,
+		})
+		// The input body is never mutated: pi-ai keeps the original for its own bookkeeping.
+		expect(payload).toEqual({
+			model: "clf-text",
+			messages: [{ role: "user", content: "hi" }],
+			temperature: 0,
+			max_tokens: 512,
+		})
+	})
+
+	it("removes a key the client set when the value is null", async () => {
+		const { payload: sent } = await sentPayload({ temperature: null })
+		expect(sent).not.toHaveProperty("temperature")
+		expect(sent).toMatchObject({ model: "clf-text", max_tokens: 512 })
+	})
+
+	it("never lets a field replace the model, the prompt, the schema or the answer limit", async () => {
+		// Config loading reports these as an error; the merge refuses them again, because the verdict depends
+		// on the schema and the limit has its own setting.
+		const { payload: sent } = await sentPayload({
+			model: "someone-else",
+			messages: [],
+			max_tokens: 9,
+			response_format: { type: "text" },
+			temperature: null,
+		})
+		expect(sent).toEqual({
+			model: "clf-text",
+			messages: payload.messages,
+			max_tokens: 512,
+		})
+	})
+
+	it("applies the same merge at the tool stage and reads the verdict normally", async () => {
+		completeSimpleMock.mockResolvedValue(
+			makeAssistantResponse("", [
+				{
+					type: "toolCall",
+					id: "t1",
+					name: CLASSIFIER_TOOL_NAME,
+					arguments: { shouldBlock: false, reason: "fine" },
+				},
+			]),
+		)
+		await classifyToolCall({
+			modelRef: "litellm-lab/clf-text",
+			session: session(),
+			pendingTool: { name: "bash", input: { command: "ls" } },
+			registry: registryForModel(completionsModel()),
+			timeoutMs: 5000,
+			stage: "tool",
+			extraRequestFields: { seed: 7 },
+		})
+		const [, , options] = completeSimpleMock.mock.calls[0]!
+		expect(await options.onPayload(structuredClone(payload))).toMatchObject({ seed: 7 })
+	})
+})
+
+describe("classifier.maxOutputTokens is a floor on every stage's answer limit", () => {
+	function completionsModel(): any {
+		return {
+			id: "clf-text",
+			name: "clf-text",
+			api: "openai-completions",
+			provider: "litellm-lab",
+			baseUrl: "http://127.0.0.1:9/v1",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			reasoning: false,
+			contextWindow: 4096,
+			maxTokens: 512,
+		}
+	}
+
+	function registryForModel(model: any): ClassifierRegistry {
+		return {
+			find: () => model,
+			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k" }),
+		}
+	}
+
+	beforeEach(() => {
+		invalidateClassifierVerdictCache()
+		completeSimpleMock.mockReset()
+	})
+
+	it("defaults to the stage's own numbers when nothing is configured", () => {
+		expect(classifierAnswerReserveTokens("tool")).toBe(1024)
+		expect(classifierAnswerReserveTokens("single")).toBe(512)
+		expect(classifierAnswerReserveTokens("fast")).toBe(256)
+		expect(classifierAnswerReserveTokens(undefined, 0)).toBe(512)
+	})
+
+	it("raises a stage that asks for less, and never lowers one that asks for more", () => {
+		expect(classifierAnswerReserveTokens("fast", 4000)).toBe(4000)
+		expect(classifierAnswerReserveTokens("tool", 4000)).toBe(4000)
+		expect(classifierAnswerReserveTokens("tool", 120)).toBe(1024)
+		expect(classifierAnswerReserveTokens("single", 100)).toBe(512)
+		// Nonsense contributes nothing rather than shrinking the answer; config loading reports it.
+		expect(classifierAnswerReserveTokens("single", Number.NaN)).toBe(512)
+		expect(classifierAnswerReserveTokens("single", -5)).toBe(512)
+	})
+
+	it("sends the raised limit to the provider and reports it in a stage failure", async () => {
+		completeSimpleMock.mockResolvedValue({
+			...makeAssistantResponse("Let me think about this command. First,"),
+			stopReason: "length",
+		})
+		const err = await classifyToolCall({
+			modelRef: "litellm-lab/clf-text",
+			session: session(),
+			pendingTool: { name: "bash", input: { command: "ls" } },
+			registry: registryForModel(completionsModel()),
+			timeoutMs: 5000,
+			stage: "single",
+			maxOutputTokens: 3000,
+		}).then(
+			() => {
+				throw new Error("expected the stage to fail")
+			},
+			(e: unknown) => e,
+		)
+
+		const [, , options] = completeSimpleMock.mock.calls[0]!
+		expect(options).toMatchObject({ maxTokens: 3000 })
+		expect((err as ClassifierStageFailure).maxTokens).toBe(3000)
+		expect((err as ClassifierStageFailure).message).toContain("max_tokens=3000")
+	})
+
+	it("raises the XML recall pass too, not only the review pass", async () => {
+		completeSimpleMock.mockResolvedValue(
+			makeAssistantResponse("<block>no</block>"),
+		)
+		await classifyToolCall({
+			modelRef: "litellm-lab/clf-text",
+			session: session(),
+			pendingTool: { name: "bash", input: { command: "ls" } },
+			registry: registryForModel(completionsModel()),
+			timeoutMs: 5000,
+			stage: "both",
+			maxOutputTokens: 2048,
+		})
+		// Stage 1 is the 64-token pass; it is the one a reasoning model starves on a block path.
+		expect(completeSimpleMock.mock.calls[0]![2]).toMatchObject({ maxTokens: 2048 })
+	})
+
+	it("reserves the same room in the transcript budget it will ask the provider for", () => {
+		// Same window, same transcript: the configured limit is what the budget subtracts, so a call that asks
+		// for 3 000 answer tokens must not also hand the model a 12 000-character history.
+		const branch = Array.from({ length: 40 }, (_, i) => ({
+			type: "message",
+			message: { role: "user", content: `message number ${i} ${"x".repeat(400)}` },
+		}))
+		const opts = {
+			session: session({ branch }),
+			pendingTool: { name: "bash", input: { command: "ls" } },
+			stage: "single" as const,
+			contextTokens: 4096,
+			systemPrompt: "system",
+		}
+		const unbounded = buildClassifierUserPrompt({
+			...opts,
+			maxOutputTokens: 200,
+		})
+		const bounded = buildClassifierUserPrompt({
+			...opts,
+			maxOutputTokens: 3000,
+		})
+		expect(bounded.length).toBeLessThan(unbounded.length)
 	})
 })
 
