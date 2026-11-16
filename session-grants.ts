@@ -501,6 +501,11 @@ function statedTargets(entities: Entity[]): string[] {
  * applies — a delete grant contains writing inside it). Listing the directions by hand is how that drift
  * happens, so every non-`own` answer is admitted: `own` alone keeps the same-category refusal for the delete
  * kinds, which is the part this function exists for.
+ *
+ * The read pair (`read_system_state` ↔ `read_only`) rides the same rule and is the reason it is written this
+ * way: admitting the pair here is what lets a row be asked at all, and the OBJECT-versus-PATH half of the rule
+ * lives in `grantAnswersSegment`, which sees the target. A file target is refused there, so nothing widened for
+ * a path, and `read_secret` never joins the pair either way.
  */
 function rowIsAbout(rowCategory: string, segment: string): boolean {
 	const direction = grantDirection(rowCategory, segment)

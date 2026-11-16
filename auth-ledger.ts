@@ -391,11 +391,12 @@ function serviceReadEntailedBy(g: LedgerEntry, target: string, home?: string, pr
  * The second shape of the same one-way question: does a grant the user gave for some OTHER effect already
  * contain reading this machine, host or cluster?
  *
- * Narrower than {@link serviceReadEntailedBy} on purpose. A write or delete grant over a PATH is not evidence
- * about a machine — `/var/log` and "this machine" are different objects, and letting one answer the other is
- * how a folder permission quietly becomes a licence to survey the box. What does answer it is a grant whose
- * object already IS that machine, host, cluster or daemon (the service rule above, unchanged in direction), or a
- * plain read grant on the same object.
+ * Narrower than {@link readEntailedBy} on purpose. A write or delete grant over a PATH is not evidence about
+ * a machine — `/var/log` and "this machine" are different objects, and letting one answer the other is how a
+ * folder permission quietly becomes a licence to survey the box. What does answer it is a grant whose object
+ * already IS that machine, host, cluster or daemon (the service rule above, unchanged in direction), or a plain
+ * read grant on the same OBJECT — and the latter is the read pair's business, in `grant-verify.ts`, because it
+ * is a statement about the target's shape rather than about this set of categories.
  *
  * A `*` value is refused here too: "any service, anywhere" names no object, so it cannot be evidence about
  * this one.
@@ -408,9 +409,14 @@ function serviceReadEntailedBy(g: LedgerEntry, target: string, home?: string, pr
  *  · `network_send` — its object is an endpoint somebody sent a packet to. "You may probe `db.internal:5432`"
  *    is not permission to read that box's process table, and a host string appearing in both categories is a
  *    coincidence of spelling, not of authority;
- *  · `db_mutation` — the object is a database. A cluster's pods are not inside it in the sense that matters.
- * `read_only` is included because it is already a read of that exact object: the user said "read this", and a
- * status read of the same object is that, which is the direction the service rule already pins.
+ *  · `db_mutation` — the object is a database. A cluster's pods are not inside it in the sense that matters;
+ *  · `read_only` — it used to be here, because a plain read grant on an object is already a read of that
+ *    object. The read PAIR in `grant-verify.ts` now states that, and states it better: this set compares no
+ *    target shape, so a `read_only` row that named a FILE answered a `read_system_state` action on the same
+ *    file string — the direction the machine-state rule refuses ("a machine-state grant never reaches a file path, in either
+ *    direction"). The pair refuses a path before any value is compared, so leaving the entry here would keep
+ *    the one door the pair closes. Nothing is lost for an object: `grantAnswersSegment` runs first for every
+ *    segment and answers it there.
  */
 const MACHINE_READ_GRANT_CATEGORIES = new Set([
 	"container_mutation",
@@ -418,7 +424,6 @@ const MACHINE_READ_GRANT_CATEGORIES = new Set([
 	"remote_exec",
 	"process_control",
 	"system_config",
-	"read_only",
 ])
 
 function machineReadEntailedBy(g: LedgerEntry, target: string, home?: string, project?: string, segment?: string): boolean {
@@ -541,12 +546,18 @@ const FORBID_FAMILIES: Record<string, string> = {
  */
 const STORE_FORBID_FAMILY: ReadonlySet<string> = new Set(["network_send", "delete_data"])
 
+const READ_PAIR = new Set(["read_only", "read_system_state"])
+
 function forbidCompatible(entryCategory: string, pendingCategory: string): boolean {
 	// `any` is every action on the named target — it is the widest forbid the schema can express, so it
 	// binds under every segment. It can never reach a grant row: grants are matched by `grantAuthorises`, and
 	// `isGrantCategory` refuses the value at every door a grant row comes through.
 	if (entryCategory === FORBID_ANY_CATEGORY) return true
 	if (compatible(entryCategory, pendingCategory)) return true
+	// The read pair grants answer each other on a non-file object (grant-verify.ts "read-object-pair"); a
+	// forbid has to bind at least as wide as the grants it revokes, so "stop reading gcloud" stops both labels.
+	// Target-free here on purpose: a forbid still matches its own target, and binding wider only costs a prompt.
+	if (READ_PAIR.has(entryCategory) && READ_PAIR.has(pendingCategory)) return true
 	if (STORE_FORBID_FAMILY.has(entryCategory) && STORE_FORBID_FAMILY.has(pendingCategory)) return true
 	const a = FORBID_FAMILIES[kindGroup(entryCategory)] ?? kindGroup(entryCategory)
 	const b = FORBID_FAMILIES[kindGroup(pendingCategory)] ?? kindGroup(pendingCategory)
@@ -572,7 +583,10 @@ const PRIVILEGE_CATEGORIES = new Set([
  * therefore refuse the two target-shaped cases (an object-less row, and the granted folder itself).
  *
  * The answer is the direction table and nothing else: the row's own segments, delete→write, and the
- * two directions write implies (read, single-file delete). Two bridges used to live here and both are gone:
+ * two directions write implies (read, single-file delete) — plus the read pair (`read_system_state` ↔ `read_only`), which this
+ * function must admit for the row to be asked about at all: the OBJECT-versus-PATH half of that rule needs the
+ * target, so it lives in `grantAnswersSegment` (`grant-verify.ts`) and is applied by `grantMatchesPending` below.
+ * Two bridges used to live here and both are gone:
  *
  *  - fs-write → fs-delete, conditional on a delete verb found in the row's quote. One shape of it is open —
  *    `delete_outside`, the single-file delete — as a rule about the target (a file inside what the row names)

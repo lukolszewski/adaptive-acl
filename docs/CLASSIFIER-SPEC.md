@@ -389,7 +389,10 @@ routing, kernel settings, mount table, services, journal, containers, cluster wo
 pidof, pstree, top, htop, btop, lsof, fuser, df, free, lsblk, uptime, nproc, lscpu, lsusb, lspci, sensors,
 nvidia-smi, rocm-smi, uname, hostname, hostnamectl, id, whoami, groups, ip, ifconfig, ss, netstat, route, arp;
 systemctl's status verbs; journalctl; `sysctl` with no assignment; bare `mount`; the container-runtime read
-verbs; kubectl's read verbs) and for the inner command of `ssh <host> …`.
+verbs; kubectl's and helm's cluster reads; the read verbs of the cloud CLIs — gcloud, az, doctl, fly, vercel,
+netlify, wrangler, heroku — and aws service reads) and for the inner command of `ssh <host> …`. A cloud account
+is a system reporting on itself, so its object is the CLI's account surface (`gcloud`, `aws ec2`), unchanged
+from the earlier `read_only` rows so approvals stored under that label still name the same thing.
 
 The object is the machine, never the client or the unit: `localhost` here; the daemon host for a container
 runtime (`-H`/`--host`, else $DOCKER_HOST, else local — `unix://` and bare paths are local); the context for
@@ -398,14 +401,20 @@ status read. One approval answers the family on that object, which is the point 
 
 Never `read_system_state`: `env` / `printenv` / bare-env and `docker inspect` are `read_secret` (a session keeps
 its tokens in the environment, and an inspect prints a container's configuration, its environment included);
-clients that report something other than a machine's state (helm, terraform, aws, gh, curl GET, dig, nslookup,
-host, whois, ping, traceroute, mtr, getent, ldd, crontab -l, tmux ls) stay `read_only`; a status tool in a
+clients that report something other than a system's own state (terraform, gh, curl GET, dig, nslookup,
+host, whois, ping, traceroute, mtr, getent, ldd, crontab -l, tmux ls), and reads of stored data (object stores —
+gsutil, any `s3://`/`gs://` URI, aws s3/s3api/ecr, az storage — and chart repositories) stay `read_only`; a status tool in a
 CHANGE form (`ip link set`, `route add`, `arp -d`, `ifconfig IF ADDR`, `sysctl k=v`, `mount DEV POINT`) is
 `system_config`.
 
-Coverage: `read_system_state` is its own kind group and covers only itself. The direction of §2.9's coverage is kept through
-MACHINE_READ_GRANT_CATEGORIES — container_mutation, cluster_mutation, remote_exec, process_control,
-system_config, read_only — narrowed from SERVICE_OBJECT_CATEGORIES by dropping network_send and db_mutation: an
+Coverage: `read_system_state` is its own kind group, with one pair rule (2026-11-16): on a target that is not a
+filesystem path (`isPathTarget` in grant-verify.ts — a leading `/`, `~` or `.` makes a path), a `read_only` row
+answers a `read_system_state` action and the reverse (direction `read-object-pair`). Which of the two labels a
+sentence's extraction picks is the model's word, and both mean "reads this object, changes nothing"; a path
+keeps the strict rule in both directions, `read_secret` is never in the pair, and a `*` row is refused. A read
+forbid binds both labels, so "stop reading gcloud" withdraws whichever one granted it. The direction of §2.9's
+coverage is kept through MACHINE_READ_GRANT_CATEGORIES — container_mutation, cluster_mutation, remote_exec, process_control,
+system_config — narrowed from SERVICE_OBJECT_CATEGORIES by dropping network_send and db_mutation: an
 endpoint somebody sent a packet to, and a database, are not a machine whose state you may read. `*` is refused,
 a forbid still wins, a temp-file permission never reaches it, and the read-only posture treats it as a read
 because it changes nothing.
@@ -416,7 +425,18 @@ Code maps the classes — local to `localhost`, current_cluster to the kubeconfi
 file declares exactly one context ENTRY — and registers NOTHING when the category is not `read_system_state` or
 the cluster is ambiguous, so an ambiguous "my cluster" costs its prompt instead of arming a wildcard. Ambiguity is
 the count of entries under `contexts:`, not the count of names the reader could parse: an entry it cannot name is
-still another referent. A row that names a target keeps the name and loses the class. `kubeContexts` reads
+still another referent. A row that names a target keeps the name and loses the class.
+
+Cloud CLI verbs (2026-11-16): the cloud CLIs and aws are classified by one shared vocabulary over the verb
+segments of their positionals (each split on `-` and `:`, so `get-serial-port-output` is a `get` and
+`describe-instances` a `describe`), not by a per-CLI syntax table (`cliVerbClass` in risk-handlers.ts). In order:
+a local-config exception (`get-credentials` writes the kubeconfig, `config set`, `auth login`/`activate` →
+`system_config`); a mutation verb anywhere (`create`, `delete`, `update`, `set*`, `add*`, `remove*`, `deploy`,
+`start`, `stop`, `invoke`, `submit`, `push`, … → today's mutation rows, project / resource-group delete stays
+never); a secret word (`token`, `secret`, `credential`, `password`, `key`, `decrypt`, … → `read_secret`); a read
+verb (`list`, `describe`, `get`, `show`, `read`, `print`, `logs`, … → this section); anything else is
+`unknown` and goes to the effect model, never a guessed mutation. Mutation is decided before secret so that
+deleting a secret is not reported as reading one. `kubeContexts` reads
 `current-context` and context NAMES and nothing else — one slot per list item, the name read from whichever line
 carries it at that item's own field column, whether that is the dash line (`- name: prod`, hand-written) or its
 own line under `- context:` (what kubectl writes) — and it stops at the next top-level key, so the `clusters:` and

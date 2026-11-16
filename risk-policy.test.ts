@@ -217,7 +217,7 @@ describe("risk-policy ALLOW tier", () => {
 		it(`ALLOW: ${cmd}`, () => expect(tier(cmd)).toBe("allow"))
 	}
 	it.each([
-		"helm list", "terraform plan", "aws s3 ls",
+		"terraform plan", "aws s3 ls",
 		"curl -s https://api.example.com/v1/items", "gh pr list",
 		])("ASK read_only (a read outside the project): %s", (cmd) => {
 			// A read of a daemon, a cluster, a registry or a host is a read of an object outside the project, so it
@@ -256,8 +256,23 @@ describe("risk-policy ALLOW tier", () => {
 		expect(bare.entities).toContainEqual({ kind: "target", value: "kubectl" })
 		expect(bare.entities.some((e) => e.value === "localhost")).toBe(false)
 	})
-	it("write tool inside project allows; outside asks", () => {
-		expect(evaluateToolCall("write", { path: "./a/b.txt", content: "x" }, OPTS).tier).toBe("allow")
+	it("ASK read_system_state on a CLOUD ACCOUNT, with the object the old row already named", () => {
+		// Cloud reads are in the machine-state family: reading an account is it reporting on itself,
+		// which is what a troubleshooting grant is given for. The assertion that matters here is the OBJECT — it
+		// is what the `read_only` row said before, so a row a user already approved keeps answering the read.
+		const list = evaluateBash("gcloud compute instances list", OPTS)
+		expect(list.tier).toBe("ask")
+		expect(list.category).toBe("read_system_state")
+		expect(list.entities).toEqual([{ kind: "target", value: "gcloud" }])
+		// The rows this file pinned for stored data did NOT move: bytes in a bucket are not the account's
+		// state, so the stored-data exclusion keeps them `read_only` (the full verb tables are in cli-verbs.test.ts).
+		for (const cmd of ["aws s3 ls", "gsutil cat gs://acme-backup/exports/x.csv", "az storage blob list --container-name x"]) {
+			const d = evaluateBash(cmd, OPTS)
+			expect(d.tier, cmd).toBe("ask")
+			expect(d.category, cmd).toBe("read_only")
+		}
+	})
+	it("write tool inside project allows; outside asks", () => {		expect(evaluateToolCall("write", { path: "./a/b.txt", content: "x" }, OPTS).tier).toBe("allow")
 		expect(evaluateToolCall("write", { path: "/tmp/b.txt", content: "x" }, OPTS).tier).toBe("allow")
 		expect(evaluateToolCall("write", { path: "/opt/b.txt", content: "x" }, OPTS).tier).toBe("ask")
 		expect(evaluateToolCall("write", { path: "~/.bashrc", content: "x" }, OPTS).tier).toBe("ask")

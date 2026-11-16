@@ -100,7 +100,8 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 - `risk-policy.ts` — `evaluateToolCall` (`risk-policy.ts:136`): deterministic policy over layer 0, the
   compound result is the most restrictive leg, malformed input goes to the fix-and-retry path.
 - `risk-handlers.ts` — one handler per command family (`git`, `docker`, `rm`, package managers, …); anything
-  unhandled comes back `unknown` and is escalated.
+  unhandled comes back `unknown` and is escalated. The cloud CLIs and aws share one verb vocabulary
+  (`cliVerbClass`) instead of per-CLI syntax tables.
 - `risk-paths.ts` — path classification (project / outside / sensitive / unresolvable), pure: `cwd`,
   `project` and `home` are injected so tests stay hermetic.
 - `bash-tiers.ts` — the positive allowlists (read-only verbs, test runners, routine build/git verbs, the
@@ -158,7 +159,8 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
   vocabulary that every store shares, which is the only reason a merge can revoke.
 - `grant-verify.ts` — code-side verification of what the model extracted: verbatim quote, whole-token entity
   match, `canonicalPath`, forbidden-target veto — and `grantDirection`, the one answer to what else a grant
-  implies (write → read, write → single-file delete; `docs/CLASSIFIER-SPEC.md` §4.3c).
+  implies (write → read, write → single-file delete, and the read pair: `read_only` ↔ `read_system_state` on a
+  target that is not a file path, `isPathTarget`; `docs/CLASSIFIER-SPEC.md` §4.3c, §2.9b).
 - `category-meanings.ts` — one definition per grant category, plus the lines where neighbours divide. The
   grant, extraction and effect prompts all render this text; never restate a definition inside a prompt.
 - `target-grammar.ts` — the shape of a publish target: git refs as a `remote/branch` lattice with a
@@ -188,7 +190,7 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ```bash
 npm install --ignore-scripts --no-audit --no-fund   # what CI does; nothing here has a build step
-npx vitest run        # 101 files, all green. The test count moves with the suite, so quote CI's
+npx vitest run        # 103 files, all green. The test count moves with the suite, so quote CI's
                       # log rather than a figure copied out of a doc.
 npm run typecheck     # tsc --noEmit -p tsconfig.json — zero errors
 npm run pack:dry      # 67 files, ~713 kB tarball, 3.0 MB unpacked

@@ -255,8 +255,9 @@ describe("the command list: exactly what moved, pinned per command", () => {
 		["ssh build-01 uptime", "ask", "read_system_state", "build-01"],
 		["docker inspect web", "ask", "read_secret", "localhost"],
 		["env", "ask", "read_secret", "environment variables"],
-		// untouched: a client that reports something other than a machine's own state, and reachability
-		["helm list", "ask", "read_only", "helm"],
+		// a cluster's releases are what the cluster reports about itself, like `kubectl get`
+		["helm list", "ask", "read_system_state", "helm"],
+		// untouched: reachability is about another host, not a machine's own state
 		["ping -c1 host", "ask", "read_only", "a host's reachability"],
 		// unchanged from before: a file read outside the project asks, a bare tool self-report is free
 		["cat /home/u/notes/todo.md", "ask", "read_only", "~/notes/todo.md"],

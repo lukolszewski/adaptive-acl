@@ -257,6 +257,20 @@ A withdrawal becomes a forbid row. It blocks even if an older grant for the same
 the store, and it is stored as a row rather than a deletion, which is what lets another session see
 it and what stops a background re-extraction of the chat from re-granting it.
 
+### Cloud and cluster CLIs
+
+```
+You may read our gcloud setup.
+Read system state with gcloud.
+```
+
+Reads of a cloud account or cluster are granted by naming the tool. Either sentence lets
+`gcloud compute instances list`, `gcloud logging read …` and the other read verbs run, while a
+change (`delete`, `deploy`, `set`), a credential read (`auth print-access-token`, `kms decrypt`)
+and a local config write (`get-credentials`) still ask. The same works for `aws`, `az`, `kubectl`,
+`helm` and the other cloud CLIs. The verbs are recognised by a shared word list, not per-CLI
+syntax; an unrecognised verb goes to the safety model instead of being treated as a change.
+
 ### Listing, revoking, exporting
 
 ```

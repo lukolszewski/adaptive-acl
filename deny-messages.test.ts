@@ -108,6 +108,48 @@ describe("buildPreciseDenial", () => {
 		expect(msg).not.toContain("could not establish that this is safe")
 	})
 
+	it("names an OBJECT read as the object it is, and keeps the file wording for a path", () => {
+		// A read of an account, a cluster or a host was refused with the file sentence — "reads outside the project
+		// (gcloud)" — which is not a place, and whose FIX ("name the exact path") sends the agent looking for a
+		// path that does not exist. Both read categories that can name an object get the object wording; the path
+		// case beside it is the same builder, unchanged.
+		const object = buildPreciseDenial({
+			head: "Not auto-approved: gcloud compute instances list",
+			segments: [{ command: "gcloud compute instances list", category: "read_only", targets: ["gcloud"] }],
+			futility: "only-after-rewrite",
+		})
+		expect(object).toContain("this reads gcloud and nothing the user said permits it")
+		expect(object).toContain("the user can permit reading gcloud")
+		expect(object).not.toContain("outside the project")
+		expect(object).not.toContain("name the exact path")
+
+		const status = buildPreciseDenial({
+			head: "Not auto-approved: docker ps",
+			segments: [{ command: "docker ps", category: "read_system_state", targets: ["localhost"] }],
+			futility: "only-after-rewrite",
+		})
+		expect(status).toContain("this reads localhost and nothing the user said permits it")
+		expect(status).not.toContain("machine state")
+
+		const path = buildPreciseDenial({
+			head: "Not auto-approved: read outside the project",
+			segments: [{ command: "read /etc/x", category: "read_only", targets: ["/etc/x"] }],
+			futility: "only-after-rewrite",
+		})
+		expect(path).toContain("this reads outside the project (/etc/x)")
+		expect(path).toContain("name the exact path")
+		expect(path).not.toContain("this reads /etc/x and nothing")
+
+		// A targetless read keeps the category's own sentence: "this reads {target}" with the fallback placeholder
+		// would name "the named path" and then call it an object.
+		const bare = buildPreciseDenial({
+			head: "Not auto-approved",
+			segments: [{ command: "cat", category: "read_only", targets: [] }],
+			futility: "only-after-rewrite",
+		})
+		expect(bare).toContain("this reads outside the project (the named path)")
+	})
+
 	it("names only the offending segment, not harmless siblings in the chain", () => {
 		const msg = buildPreciseDenial({
 			head: "Not auto-approved",

@@ -210,6 +210,24 @@ function statusRead(raw: string, object: string, what: string): SegmentDecision[
 }
 
 /**
+ * A read of a cloud ACCOUNT's own state — the machine-state family, one vendor CLI out.
+ *
+ * The category is `read_system_state` for the reason the machine families have it: what is being read
+ * is a system REPORTING ON ITSELF (which instances exist, what a cluster's status is, which service accounts
+ * are set up), which is what a troubleshooting grant is given for. One approval of "you may read the state of
+ * gcloud" therefore answers the next `gcloud … list`, and a `read_only` row on the same object answers it too
+ * (the matcher pairs the two read categories for a target that is not a path).
+ *
+ * It is {@link statusRead}'s row exactly; only the vocabulary differs, and it is a separate name so a later
+ * change to either can be made without silently moving the other. The OBJECT is unchanged from before this
+ * change — the CLI's account surface (`gcloud`, `aws ec2`, the cluster name) — because that is the word a user
+ * already spelled in an existing grant, and a category the matcher pairs is not a reason to orphan those rows.
+ */
+function accountRead(raw: string, object: string, what: string): SegmentDecision[] {
+	return statusRead(raw, object, what)
+}
+
+/**
  * The object of a status read that is scoped to ONE named unit (`journalctl -u X`, `systemctl status X`).
  *
  * The outcome aimed for is that a `read_system_state` grant naming the service answers the read,
@@ -1457,10 +1475,11 @@ function kubectlHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 		// (`get`/`describe`/`logs`), and the object is the CLUSTER the call is addressed to — its
 		// `--context` when it names one, because that is the word a user would use to grant it.
 		if (sub === "version") return infoRow(raw, `${base(argv[0]!)} version (the tool's own version)`)
-		// A cluster read is a status read whose OBJECT is the cluster — `--context`
-		// when the command names one, else the kubeconfig's current context — so a grant that already lets the
-		// agent change something in that cluster still covers looking at it.
-		return statusRead(raw, clusterReadObject(argv, base(argv[0]!), h), `${base(argv[0]!)} ${sub} — reads the cluster${sub === "config" ? " configuration" : ""} (ns ${ns})`)
+		// A cluster read is a status read whose OBJECT is the cluster (the `accountRead` vocabulary).
+		// Same object as before — `--context` when the command names one, else the
+		// kubeconfig's current context — so a grant that already lets the agent change something in that
+		// cluster still covers looking at it.
+		return accountRead(raw, clusterReadObject(argv, base(argv[0]!), h), `${base(argv[0]!)} ${sub} — reads the cluster${sub === "config" ? " configuration" : ""} (ns ${ns})`)
 	}
 	if (sub === "delete") {
 		const wide = hasFlag(argv, "--all", "-A", "--all-namespaces")
@@ -1500,7 +1519,7 @@ function helmHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	}
 		if (sub === "version" || sub === "env" || !sub) return infoRow(raw, `helm ${sub ?? ""} (the tool's own version/environment)`)
 		// Every other verb here reads a cluster or a chart repository (`helm list|status`).
-		return objectRead(raw, clusterObject(argv, "helm"), `helm ${sub} — reads the cluster charts and releases`)
+		return accountRead(raw, clusterObject(argv, "helm"), `helm ${sub} — reads the cluster charts and releases`)
 	}
 	const ns = flagValue(argv, "-n", "--namespace") ?? "default"
 	if (sub === "push") {
@@ -1544,7 +1563,119 @@ function terraformHandler(argv: string[], h: HandlerContext): SegmentDecision[] 
 	return [seg("unknown", "unknown_command", `terraform ${sub}`, raw)]
 }
 
-const AWS_READ_RE = /^(describe|list|get|ls|head|search|lookup|query|scan|select|preview|check|validate|estimate|test|wait|help)/
+/**
+ * What one verb of a `tool <group…> <verb> [args]` CLI does.
+ *
+ * gcloud, az, doctl, fly, vercel, netlify, wrangler and heroku share one grammar: a product, a resource group
+ * and then a verb, in as many words as the product happens to need (`gcloud compute instances list`,
+ * `gcloud logging read`, `az aks get-credentials`). aws is the same grammar with the verb hyphenated into a
+ * single word (`aws ec2 describe-instances`). Before this the gate answered the whole family with one regex of
+ * read nouns and called EVERY other verb a mutation — so `gcloud logging read`,
+ * `compute instances get-serial-port-output` and `auth print-access-token` were reported as changes to a
+ * cluster, which no read grant could reach and which said nothing true about the command.
+ *
+ * Matching is on verb SEGMENTS, not whole words. A positional is split on `-` and `:` first, so
+ * `get-serial-port-output` is a `get`, `print-access-token` is a `print` around the noun `token`,
+ * `config:set` is a `set` and `sites:list` is a `list`. Whole-word patterns would have needed one spelling per
+ * CLI, and the `set*` / `add*` / `remove*` prefixes are what the split gives for free — with the bonus
+ * that `addresses` no longer matches `add`.
+ *
+ * The answer, in this order, and what each one costs:
+ *  · `config`   — the named exceptions: a command that writes the LOCAL configuration or credential store of
+ *                 the tool itself ({@link cliWritesLocalConfig}). It is a write outside the project, so it is
+ *                 the same `system_config` a unit file edit is, never a read.
+ *  · `mutation` — a change. The handlers keep the categories they had, and a whole-project delete stays `never`.
+ *  · `secret`   — a credential is being handed over: `read_secret`, because the environment/credential store is
+ *                 where `read_secret` already means "the bytes are the risk".
+ *  · `read`     — a report on the account's own state, i.e. `read_system_state`.
+ *  · `unknown`  — none of the above. This is the point of the change: an unrecognised verb is ESCALATED to the
+ *                 effect model instead of being guessed as a mutation. A read called a mutation is a read no
+ *                 grant can reach (the bug this fixes); a verb nobody recognises is what `unknown` exists for.
+ *
+ * Mutation is decided BEFORE secret: a destructive verb whose noun happens to be a secret is a destruction, not a read
+ * (`aws secretsmanager delete-secret`, `gcloud secrets versions destroy 3`). A secret noun refines a READ into
+ * a secret read (`get-secret-value`, `print-access-token`); it must not outrank a change.
+ */
+type CliVerbClass = "config" | "mutation" | "secret" | "read" | "unknown"
+
+/** Verbs that only report what is there. `get` and `print` cover the hyphenated forms via the split. */
+const CLI_READ_VERBS = new Set([
+	"list", "ls", "describe", "get", "show", "read", "search", "print", "tail", "log", "logs",
+	"info", "status", "whoami", "version", "versions", "regions", "zones",
+	// Nouns the previous read regex accepted as read verbs. Kept deliberately: dropping one would turn a read
+	// this gate already asked about into `unknown`, which a model may wave through, so the shorter list in the
+	// plan is a floor and not a ceiling. (`heroku releases`, `gcloud config`, `heroku open`, `gsutil cat`,
+	// `heroku ps`, `heroku domains`.)
+	"cat", "env", "config", "releases", "domains", "projects", "apps", "ps", "open",
+])
+
+/** Verbs that change something. The plan's list, plus the verbs that run code or write bytes elsewhere. */
+const CLI_MUTATION_VERBS = new Set([
+	"create", "delete", "destroy", "rm", "remove", "update", "set", "add", "deploy", "start", "stop",
+	"restart", "reset", "resize", "scale", "import", "apply", "patch", "ssh", "scp", "attach", "detach",
+	"enable", "disable", "move", "rename",
+	// The same act under a different word, and each of them is a prompt today: leaving them out would hand
+	// `aws lambda invoke`, `gcloud builds submit` or `wrangler r2 object put` to the model as `unknown`.
+	"exec", "invoke", "submit", "push", "put", "rotate", "revoke",
+])
+
+/** Nouns that mean the command hands over a credential rather than a report. */
+const CLI_SECRET_NOUNS = new Set([
+	"token", "tokens", "secret", "secrets", "credential", "credentials", "password", "passwords",
+	"passwd", "passphrase", "passphrases", "key", "keys", "keyvault",
+	// `kms decrypt` returns plaintext: what it reads is the secret, whatever the verb is called.
+	"decrypt",
+])
+
+/** The last resort before `unknown`: a verb that writes this tool's own login/config state. */
+const CLI_CONFIG_VERBS = new Set(["login", "logout", "activate", "configure"])
+
+/** The words of every positional, split into verb segments (`get-credentials` → get + credentials). */
+function cliVerbSegments(positionalsWritten: string[]): string[] {
+	return positionalsWritten.flatMap((p) => p.toLowerCase().split(/[-:]+/)).filter(Boolean)
+}
+
+/**
+ * Does this command write the tool's OWN configuration or credential store?
+ *
+ * The two named exceptions, and they are exceptions because the words alone say "read" or
+ * "setup" while the act is a write outside the project:
+ *
+ *  · `gcloud container clusters get-credentials prod` / `az aks get-credentials` write
+ *    `~/.kube/config` — the local kubeconfig, which every later `kubectl` reads. Nothing about the cluster is
+ *    read; a `read_system_state` grant must not buy it, and a `read_secret` one must not either, even though
+ *    the noun is `credentials`.
+ *  · `gcloud config set project …` edits `~/.config/gcloud` — the location a `system_config` grant names,
+ *    which is why this is a category and not one more mutation.
+ */
+function cliWritesLocalConfig(segments: string[]): boolean {
+	const kubeconfig = segments.some((w, i) => w === "credentials" && segments[i - 1] === "get")
+	const configWrite = segments.includes("config") && segments.some((w) => w === "set" || w === "unset")
+	return kubeconfig || configWrite
+}
+
+/**
+ * Classify the positionals of a cloud/cluster CLI (see {@link CliVerbClass} for the rules and the reasoning).
+ * The caller decides which ROW each answer becomes, because the object differs per CLI.
+ */
+function cliVerbClass(positionalsWritten: string[]): CliVerbClass {
+	const words = cliVerbSegments(positionalsWritten)
+	if (cliWritesLocalConfig(words)) return "config"
+	if (words.some((w) => CLI_MUTATION_VERBS.has(w))) return "mutation"
+	if (words.some((w) => CLI_SECRET_NOUNS.has(w))) return "secret"
+	if (words.some((w) => CLI_CONFIG_VERBS.has(w))) return "config"
+	if (words.some((w) => CLI_READ_VERBS.has(w))) return "read"
+	return "unknown"
+}
+
+/** What a `config` verb writes, and the object a grant has to name for it. */
+function localConfigRead(v: string, pos: string[]): { object: string; what: string } {
+	const segments = cliVerbSegments(pos)
+	if (segments.some((w, i) => w === "credentials" && segments[i - 1] === "get")) {
+		return { object: "~/.kube/config", what: `${v} ${pos.slice(0, 3).join(" ")} — writes the local kubeconfig` }
+	}
+	return { object: `${v} config`, what: `${v} ${pos.slice(0, 3).join(" ")} — writes the ${v} configuration on this machine` }
+}
 
 /**
  * Object-storage URIs come from `target-grammar.ts` (`isObjectStoreUri`), the module every matcher already
@@ -1593,9 +1724,20 @@ const AWS_NEVER: Array<{ svc: string; re: RegExp; why: string; cat?: string }> =
 	{ svc: "iam", re: /^(delete|create)-(user|access-key|role)|attach-.*policy/, why: "IAM mutation", cat: "privilege_persist" },
 	{ svc: "kms", re: /^schedule-key-deletion\b/, why: "delete KMS key" },
 ]
+/**
+ * The aws global options that take a VALUE, which may stand before the service word
+ * (`aws --endpoint-url URL s3 cp …`). `positionals()` drops the flag and keeps its value, so without this
+ * the value becomes the service and the real op (`s3`) becomes the verb — the shape that turned
+ * `aws --endpoint-url "$EP" s3 cp …` into an unreadable command.
+ */
+const AWS_VALUE_FLAGS = [
+	"--endpoint-url", "--region", "--profile", "--output", "--query", "--cli-input-json", "--cli-input-yaml",
+	"--ca-bundle", "--color", "--cli-read-timeout", "--cli-connect-timeout", "--page-size",
+]
+
 function awsHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 	const raw = rawOf(h.cmd)
-	const pos = positionals(argv)
+	const pos = positionals(stripValueFlags(argv, AWS_VALUE_FLAGS))
 	const svc = pos[0] ?? ""
 	const op = pos[1] ?? ""
 	if (!svc) return objectRead(raw, "aws", "aws — reads the account it is configured for")
@@ -1640,16 +1782,47 @@ function awsHandler(argv: string[], h: HandlerContext): SegmentDecision[] {
 		if (/^(put-object|upload-file|copy-object|upload-part-copy)$/.test(op)) return [seg("ask", "network_send", `aws s3api ${op} ${uri ?? ""}`.trim(), raw, ents)]
 	}
 	for (const n of AWS_NEVER) if (svc === n.svc && n.re.test(op)) return [seg("never", n.cat ?? "cluster_wide_destroy", `aws ${svc} ${op} — ${n.why}`, raw, targetsOf(argv.slice(2), h))]
-	if (AWS_READ_RE.test(op)) {
-		// A read of a cloud API is a read of that service in that account (`aws s3 ls` is a read, and the same
-		// reasoning covers describe/get/list). Object = the service, or the object the call names.
+	// The op is the verb, and aws hyphenates it into one word (`describe-instances`, `get-secret-value`), so the
+	// classifier reads the segments: a read of a service is a read of that service in that account (an
+	// account read), a credential is `read_secret`, and a verb nobody recognises goes to the effect model.
+	const cls = cliVerbClass(pos.slice(1))
+	if (cls === "read" || cls === "secret") {
+		// Same object as before for a read: the store URI when the call names one, else the service.
 		const uri = pos.slice(2).find((p) => isObjectStoreUri(p))
-		return objectRead(raw, uri ?? `aws ${svc}`, `aws ${svc} ${op} — reads ${uri ?? `the ${svc} service`}`)
+		const object = uri ?? `aws ${svc}`
+		// A credential outranks a store: `aws ecr get-login-password` names a registry, but what comes back is a
+		// password. Then a store service answers with stored data, not with a report about the account, so this
+		// leaves it `read_only` (object stores, registries and forges stay plain reads).
+		if (cls === "secret") return [seg("ask", "read_secret", `aws ${svc} ${op} — reads a credential`, raw, [target(object)])]
+		if (DATA_STORE_NOUNS.has(svc)) return objectRead(raw, object, `aws ${svc} ${op} — reads ${uri ?? `data stored in the ${svc} service`}`)
+		return accountRead(raw, object, `aws ${svc} ${op} — reads ${uri ?? `the ${svc} service`}`)
 	}
+	if (cls === "config") {
+		const local = localConfigRead(`aws ${svc}`, pos.slice(1))
+		return [seg("ask", "system_config", local.what, raw, [target(local.object)])]
+	}
+	if (cls === "unknown") return [seg("unknown", "unknown_command", `aws ${svc} ${op}`, raw)]
 	return [seg("ask", "cluster_mutation", `aws ${svc} ${op}`, raw, [target(`${svc}:${op}`), scope(svc)])]
 }
 
-const CLOUD_READ_RE = /^(list|describe|get|show|info|status|whoami|config|regions|zones|versions?|logs?|ls|cat|env|open|releases|domains|projects?|apps?|ps)$/
+/**
+ * The product nouns whose reads return DATA the account keeps rather than a report about the account.
+ *
+ * These stay `read_only` on purpose: a bucket listing, an image in a registry and a value in an
+ * object store are bytes somebody stored and can leak, not the system saying what state it is in, so a
+ * troubleshooting grant must not reach them. `aws s3` has its own branch in {@link awsHandler}; this table is
+ * the same distinction for the CLIs that spell the product as the first word (`az storage`, `wrangler kv:key`,
+ * `doctl registry`, `gcloud artifacts`). The OBJECT stays the CLI, as it was, so an existing row still matches.
+ */
+const DATA_STORE_NOUNS = new Set(["storage", "artifacts", "registry", "acr", "kv", "r2", "d1", "s3", "s3api", "s3control", "ecr", "glacier"])
+
+/** CLIs that are nothing but an object-store client (`gsutil cat gs://…`). */
+const DATA_STORE_CLIENTS = new Set(["gsutil"])
+
+/** Does this read see stored data rather than the account's own state? */
+function readsStoredData(v: string, pos: string[]): boolean {
+	return DATA_STORE_CLIENTS.has(v) || DATA_STORE_NOUNS.has(pos[0] ?? "") || objectUris(pos).length > 0
+}
 
 /**
  * The storage-CLI branches, decided by which end of the transfer the bucket URI sits at.
@@ -1704,18 +1877,37 @@ function cloudHandler(argv: string[], h: HandlerContext, v: string): SegmentDeci
 	const joined = pos.slice(0, 3).join(" ")
 	const storage = objectStorageRows(pos, v, raw)
 	if (storage) return storage
-	if (pos.some((p) => CLOUD_READ_RE.test(p)) && !pos.some((p) => /^(delete|destroy|rm|remove|create|deploy|set|update|scale|restart|stop)$/.test(p))) {
-		// Same ruling as docker/kubectl/aws: reading a cloud account is a read of an object outside the project,
-		// and the object is the CLI's account surface — the thing a user can name in one word.
-		return objectRead(raw, v, `${v} ${joined} — reads the ${v} account/project`)
+	// The verb, not a regex over the whole command line: an unlisted verb used to fall through to
+	// `cluster_mutation`, which made a read unreadable and a read grant unusable.
+	const cls = cliVerbClass(pos)
+	if (cls === "read") {
+		// Reading the account is the status-read family, named by the CLI's account surface — the same
+		// object as before, so a grant the user already gave for `gcloud` still answers it. A read of stored
+		// data (a bucket, a registry) keeps the earlier answer and only its object.
+		if (readsStoredData(v, pos)) return objectRead(raw, v, `${v} ${joined} — reads data stored in the ${v} account`)
+		return accountRead(raw, v, `${v} ${joined} — reads the ${v} account/project`)
 	}
-	if (pos.some((p) => /^(delete|destroy|rm|remove)$/.test(p))) {
-		if (v === "gcloud" && pos.includes("projects") || v === "az" && pos.includes("group")) {
+	if (cls === "secret") {
+		// A credential is the bytes that matter, not the account's state (`gcloud auth print-access-token` was
+		// `cluster_mutation` before this — a read of a token reported as a change to a cluster). The object is
+		// the CLI's credential store, which is what a user says: "you may use the gcloud credentials".
+		return [seg("ask", "read_secret", `${v} ${joined} — reads a credential`, raw, [target(`${v} credentials`)])]
+	}
+	if (cls === "config") {
+		const local = localConfigRead(v, pos)
+		return [seg("ask", "system_config", local.what, raw, [target(local.object)])]
+	}
+	if (cls === "mutation") {
+		// Unchanged, name for name: a removal aimed at the whole project/resource group is the one destruction here.
+		const removes = pos.some((p) => /^(delete|destroy|rm|remove)/.test(p))
+		if (removes && (v === "gcloud" && pos.includes("projects") || v === "az" && pos.includes("group"))) {
 			return [seg("never", "cluster_wide_destroy", `${v} ${joined} — deletes a whole project/resource-group`, raw, targetsOf(argv, h))]
 		}
 		return [seg("ask", "cluster_mutation", `${v} ${joined}`, raw, targetsOf(argv, h))]
 	}
-	return [seg("ask", "cluster_mutation", `${v} ${joined}`, raw, targetsOf(argv, h))]
+	// Nothing here recognised the verb. Say so and let the effect model decide, rather than guessing "mutation"
+	// for what may well be a read (and, in the other direction, rather than calling a change a read).
+	return [seg("unknown", "unknown_command", `${v} ${joined}`, raw)]
 }
 
 // ---------------------------------------------------------------- packages

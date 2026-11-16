@@ -118,7 +118,9 @@ export function kindGroup(category: string): string {
 }
 
 /** The kind groups whose pending action READS a path's bytes. Deliberately just these two: `read_system_state`
- *  is its own group, so a permission over files can never answer a read of a machine. */
+ *  is its own group, so a permission over files can never answer a read of a machine. The
+ *  pair direction (`"read-object-pair"`) does join the two read groups, and the TARGET is what keeps the machine-state rule whole: a
+ *  file is not an object, so the pair is refused there before any value is compared. */
 const PATH_READ_GROUPS: ReadonlySet<string> = new Set(["read_only", "secret-read"])
 
 /** The kind groups a grant must be in to be a WRITE about the thing it names.
@@ -132,11 +134,12 @@ const WRITE_GROUPS: ReadonlySet<string> = new Set(["fs-write", "secret-write"])
 const DELETE_GROUPS: ReadonlySet<string> = new Set(["fs-delete"])
 
 /**
- * The directions in which a stored grant answers an effect it is not filed under.
+ * The directions in which a stored grant answers an effect it is not filed under (write implies read, write implies the
+ * single-file delete, and the read pair below).
  *
- * `"own"` is the old group equality — the row's own segments, unchanged. The other three are the named
- * one-way rules, and the whole point of naming them is that "a row about X answers Y" is a statement
- * somebody made, not an accident of adjacency:
+ * `"own"` is the old group equality — the row's own segments, unchanged. The others are the named rules, and
+ * the whole point of naming them is that "a row about X answers Y" is a statement somebody made, not an
+ * accident of adjacency:
  *
  *  · `"delete-gives-write"` — destroying every byte under a scope already permits putting bytes there
  *    (the reverse is refused: a write grant buys no delete through this direction).
@@ -147,14 +150,35 @@ const DELETE_GROUPS: ReadonlySet<string> = new Set(["fs-delete"])
  *  · `"write-gives-single-delete"` — removing ONE file is part of the same work as editing it
  *    (`rm file`, and `mv`, which is delete+write). Recursive delete, `delete_data` and the granted folder
  *    itself are refused, and refused below in {@link grantAnswersSegment} where the target is known.
+ *  · `"read-object-pair"` — reading a THING and reading that thing's state are one permission when the thing
+ *    is an object rather than a file, in either direction (`read_system_state` ↔ `read_only`). Refused for a
+ *    path target and for a `*` row in {@link grantAnswersSegment}, which is what keeps the machine-state rule whole.
  *
- * Nothing here can be reached from a read row: a permission to look at something buys no change, ever.
+ * Only the read pair can be reached from a read row, and only by another read row: a permission to look at
+ * something still buys no change, ever.
  */
 export type GrantDirection =
 	| "own"
 	| "delete-gives-write"
 	| "write-gives-read"
 	| "write-gives-single-delete"
+	| "read-object-pair"
+
+/**
+ * Is this pending target a FILE on the machine, rather than an object (an account, a service, a cluster, a host,
+ * a bucket, a named thing)?
+ *
+ * One test, in one place, because two decisions ask it: `"read-object-pair"` may only equate the two read
+ * categories about an OBJECT, and the denial text says "this reads {target}" for an object while keeping the file
+ * wording for a path. The rule is the shape a person reads aloud — a leading `/` (absolute), `~` (home) or `.`
+ * (`./x`, `../x`, `.`) — because that is exactly how layer 0 spells a path, and every non-path target (`gcloud`,
+ * `aws ec2`, `prod-cluster`, `localhost/nginx`, `docs.example.com`, `s3://bucket/`) has none of them.
+ * Deliberately not `target-grammar.ts`'s `isExplicitPath`, which is private and serves a different comparison.
+ */
+export function isPathTarget(value: string | undefined): boolean {
+	const v = String(value ?? "").trim()
+	return v.startsWith("/") || v.startsWith("~") || v.startsWith(".")
+}
 
 /** Which direction, if any, lets one stored category segment answer one pending segment. */
 export function grantDirection(grantSegment: string, pendingSegment: string): GrantDirection | undefined {
@@ -162,6 +186,20 @@ export function grantDirection(grantSegment: string, pendingSegment: string): Gr
 	const pending = kindGroup(pendingSegment)
 	if (stored === pending) return "own"
 	if (stored === "fs-delete" && pending === "fs-write") return "delete-gives-write"
+	// The read pair: reading a THING and reading that thing's state are one permission when the thing is not a
+	// file.
+	//
+	// "You may read system state with gcloud" earns a `read_system_state` row on `gcloud`, and layer 0 answers
+	// `gcloud compute instances list` with `read_only` on that same object (the account). Both words are true of
+	// one object and one sentence, and keeping them in separate groups made the stored row unable to apply to
+	// ANYTHING: it was recorded, it showed in `/grants`, and it never answered a call. Which of the two words a
+	// given subcommand gets is a spelling difference about an object, not a difference in authority.
+	//
+	// What keeps this from being a blanket is the TARGET, refused in {@link grantAnswersSegment} where the target
+	// is known: an object is not a path, so `read_system_state` never answers a file read and a file read never
+	// answers a machine read (unchanged).
+	if (stored === "read_system_state" && pending === "read_only") return "read-object-pair"
+	if (stored === "read_only" && pending === "read_system_state") return "read-object-pair"
 	if ((WRITE_GROUPS.has(stored) || DELETE_GROUPS.has(stored)) && PATH_READ_GROUPS.has(pending)) return "write-gives-read"
 	// The single-file delete is one category, not a group: `delete_outside` is that category. `delete_recursive`
 	// and `delete_data` share its group and are exactly what this direction excludes, so they are compared as
@@ -204,11 +242,12 @@ export function sameGrantRoot(value: string, target: string, space?: PathSpace):
  * matcher: each store matches values its own way (the ledger has grammars and wildcards, the session store has
  * scope prefixes), and that difference is about spelling, not about authority.
  *
- * Two refusals belong to the single-file-delete direction and live here because they are about the target
- * rather than the category:
+ * Three refusals live here because they are about the target rather than the category:
  *  · a row that names no object (`*`) authorises no single-file delete — "write anywhere" is not a licence to
  *    remove a file somebody would have to name;
- *  · a write row never removes the folder it was granted over; a descendant is fine, the root is not.
+ *  · a write row never removes the folder it was granted over; a descendant is fine, the root is not;
+ *  · the read pair (`read_system_state` ↔ `read_only`) never answers a PATH, in either direction — a file is not
+ *    an object, which is the machine-state rule stated as a target rule; nor is it answered by a `*` row, which names no object.
  */
 export function grantAnswersSegment(opts: {
 	grant: { category: string; value: string; kind: "entity" | "scope" | string }
@@ -224,6 +263,15 @@ export function grantAnswersSegment(opts: {
 	for (const seg of opts.grant.category.split("+").map((s) => s.trim()).filter(Boolean)) {
 		const direction = grantDirection(seg, opts.pendingSegment)
 		if (!direction) continue
+		// The pair's two refusals, both about the target rather than about the category:
+		//  · a PATH is not an object, so the pair never reaches a file in either direction — that rule is kept;
+		//  · a row that names no object (`*`) speaks for no object, exactly as the `*` rule already reads for a
+		//    delete and for a machine read (`machineReadEntailedBy`). "Read anything" was never a sentence about
+		//    `gcloud`, so such a row neither answers the pair nor is answered by it.
+		if (direction === "read-object-pair") {
+			if (opts.grant.value === NO_OBJECT_TARGET) continue
+			if (isPathTarget(opts.target)) continue
+		}
 		if (direction === "write-gives-single-delete") {
 			if (opts.grant.value === "*") continue
 			// "Never the granted folder itself" is about a FOLDER. A grant on one file is a grant on that file, and
@@ -586,6 +634,12 @@ export function verifyGrant(opts: {
 	// model's answer to "what does this sentence authorise", so a sentence that authorised only deleting does
 	// not authorise copying the remains out. The ledger applies it for a different reason — a delete grant over
 	// a folder really does contain writing inside it — and neither reading is the other's consequence.
+	//
+	// `read-object-pair` is NOT applied here either, and for the same shape of reason: this check runs over an
+	// effect list, which carries no target, and the pair is a statement about an OBJECT. Applied target-free, a
+	// sentence whose effects say "reads files" would authorise reading a machine (and the reverse) with nothing to
+	// compare, which is the widening the machine-state rule forbids. The stores still apply the pair, because they hold a value and a
+	// pending target; the effect list holds neither.
 	const segments = category.split("+").filter((s) => norm(s))
 	const rawEffects = Array.isArray(extraction.effects) ? extraction.effects : []
 	const effects = rawEffects.filter((e) => typeof e === "string" && norm(e))
@@ -593,7 +647,7 @@ export function verifyGrant(opts: {
 	const directionsFor = (seg: string): GrantDirection[] =>
 		effects
 			.map((e) => categoryDirection(e, seg))
-			.filter((d): d is GrantDirection => d !== undefined && d !== "delete-gives-write")
+			.filter((d): d is GrantDirection => d !== undefined && d !== "delete-gives-write" && d !== "read-object-pair")
 	const uncovered = segments.filter((seg) => directionsFor(seg).length === 0)
 	if (uncovered.length > 0) {
 		return no(`quote does not authorise ${uncovered.join(", ")} (effects: ${effects.join(", ")})`)

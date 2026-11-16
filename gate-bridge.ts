@@ -36,7 +36,7 @@ import {
 	type Ledger,
 	type LedgerEntry,
 } from "./auth-ledger.ts"
-import { canonicalPath, entityMatchesTarget, targetNamedByUser } from "./grant-verify.ts"
+import { canonicalPath, entityMatchesTarget, isPathTarget, targetNamedByUser } from "./grant-verify.ts"
 import { coversByGrammar, isProtectedBranch } from "./target-grammar.ts"
 import type { GrantStore } from "./session-grants.ts"
 import { DENIAL_LIMITS } from "./denial-tracking.ts"
@@ -855,6 +855,29 @@ export function nearMissLever(category: string | undefined, targets: string[]): 
 }
 
 /**
+ * The read refusals an OBJECT target gets, instead of the file wording in {@link DENIAL_GUIDANCE}.
+ *
+ * A `read_only`/`read_system_state` refusal says "this reads outside the project (…)" because that is the only
+ * reason a file read is ever refused. A read whose target is an account, a cluster or a host is refused for a
+ * different reason and was being told the wrong one: `gcloud compute instances list` was refused as reading
+ * "outside the project", which is not a place. The object wording names what is actually unpermitted, and the
+ * fix names the one thing that can change it — the user's words. Which target is which is
+ * `grant-verify.ts`'s `isPathTarget`, the same test the read-pair rule uses, so a read can never be explained
+ * as one shape and matched as the other.
+ */
+const OBJECT_READ_GUIDANCE: { mechanism: string; fix: string } = {
+	mechanism: "this reads {target} and nothing the user said permits it",
+	fix: "rewriting will not help — reading {target} needs permission. Carry on with what you have; if you truly need it, name the exact target so the user can permit reading {target}.",
+}
+
+/** The object wording for a read of something that is not a file, or `undefined` to keep the table's own text. */
+function objectReadGuidance(key: string, target: string | undefined): { mechanism: string; fix: string } | undefined {
+	if (key !== "read_only" && key !== "read_system_state") return undefined
+	if (!target) return undefined
+	return isPathTarget(target) ? undefined : OBJECT_READ_GUIDANCE
+}
+
+/**
  * One line, fixed order — decider, then category, then the target as layer 0 rendered it — because
  * those three answer the three different questions a denial used to leave open: which lever moves,
  * what kind of action this is, and which object it is about.
@@ -913,8 +936,7 @@ const DENIAL_GUIDANCE: Record<string, { mechanism: string; fix: string }> = {
 	read_system_state: {
 		mechanism: "this reads machine state ({target}) that nothing the user said permits",
 		fix: "rewriting will not help — reading this needs permission. Carry on with what you have; if you truly need it, name the exact target so the user can permit it.",
-	},
-	read_secret: {
+	},	read_secret: {
 		mechanism: "this reads a secret-bearing path ({target})",
 		fix: "Never print the contents. If one value is needed, have the user supply that value, or move it somewhere not secret-bearing. For durable access the user can add a rule naming the exact path, e.g. Read({target}) - a folder glob will not reach a secret, by design.",
 	},
@@ -1363,7 +1385,9 @@ export function buildPreciseDenial(opts: {
 		// Keying guidance on the category alone printed "brace grouping, complex quoting" for a parameter
 		// expansion, which sent the agent to rewrite a command that had no brace in it.
 		const construct = key === "unproven_structure" ? reportedConstruct(s.description ?? s.command) : undefined
-		const g = construct ? structureGuidance(construct) : DENIAL_GUIDANCE[key] ?? FALLBACK_GUIDANCE
+		const g =
+			construct ? structureGuidance(construct)
+			: objectReadGuidance(key, s.targets[0]) ?? DENIAL_GUIDANCE[key] ?? FALLBACK_GUIDANCE
 		const target = s.targets[0] ?? "the named path"
 		lines.push(`DENIED: ${s.command} — ${g.mechanism.replace(/\{target\}/g, target)} [${key}]`)
 		lines.push(`FIX: ${g.fix.replace(/\{target\}/g, target)}`)

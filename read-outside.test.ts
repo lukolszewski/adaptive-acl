@@ -195,7 +195,7 @@ describe("every non-file read asks and names a stable object", () => {
 		{ command: "docker compose ps", category: "read_system_state", object: "localhost", grant: "localhost", grantCategory: "container_mutation" },
 		{ command: "kubectl get pods", category: "read_system_state", object: "kubectl", grant: "kubectl", grantCategory: "cluster_mutation" },
 		{ command: "kubectl --context prod get pods", category: "read_system_state", object: "prod", grant: "prod", grantCategory: "cluster_mutation" },
-		{ command: "helm list", category: "read_only", object: "helm", grant: "helm", grantCategory: "cluster_mutation" },
+		{ command: "helm list", category: "read_system_state", object: "helm", grant: "helm", grantCategory: "cluster_mutation" },
 		{ command: "terraform plan", category: "read_only", object: "terraform", grant: "terraform", grantCategory: "cluster_mutation" },
 		{ command: "systemctl status nginx", category: "read_system_state", object: "localhost/nginx", grant: "localhost", grantCategory: "system_config" },
 		{ command: "journalctl -u nginx -n 20", category: "read_system_state", object: "localhost/nginx", grant: "localhost", grantCategory: "system_config" },
@@ -236,6 +236,17 @@ describe("every non-file read asks and names a stable object", () => {
 	it("a read of one host is not a read of another", async () => {
 		const r = await gate("curl -s https://other.example.com/x", { ledger: ledgerWith([{ category: "network_send", value: "api.example.com" }]) })
 		expect(r.outcome).toBe("prompt")
+	})
+
+	it("the OTHER read category answers every row of this table, because the object is the same object", async () => {
+		// `read_system_state` and `read_only` are one permission about one OBJECT. Which word layer 0 picks for
+		// a given subcommand of a CLI is a spelling difference (the machine-state split moved only that half), so a
+		// row from the user's sentence has to answer both — every row of the table, not a sample of it.
+		for (const family of FAMILIES) {
+			const other = family.category === "read_only" ? "read_system_state" : "read_only"
+			const r = await gate(family.command, { ledger: ledgerWith([{ category: other, value: family.grant }]) })
+			expect(r.outcome, `${family.command} under a ${other} row on ${family.grant}`).toBe("allow-granted")
+		}
 	})
 })
 
