@@ -20,6 +20,7 @@ import {
 	permissionRuleValueToString,
 	type PermissionRuleValue,
 } from "./permission-rule-parser.ts"
+import { SLOT_MARKER } from "./bash-rule-argv.ts"
 import type { PermissionRule } from "./permissions.ts"
 
 /** Interpreters and runners present on every platform we support. */
@@ -166,7 +167,30 @@ export function isDangerousBashPermission(
 	if (ruleContent === undefined || ruleContent.length === 0) return true
 
 	const rule = ruleContent.trim().toLowerCase()
-	return rule === "*" || namesAListedProgram(rule) || flagsAreWhitelisted(rule)
+	if (rule === "*" || namesAListedProgram(rule) || flagsAreWhitelisted(rule)) return true
+
+	// ── A rule with a slot (`$…`)
+	//
+	// `$…` is one word decided at run time, written into the specifier: an "Allow always" that the probe
+	// vouched for (`bash-permission-match.ts`). It is never tool-wide — it has a specifier — and never a
+	// blind tail of its own, because a tail is a star and a marker is not one. So nothing here may strip a
+	// rule FOR the marker.
+	//
+	// What can still be blind is what surrounds it. `Bash(git $…)` names every one-word `git` invocation,
+	// which is the all-arguments grant this function hunts; `Bash(git * $…)` writes the tail out as a star.
+	// Both are caught by asking the same two questions again with the markers taken out — the rule with its
+	// unknown words removed — so a rule that is blind without its slot stays blind with it.
+	const withoutSlots = rule
+		.split(SLOT_MARKER)
+		.map((part) => part.trim())
+		.filter((part) => part.length > 0)
+		.join(" ")
+	if (withoutSlots !== rule) {
+		if (withoutSlots === "" || withoutSlots === "*") return true
+		if (namesAListedProgram(withoutSlots) || flagsAreWhitelisted(withoutSlots)) return true
+	}
+
+	return false
 }
 
 /** Same question, asked from the classifier's point of view. */

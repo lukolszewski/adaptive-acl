@@ -88,6 +88,23 @@
  * An "Allow always" click never writes a glob (see `suggestBashAllowRuleSet`, which writes an exact rule
  * for destructive verbs), so the residual breadth of `:*` rules is the user's, not the click's.
  *
+ * ## A specifier with a slot (`$…`)
+ *
+ * A command whose argument is only known at run time (`grep -n "$P" src/`, `echo "exit ${PIPESTATUS[0]}"`)
+ * reaches the matcher as argv plus the slots the template parse found (`bash-ast.ts` `parseBashTemplate`).
+ * No rule naming a literal word can describe it, because the value is not in the text. An "Allow always"
+ * whose values the probe (`slot-probe.ts`) says are inert is therefore written with `$…` where a value goes:
+ * `Bash(grep -n $… src/)`, `Bash(echo "exit $…")`. Read here as:
+ *
+ *   - **one** run-time value in exactly that position — never a literal word, never any number of words;
+ *   - an exact specifier only. `:*` and globs name a SET of argvs and cannot say where inside one of them
+ *     the value sits, so they never cover a slot (and the writer never produces them for one);
+ *   - conditional on the caller's re-probe (`coverage.slotAllowed`), so a hand-written slot rule — and one
+ *     written before a policy change — is judged by today's tables. Without that answer it covers nothing.
+ *
+ * The literal text around the marker is compared exactly, which is what keeps a slot rule from covering a
+ * different command with a value in it: `Bash(grep -n $… src/)` does not reach `grep -n foo other/`.
+ *
  * ## What this module deliberately does NOT do
  *
  * - **No stripping.** No wrapper (`nohup`, `timeout 5`), no redirection, no `NAME=value` prefix is
@@ -102,19 +119,34 @@
  *   (`dangerous-permissions.ts`) — but a prefix specifier already covers arbitrary trailing words by
  *   construction, so honouring the reading there adds nothing the rule did not say. An exact specifier is
  *   one invocation, and `xargs` changes it ({@link throughXargs}).
- * - **No judgement about argv.** A token the walker could only give as a placeholder
- *   (`__CMDSUB_OUTPUT__`, `__TRACKED_VAR__`) is matched like any other word. Whether a rule may wave
- *   through a value decided at run time is the caller's decision — it has `AstCommand.opaque` — and
- *   today's answer (yes, for a single segment) is pinned in `compound-allow-and.test.ts`.
+ * - **No judgement about the value behind a placeholder by itself.** A token the walker could only give as a
+ *   placeholder (`__CMDSUB_OUTPUT__`, `__TRACKED_VAR__`) is matched like any other word when the caller
+ *   passes no `coverage.slots` — today's reading, pinned in `compound-allow-and.test.ts`. Which value may be
+ *   waved through is the caller's decision, and the caller is the only side that can re-run the probe
+ *   (`coverage.slotAllowed`); a caller that passes slots but no answer for them covers nothing.
  * - **No deny/ask.** Those stay textual in `permissions.ts`, on purpose: a deny has to fire even when
  *   the walker refuses to vouch for the construct, which is the one case where argv does not exist.
  */
 
-import { matchWildcardPattern, parsePermissionRule } from "./shell-rule-matching.ts"
+import { matchWildcardPattern, parsePermissionRule, type ShellPermissionRule } from "./shell-rule-matching.ts"
 import type { PermissionRule } from "./permissions.ts"
+import { CMDSUB_PLACEHOLDER, TRACKED_VAR_PLACEHOLDER, type Slot } from "./bash-ast.ts"
 
 /** The tool name these rules are written under — `permissions.ts` maps pi's `bash` onto it. */
 const BASH_TOOL = "Bash"
+
+/**
+ * The marker a specifier writes where the leg has a run-time value: `$…`.
+ *
+ * It describes **one** value in **that** position and never a literal word — it is not a glob, and nothing
+ * here reads it as one (see the section "A specifier with a slot" in the header). `bash-permission-match.ts`
+ * writes it when an "Allow always" describes a command whose value is inert, and `permissions.ts` refuses to
+ * honour such a rule unless the probe still says so at match time.
+ */
+export const SLOT_MARKER = "$…"
+
+/** The walker's two placeholder spellings: a slot's argv word carries one of these (§5.10, §6). */
+const PLACEHOLDERS: readonly string[] = [TRACKED_VAR_PLACEHOLDER, CMDSUB_PLACEHOLDER]
 
 /**
  * Outside quotes these characters mean "shell structure", not "an argument" — a separator, a subshell
@@ -127,6 +159,17 @@ const BASH_TOOL = "Bash"
  * the text mean more than one argument list still ends the read.
  */
 const STRUCTURE_CHARS = ";|&()$`"
+
+/** One stretch of a word: literal text, or the marker standing for a run-time value. */
+export type WordPiece = { text: string } | { slot: true; quoted: boolean }
+
+function isLiteral(piece: WordPiece): piece is { text: string } {
+	return "text" in piece
+}
+
+function joinPieces(pieces: readonly WordPiece[]): string {
+	return pieces.map((piece) => (isLiteral(piece) ? piece.text : "")).join("")
+}
 
 /** Line breaks: inside quotes they are ordinary data, outside them they end the command. */
 function isLineBreak(ch: string): boolean {
@@ -150,22 +193,43 @@ function takeSingleQuoted(text: string, from: number): { word: string; next: num
  * shell would expand: the value behind `$` or a backtick is a run-time fact, and this module never
  * pretends to know it.
  */
-function takeDoubleQuoted(text: string, from: number): { word: string; next: number } | null {
-	let word = ""
+function takeDoubleQuoted(
+	text: string,
+	from: number,
+	markers: boolean,
+): { pieces: WordPiece[]; next: number } | null {
+	const pieces: WordPiece[] = []
+	let run = ""
+	const flush = () => {
+		if (run !== "") {
+			pieces.push({ text: run })
+			run = ""
+		}
+	}
 	let at = from + 1
 	for (;;) {
+		// The marker is the only `$` this reader understands, and only when the caller asked for markers.
+		if (markers && text.startsWith(SLOT_MARKER, at)) {
+			flush()
+			pieces.push({ slot: true, quoted: true })
+			at += SLOT_MARKER.length
+			continue
+		}
 		const ch = text[at] ?? ""
-		if (ch === '"') return { word, next: at + 1 }
+		if (ch === '"') {
+			flush()
+			return { pieces, next: at + 1 }
+		}
 		if (ch === "") return null
 		if (ch === "\\") {
 			const escaped = text[at + 1] ?? ""
 			if (escaped === "" || isLineBreak(escaped)) return null
-			word += escaped
+			run += escaped
 			at += 2
 			continue
 		}
 		if (ch === "$" || ch === "`") return null
-		word += ch
+		run += ch
 		at++
 	}
 }
@@ -180,36 +244,67 @@ function takeDoubleQuoted(text: string, from: number): { word: string; next: num
  * `echo "a>b"` and `echo a\>b` are one argument whose text happens to be `a>b`, which is the whole
  * difference between a rule that names a file and a rule that names a word shaped like a redirect.
  */
-function takeWordRun(text: string, from: number): { word: string; next: number } | null {
-	let word = ""
+function takeWordRun(
+	text: string,
+	from: number,
+	markers: boolean,
+): { pieces: WordPiece[]; next: number } | null {
+	const pieces: WordPiece[] = []
+	let run = ""
+	// A quote or an escape passed through here even when it held nothing: `-m ""` is one argument.
+	let seen = false
+	const flush = () => {
+		if (run !== "") {
+			pieces.push({ text: run })
+			run = ""
+		}
+	}
+	const emit = (next: number) => {
+		flush()
+		if (pieces.length === 0 && seen) pieces.push({ text: "" })
+		return { pieces, next }
+	}
 	let at = from
 	for (;;) {
 		const ch = text[at] ?? ""
-		if (ch === "" || isWordGap(ch)) return { word, next: at }
-		if (ch === "<" || ch === ">") return { word, next: at }
+		if (ch === "" || isWordGap(ch)) return emit(at)
+		if (ch === "<" || ch === ">") return emit(at)
+		// Ahead of the structure test: `$` ends a word everywhere else, and the marker is exactly `$…`.
+		// Inside single quotes it stays literal text, which is why that branch never asks for markers.
+		if (markers && text.startsWith(SLOT_MARKER, at)) {
+			flush()
+			pieces.push({ slot: true, quoted: false })
+			seen = true
+			at += SLOT_MARKER.length
+			continue
+		}
 		if (isLineBreak(ch) || STRUCTURE_CHARS.includes(ch)) return null
 		if (ch === "'") {
-			const run = takeSingleQuoted(text, at)
-			if (!run) return null
-			word += run.word
-			at = run.next
+			const quote = takeSingleQuoted(text, at)
+			if (!quote) return null
+			run += quote.word
+			seen = true
+			at = quote.next
 			continue
 		}
 		if (ch === '"') {
-			const run = takeDoubleQuoted(text, at)
-			if (!run) return null
-			word += run.word
-			at = run.next
+			const quote = takeDoubleQuoted(text, at, markers)
+			if (!quote) return null
+			flush()
+			pieces.push(...quote.pieces)
+			seen = true
+			at = quote.next
 			continue
 		}
 		if (ch === "\\") {
 			const escaped = text[at + 1] ?? ""
 			if (escaped === "" || isLineBreak(escaped)) return null
-			word += escaped
+			run += escaped
+			seen = true
 			at += 2
 			continue
 		}
-		word += ch
+		run += ch
 		at++
 	}
 }
@@ -286,7 +381,7 @@ function sameTargets(named: readonly RedirectTarget[], called: readonly Redirect
 }
 
 /** A token read out of a specifier: an argument word, or a bare redirect operator in front of its target. */
-type SpecToken = { word: string } | { operator: string }
+type SpecToken = { word: WordPiece[] } | { operator: string }
 
 /**
  * The redirect operator starting at `at`, descriptor and all (`2>`), or null when the text there is not
@@ -315,7 +410,7 @@ function splitOperatorToken(token: string): { op: string; fd?: number } | null {
  * `null` means "this specifier is not an argument list": unbalanced quoting, a line break outside
  * quotes, or shell structure that has no reading as one command (`&&`, a pipe, `$`, a subshell).
  */
-function splitTokens(specifier: string): SpecToken[] | null {
+function splitTokens(specifier: string, markers: boolean): SpecToken[] | null {
 	const tokens: SpecToken[] = []
 	let at = 0
 	for (;;) {
@@ -327,13 +422,35 @@ function splitTokens(specifier: string): SpecToken[] | null {
 			at = operator.next
 			continue
 		}
-		const run = takeWordRun(specifier, at)
+		const run = takeWordRun(specifier, at, markers)
 		if (!run) return null
-		// A word exists once a quote or an escape has been seen, even when it holds nothing:
-		// `-m ""` passes an empty argument, and dropping it here would authorise `-m` alone.
-		tokens.push({ word: run.word })
+		tokens.push({ word: run.pieces })
 		at = run.next
 	}
+}
+
+/** A specifier read as words of pieces plus its redirect clauses, or null when it is not an argument list. */
+type TokenRead = { words: WordPiece[][]; targets: RedirectTarget[] }
+
+function readTokens(specifier: string, markers: boolean): TokenRead | null {
+	const tokens = splitTokens(specifier, markers)
+	if (tokens === null) return null
+	const words: WordPiece[][] = []
+	const targets: RedirectTarget[] = []
+	for (let at = 0; at < tokens.length; at++) {
+		const token = tokens[at]!
+		if ("word" in token) {
+			words.push(token.word)
+			continue
+		}
+		const named = tokens[at + 1]
+		if (named === undefined || !("word" in named)) return null
+		const operator = splitOperatorToken(token.operator)
+		if (operator === null) return null
+		targets.push(canonicalRedirectTarget({ ...operator, target: joinPieces(named.word) }))
+		at++
+	}
+	return { words, targets }
 }
 
 /** What a specifier names: the words it runs, and the files it redirects into or out of. */
@@ -354,24 +471,9 @@ export type RuleSpecifier = { words: string[]; targets: RedirectTarget[] }
  * another operator behind it) names no file, which is a specifier this module will not read at all.
  */
 function readSpecifier(specifier: string): RuleSpecifier | null {
-	const tokens = splitTokens(specifier)
-	if (tokens === null) return null
-	const words: string[] = []
-	const targets: RedirectTarget[] = []
-	for (let at = 0; at < tokens.length; at++) {
-		const token = tokens[at]!
-		if ("word" in token) {
-			words.push(token.word)
-			continue
-		}
-		const named = tokens[at + 1]
-		if (named === undefined || !("word" in named)) return null
-		const operator = splitOperatorToken(token.operator)
-		if (operator === null) return null
-		targets.push(canonicalRedirectTarget({ ...operator, target: named.word }))
-		at++
-	}
-	return { words, targets }
+	const read = readTokens(specifier, false)
+	if (read === null) return null
+	return { words: read.words.map(joinPieces), targets: read.targets }
 }
 
 /**
@@ -515,6 +617,144 @@ export type ArgvCoverage = {
 	 * rule itself names never needs it.
 	 */
 	targetAllowed?: (target: RedirectTarget) => boolean
+	/**
+	 * The leg's run-time values, from the template parse (`bash-ast.ts` `parseBashTemplate`). Non-empty means
+	 * the leg's argv carries placeholders, and only a specifier that spells those values with `$…` may cover
+	 * it — a rule naming a literal word covers nothing here, exactly as before.
+	 */
+	slots?: readonly Slot[]
+	/**
+	 * The caller's re-check of condition 4 for a slot specifier: does the probe still say this leg's values
+	 * are inert (now, with today's policy)? Omitted is the fail-closed reading — this module sees argv and
+	 * slots, never the command text a probe needs — so a slot specifier covers nothing without it.
+	 */
+	slotAllowed?: () => boolean
+}
+
+// ------------------------------------------------------------------ a specifier with a slot
+
+/**
+ * One word of a leg, cut into literal text and the run-time values it holds — or null when the word carries
+ * a placeholder that no slot accounts for, which means nothing can say what that word will be.
+ *
+ * `slots` are the slots of THIS word, in the order the walker emitted them. Exported because the writer
+ * (`bash-permission-match.ts`) spells a rule out of the same reading: it must find the placeholders exactly
+ * where this module will look for them, or the rule it writes matches nothing.
+ */
+export function wordPieces(word: string, slots: readonly Slot[]): WordPiece[] | null {
+	const pieces: WordPiece[] = []
+	let at = 0
+	let used = 0
+	for (;;) {
+		const found = nextPlaceholder(word, at)
+		if (found === null) break
+		const slot = slots[used]
+		if (slot === undefined) return null
+		if (found.at > at) pieces.push({ text: word.slice(at, found.at) })
+		pieces.push({ slot: true, quoted: slot.quoted })
+		at = found.at + found.length
+		used++
+	}
+	if (used < slots.length) return null
+	if (at < word.length || pieces.length === 0) pieces.push({ text: word.slice(at) })
+	return pieces
+}
+
+/** Where the next placeholder sits in `word`, and how long it is (the two spellings differ). */
+function nextPlaceholder(word: string, from: number): { at: number; length: number } | null {
+	let best: { at: number; length: number } | null = null
+	for (const placeholder of PLACEHOLDERS) {
+		const at = word.indexOf(placeholder, from)
+		if (at < 0) continue
+		if (best === null || at < best.at) best = { at, length: placeholder.length }
+	}
+	return best
+}
+
+/** The argv words of a leg with its run-time values turned into markers — null when one is unaccounted for. */
+function legWords(argv: readonly string[], slots: readonly Slot[]): WordPiece[][] | null {
+	const perWord = new Map<number, Slot[]>()
+	for (const slot of slots) {
+		if (slot.argIndex < 0 || slot.argIndex >= argv.length) return null
+		const list = perWord.get(slot.argIndex) ?? []
+		list.push(slot)
+		perWord.set(slot.argIndex, list)
+	}
+	const words: WordPiece[][] = []
+	for (let at = 0; at < argv.length; at++) {
+		const pieces = wordPieces(argv[at]!, perWord.get(at) ?? [])
+		if (pieces === null) return null
+		words.push(pieces)
+	}
+	return words
+}
+
+/** Is there a `$…` anywhere in what the specifier names? A rule without one can never cover a slot. */
+function hasMarker(words: readonly WordPiece[][]): boolean {
+	return words.some((word) => word.some((piece) => !isLiteral(piece)))
+}
+
+/** Literal runs have to be the same text; a marker covers a marker in the same place inside the word. */
+function piecesName(named: readonly WordPiece[], called: readonly WordPiece[]): boolean {
+	if (named.length !== called.length) return false
+	for (let at = 0; at < named.length; at++) {
+		const mine = named[at]!
+		const theirs = called[at]!
+		if (isLiteral(mine) || isLiteral(theirs)) {
+			// A literal never matches a marker, and vice versa: that is the whole "never a glob" rule.
+			if (!isLiteral(mine) || !isLiteral(theirs) || mine.text !== theirs.text) return false
+			continue
+		}
+		// A marker written inside quotes (`"…$…"`) says the value is used as one word, so it only covers a
+		// quoted slot. The bare `$…` is what an "Allow always" writes — the walker has already resolved the
+		// quoting away — and stands for either, which widens nothing: an unquoted slot outside `echo`/`printf`
+		// is refused by the probe, so no rule reaches that case.
+		if (mine.quoted && !theirs.quoted) return false
+	}
+	return true
+}
+
+function wordsName(named: readonly WordPiece[][], called: readonly WordPiece[][]): boolean {
+	if (named.length !== called.length) return false
+	for (let at = 0; at < named.length; at++) {
+		if (!piecesName(named[at]!, called[at]!)) return false
+	}
+	return true
+}
+
+/**
+ * Does a specifier that spells run-time values cover this leg?
+ *
+ * Four conditions, all of which have to hold:
+ *
+ *   1. every literal run matches exactly and in order — the words AROUND the values are the rule's;
+ *   2. each `$…` sits where the leg has a slot, in the same place inside the word;
+ *   3. the leg has no other run-time value (`legWords` answers null for a placeholder with no slot);
+ *   4. `coverage.slotAllowed` — the caller re-runs the probe for the leg NOW, so a hand-written rule and a
+ *      rule written before a policy change are judged by today's tables rather than by the ones that
+ *      produced them.
+ *
+ * The redirect clause keeps the truth table it has everywhere else: a specifier that names a file is
+ * compared by equality, and one that names none may ride on the caller's answer for the target.
+ */
+function slotSpecifierCovers(
+	shape: ShellPermissionRule,
+	argv: string[],
+	slots: readonly Slot[],
+	targets: readonly RedirectTarget[],
+	coverage: ArgvCoverage,
+): boolean {
+	// A slot rule describes ONE invocation with one word unknown, so it is always an exact specifier: a `:*`
+	// prefix or a glob names a set of argvs and has no place to say where inside them the value sits.
+	if (shape.type !== "exact") return false
+	const named = readTokens(shape.command, true)
+	if (named === null || !hasMarker(named.words)) return false
+	if (coverage.slotAllowed === undefined || !coverage.slotAllowed()) return false
+	const called = legWords(argv, slots)
+	if (called === null) return false
+	if (named.targets.length > 0) return sameTargets(named.targets, targets) && wordsName(named.words, called)
+	if (!targetsAreAllowed(targets, coverage)) return false
+	return wordsName(named.words, called)
 }
 
 /**
@@ -547,6 +787,18 @@ export function bashRuleCoversArgv(
 ): boolean {
 	if (rule.ruleValue.toolName !== BASH_TOOL) return false
 	if (argv.length === 0) return false
+
+	// A leg with run-time values is covered by a specifier that spells them (`$…`) and by nothing else — the
+	// tool-wide rule included, which names no value either. That is today's answer for an opaque leg (the
+	// caller's spelling list is what refused to ask), kept as one rule here: a rule without a marker covers
+	// no slot.
+	const slots = coverage.slots ?? []
+	if (slots.length > 0) {
+		const written = specifierOf(rule)
+		if (written === null) return false
+		const namedTargets = (coverage.targets ?? []).map(canonicalRedirectTarget)
+		return slotSpecifierCovers(parsePermissionRule(written), argv, slots, namedTargets, coverage)
+	}
 
 	// A rule with no specifier — `Bash`, `Bash()`, and `Bash(*)` via the parser's tool-wide spelling — is
 	// a blanket bash allow. That is not a hole opened here: entering auto mode strips exactly these rules

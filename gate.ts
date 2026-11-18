@@ -53,6 +53,16 @@ export type GateOutcome =
 	| "allow-granted"    // run it, authorised by transcript or session grant
 	| "prompt"           // needs the user (ASK, not authorised)
 	| "prompt-never"     // needs the user, loud warning, not pre-authorisable
+/** One filled-in run-time value: the expansion as written (`$F`, `$(git rev-parse HEAD)`) and what it held. */
+export type ResolvedValueInfo = { source: string; value: string }
+
+/**
+ * What the layer-2 resolver decided about a command: the concrete command to judge instead, or the
+ * reason it stays a template. The shape is `ResolveResult` from `value-resolve.ts`; declared here so the
+ * gate owns no dependency on the resolver's internals.
+ */
+export type ResolveOutcome = { concrete: string; values: ResolvedValueInfo[] } | { unresolved: string }
+
 export type GateResult = {
 	outcome: GateOutcome
 	tier: "allow" | "ask" | "never"
@@ -66,6 +76,9 @@ export type GateResult = {
 	/** The command could not be parsed; the caller should ask the model to
 	 *  fix/simplify and retry rather than prompt the user. */
 	unparseable?: boolean
+	/** This verdict is about a command whose run-time values were filled in: the concrete command the
+	 *  user would have to approve, and the values that were used. Absent when nothing was resolved. */
+	resolved?: { concrete: string; values: ResolvedValueInfo[] }
 	policy: PolicyDecision
 	modelCalls: Array<{ task: "grant" | "effect"; ms: number; ok: boolean; error?: string; raw?: string }>
 }
@@ -80,6 +93,12 @@ export type GateOptions = {
 	userMessages?: string[]
 	signal?: AbortSignal
 	debug?: (line: string) => void
+	/**
+	 * Layer 2 (plan-runtime-values.md): fill in the run-time values of a bash command that layer 0 will
+	 * not allow, so the verdict is about the command that will run. Injected because it needs a runner;
+	 * the resolver owns what may be executed, this module only uses the answer. Absent = today's path.
+	 */
+	resolve?: (command: string) => Promise<ResolveOutcome>
 }
 
 // Recent-window fallback only — long-range authorisation lives in the ledger,
@@ -164,10 +183,51 @@ export function resetClassifierStats(): void {
 	classifierStats.grantFailed = 0
 }
 
+/**
+ * The gate for one tool call. Layer 2 runs first and only where it can change the answer: a bash command
+ * that layer 0 does not rate allow, whose run-time values the resolver could fill in. The concrete
+ * command then goes through the whole pipeline below — layer 0, grants, ledger, transcript, effect model
+ * — exactly like a command the user typed, and the verdict carries `resolved` so the prompt can show
+ * `$F = src/a.ts`. When the resolver declines, nothing above changed: today's path, today's verdict.
+ *
+ * Rules for the ORIGINAL and the RESOLVED spelling both being checked live in `index.ts` (the rule files
+ * are read there, not here), so this module only has to expose `resolved`.
+ */
 export async function runGate(tool: string, input: Record<string, unknown>, opts: GateOptions): Promise<GateResult> {
+	const policy = evaluateToolCall(tool, input, opts.policy)
+	// `never` stays never: a catastrophic verdict on the text is not reopened by a value the shell may compute
+	// differently when it runs (the resolver judges its own run of a substitution, not the shell's).
+	if (!opts.resolve || tool !== "bash" || policy.tier === "allow" || policy.tier === "never") {
+		return gateWithPolicy(tool, input, opts, policy)
+	}
+	const command = String(input.command ?? "")
+	let outcome: ResolveOutcome
+	try {
+		outcome = await opts.resolve(command)
+	} catch (err) {
+		outcome = { unresolved: `resolver failed (${String(err).slice(0, 80)})` }
+	}
+	if (!("concrete" in outcome) || outcome.concrete.trim() === "") {
+		const why = "unresolved" in outcome ? outcome.unresolved : "no concrete command"
+		opts.debug?.(`[gate] resolve: ${why} — judging the command as written`)
+		return gateWithPolicy(tool, input, opts, policy)
+	}
+	opts.debug?.(`[gate] resolved to: ${outcome.concrete.slice(0, 160)}`)
+	// The concrete command is judged on its own, with no resolver: it holds no run-time value, and a
+	// resolve that produced another template would be a loop.
+	const judged = await gateWithPolicy(tool, { ...input, command: outcome.concrete }, { ...opts, resolve: undefined })
+	return { ...judged, resolved: { concrete: outcome.concrete, values: outcome.values } }
+}
+
+async function gateWithPolicy(
+	tool: string,
+	input: Record<string, unknown>,
+	opts: GateOptions,
+	prePolicy?: PolicyDecision,
+): Promise<GateResult> {
 	const modelCalls: GateResult["modelCalls"] = []
 	const dbg = opts.debug ?? (() => {})
-	let policy = evaluateToolCall(tool, input, opts.policy)
+	let policy = prePolicy ?? evaluateToolCall(tool, input, opts.policy)
 	// The project root layer 0 actually used. Every grant match below resolves `./x` entities against it,
 	// so using anything else (a discovered git root, the shell cwd) silently mis-resolves them and every
 	// in-project grant misses — see `canonicalPath`.

@@ -151,7 +151,10 @@ import {
   resetClassifierStats,
   runGate,
   type GateResult,
+  type ResolveOutcome,
 } from "./gate.ts";
+import { execFile } from "node:child_process";
+import { resolveCommand } from "./value-resolve.ts";
 import {
   addGrant,
   createGrantStore,
@@ -1015,6 +1018,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
           userMessages,
           signal: ctx.signal,
           debug: debugOn ? (l) => console.debug("[adaptive-acl]", l) : undefined,
+          resolve: (command) => resolveForCall(ctx.cwd, command),
         });
       } catch (err) {
         return promptAutoTier3(
@@ -1102,7 +1106,10 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
      *  `undetermined` rather than guessing. */
     known?: GateDenialKnowledge,
   ): Promise<Block | undefined> {
-    const label = gatePromptLabel(r);
+    // A resolved command is shown with the values that were filled in, so the person approves what will run.
+    const label = r.resolved
+      ? `${gatePromptLabel(r)}\n  with ${r.resolved.values.map((v) => `${v.source} = ${v.value}`).join(", ")}`
+      : gatePromptLabel(r);
     // Who refused, as far as this call site can actually say: `known` is what the caller observed
     // (endpoint, transcript size, which ledger the gate consulted), and a call site that has none of it
     // gets `undetermined` rather than a guess. `blockedByHuman` belongs to the Block path alone — a
@@ -1729,19 +1736,98 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
     );
   }
 
+  // ---- run-time value resolution (layer 2) --------------------------------
+  // The rules check and the gate ask for the same command within one tool call; one resolution serves both.
+  const resolutionCache = new Map<string, { at: number; p: Promise<ResolveOutcome> }>();
+
+  /** pi's `shellCommandPrefix` runs before every command, and a custom `shellPath` may not be bash: with
+   *  either, the shell the command runs in is not the one this resolver can describe. */
+  function shellIsDescribable(cwd: string): boolean {
+    for (const file of [path.join(homedir(), ".pi", "agent", "settings.json"), path.join(cwd, ".pi", "settings.json")]) {
+      try {
+        if (!existsSync(file)) continue;
+        const s = JSON.parse(readFileSync(file, "utf8")) as { shellCommandPrefix?: unknown; shellPath?: unknown };
+        if (typeof s.shellCommandPrefix === "string" && s.shellCommandPrefix.trim() !== "") return false;
+        if (typeof s.shellPath === "string" && s.shellPath !== "" && path.basename(s.shellPath) !== "bash") return false;
+      } catch {
+        return false; // an unreadable settings file says nothing about the shell
+      }
+    }
+    return true;
+  }
+
+  /** The environment pi's bash tool gives the shell, minus what it changes: pi prepends its own bin dir to
+   *  PATH and removes the session variables unless configured to expose them, so neither is resolvable. */
+  function resolvableEnv(): Record<string, string | undefined> {
+    const env: Record<string, string | undefined> = { ...process.env };
+    for (const k of Object.keys(env)) if (k.toLowerCase() === "path") delete env[k];
+    for (const k of ["PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"]) delete env[k];
+    return env;
+  }
+
+  function runReadOnlyScript(
+    script: string,
+    o: { cwd: string; timeoutMs: number; maxBytes: number },
+  ): Promise<{ ok: boolean; stdout: string }> {
+    return new Promise((resolve) => {
+      const child = execFile(
+        "bash",
+        ["-c", script],
+        { cwd: o.cwd, timeout: o.timeoutMs, maxBuffer: o.maxBytes, env: process.env, encoding: "utf8" },
+        (err, stdout) => resolve(err ? { ok: false, stdout: "" } : { ok: true, stdout: String(stdout) }),
+      );
+      child.stdin?.end();
+    });
+  }
+
+  function resolveForCall(cwd: string, command: string): Promise<ResolveOutcome> {
+    const key = `${cwd}\0${command}`;
+    const now = Date.now();
+    const hit = resolutionCache.get(key);
+    if (hit && now - hit.at < 5_000) return hit.p;
+    const p: Promise<ResolveOutcome> = shellIsDescribable(cwd)
+      ? resolveCommand(command, {
+          run: runReadOnlyScript,
+          env: resolvableEnv(),
+          space: { cwd, project: cwd, home: homedir() },
+        }).catch((err) => ({ unresolved: `resolver failed (${String(err).slice(0, 80)})` }))
+      : Promise.resolve({ unresolved: "pi's shell settings (shellCommandPrefix / shellPath) make the shell unknown" });
+    resolutionCache.set(key, { at: now, p });
+    if (resolutionCache.size > 64) {
+      for (const [k, v] of resolutionCache) if (now - v.at >= 5_000) resolutionCache.delete(k);
+    }
+    return p;
+  }
+
   async function applyConfiguredPermissionRules(
     ctx: ExtensionContext,
     tool: string,
     input: Record<string, unknown>,
   ): Promise<Block | "allow" | "passthrough"> {
-    const verdict = evaluateToolPermission(
+    const ruleContext = { grants: gateGrants, ledger: gateLedger, mode: currentMode };
+    let verdict = evaluateToolPermission(
       tool,
       input,
       ctx.cwd,
       mergedPermissionRules,
       // A redirect target is cleared by the same grants and mode a direct write/read would use.
-      { grants: gateGrants, ledger: gateLedger, mode: currentMode },
+      ruleContext,
     );
+    // Run-time values: the rules are asked about the resolved command too, and the stricter answer wins — a
+    // deny or ask on EITHER spelling holds (`Bash(rm *)` still stops `rm "$X"`), and an allow on the resolved
+    // command counts only where the text alone had no opinion.
+    if (tool === "bash" && verdict.behavior !== "deny" && typeof input.command === "string") {
+      const resolved = await resolveForCall(ctx.cwd, input.command);
+      if ("concrete" in resolved) {
+        const second = evaluateToolPermission(tool, { ...input, command: resolved.concrete }, ctx.cwd, mergedPermissionRules, ruleContext);
+        const rank = { deny: 3, ask: 2, allow: 1, passthrough: 0 } as const;
+        if (second.behavior === "deny" || second.behavior === "ask") {
+          if (rank[second.behavior] > rank[verdict.behavior]) verdict = second;
+        } else if (second.behavior === "allow" && verdict.behavior === "passthrough") {
+          verdict = second;
+        }
+      }
+    }
     if (verdict.behavior === "deny") {
       return {
         block: true,

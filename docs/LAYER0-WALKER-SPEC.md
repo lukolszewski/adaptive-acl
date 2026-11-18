@@ -256,6 +256,18 @@ has to pass the meaning checks of §11 — it is the argument. Any deviation (an
 argument to `cat`, an unquoted delimiter) is refused as an ordinary substitution.
 6.7 Backtick substitution is a substitution: the same rules apply, including the refusal of a bare
 one.
+6.8 Template parse (`parseBashTemplate`, 2026-11-18). A second entry over the same walk, used only by the
+run-time value resolver, the allow matcher and the "Allow always" writer. `parseBashCommand` is unchanged
+byte for byte (pinned over the golden corpus and the case files). In template mode a run-time value in an
+ARGUMENT position becomes a `Slot` on its command instead of the §5.10 / §6.5 refusal (`variable-expansion`,
+`runtime-only-argument`); argv keeps the placeholder text. `$NAME` and `${NAME}` / `${NAME[0]}` (index dropped)
+are `var` slots; `$(…)` and backticks are `cmdsub` slots whose `inner` is the source without delimiters, and
+whose own commands are still walked and emitted first (§6.2). `quoted`, `whole` and `span` (offsets into the
+whole command) say where it sits. Still refused in template mode, with the plain walk's ids: command position,
+redirect targets, env prefixes and statement assignments, test operands, here-string data, positional
+parameters (`$0`–`$9`, `$@`, `$*`), braced transformations (`${#X}`, `${!X}`, `${X:-d}`), non-literal
+arithmetic, process substitution, and the arguments of anything that runs its arguments as code (§11). An env
+prefix holding a value (`F="$X" cat`) is `opaque` with no slots, and no caller treats it as a template.
 
 ## 7. Redirects
 

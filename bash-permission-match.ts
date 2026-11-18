@@ -27,10 +27,11 @@ import {
 	parsePermissionRule,
 	type ShellPermissionRule,
 } from "./shell-rule-matching.ts"
-import { parseBashCommand, type AstCommand, type AstParse, type AstRedirect } from "./bash-ast.ts"
+import { parseBashCommand, parseBashTemplate, CMDSUB_PLACEHOLDER, TRACKED_VAR_PLACEHOLDER, type AstCommand, type AstParse, type AstRedirect, type Slot, type TemplateCommand, type TemplateParse } from "./bash-ast.ts"
 import { initBashParser, isBashParserReady } from "./bash-parser.ts"
 import { categoryHasStrictOperands, envChangesExecution, fileRedirects } from "./bash-audit.ts"
-import { implicitDescriptor } from "./bash-rule-argv.ts"
+import { implicitDescriptor, SLOT_MARKER, wordPieces } from "./bash-rule-argv.ts"
+import { probeSlots, type SlotSpace, type SlotVerdict } from "./slot-probe.ts"
 import { evaluateBash } from "./risk-policy.ts"
 import { permissionRuleValueToString } from "./permission-rule-parser.ts"
 
@@ -601,19 +602,23 @@ function escapeBashRuleContent(content: string): string {
 
 // ── The producer
 //
-// What an "Allow always" writes. Two producers, one question — *which rule, if it were stored, would let
-// this exact command through next time?* — and they differ only in what they are allowed to read:
+// What an "Allow always" writes. One question — *which rule, if it were stored, would let this exact command
+// through next time?* — and the producers differ only in what they are allowed to read:
 //
 //   - `rulesFromArgv` (the normal path) asks layer 0 for the legs of the command and spells each leg's
 //     argv: quoting resolved, one word per argument, assignments and redirections already separated from
 //     it. Those are the very words `bash-rule-argv.ts` compares a specifier against, so a specifier spelled
 //     out of them matches by construction — a redirect, a here-document's body, a quoted `&&` or a line break
 //     costs a correct specifier instead of costing the offer.
-//   - `rulesFromText` is the fallback for the only two cases in which there are no words to spell: the
-//     grammar has not loaded yet, and the walker refuses the construct (§12). It is the old scanner, and
-//     its guesses are still checked by the same round trip.
+//   - the same function's **template** half (`rulesFromTemplate`) answers the case argv cannot: a word whose
+//     value is only known at run time. Layer 0 refuses the construct, `parseBashTemplate` says where the value
+//     sits, and `probeSlots` says whether it matters — so `Bash(echo "exit $…")` is written where it does not,
+//     and nothing is written where it does.
+//   - `rulesFromText` is the fallback for the only case left: the grammar has not loaded yet, or the walker
+//     refuses the construct for a reason that is not an argument-position value (§12). It is the old scanner,
+//     and its guesses are still checked by the same round trip.
 //
-// Neither producer decides whether the rule would be honoured. `permissions.ts` feeds every set back
+// No producer decides whether the rule would be honoured. `permissions.ts` feeds every set back
 // through the matcher that will have to honour it and withholds the offer if it would not be — so a
 // producer that cannot describe a leg says so instead of quietly guessing, because a wrong description
 // costs one prompt while a guessed one writes authority.
@@ -727,6 +732,14 @@ function ruleForWords(words: string[], redirects: readonly AstRedirect[], genera
 		}
 		parts.push(spelled)
 	}
+	return ruleFromParts(parts, generalise)
+}
+
+/**
+ * The tail every producer shares: the spelled words joined, with the two refusals that are about the rule
+ * STRING rather than about the command — a specifier nobody could read, and one that would be every command.
+ */
+function ruleFromParts(parts: string[], generalise: boolean): Spelling {
 	const specifier = parts.join(" ") + (generalise ? ":*" : "")
 	// `Bash` with no specifier and `Bash(*)` are the tool-wide grant, and a bare `*` in the text would be
 	// read as a glob. A spelled `*` is always `\*`, so this can only happen for the degenerate cases.
@@ -851,15 +864,264 @@ function rulesFromArgv(command: string, cwd: string): BashRuleSet | null {
 	} catch {
 		return null
 	}
-	if (parsed.kind !== "simple" || parsed.commands.length === 0) return null
+	// The ordinary path: the walker vouched for every leg and none of them holds a run-time value.
+	if (parsed.kind === "simple" && parsed.commands.length > 0 && !parsed.commands.some((leg) => leg.opaque)) {
+		return rulesForPlainLegs(parsed.commands, cwd)
+	}
+	return rulesFromTemplate(command, cwd, parsed)
+}
 
+function rulesForPlainLegs(legs: readonly AstCommand[], cwd: string): BashRuleSet {
 	const rules: string[] = []
-	for (const leg of parsed.commands) {
+	for (const leg of legs) {
 		const refusal = refusalForLeg(leg)
 		if (refusal !== null) return { rules: [], persistable: false, reason: refusal }
 		const made = ruleForLeg(leg, cwd)
 		if ("refusal" in made) return { rules: [], persistable: false, reason: made.refusal }
 		if (!rules.includes(made.rule)) rules.push(made.rule)
+	}
+	return { rules, persistable: true }
+}
+
+// ── Rules with slots
+//
+// A run-time value in an argument position is the reason most "Allow always" clicks fail: the value is not
+// in the text, so no literal specifier can name it. `parseBashTemplate` says WHERE each value sits, and
+// `probeSlots` says whether it MATTERS — whether every plausible value is judged the same way as a plain
+// one. Where it does not matter, the value is spelled `$…` and the rest of the leg exactly as before; where
+// it does, the probe's own sentence refuses the offer, because it names the value and what could change.
+//
+// A slot rule is always an EXACT rule for its leg. The subcommand generalisation drops every word after the
+// program, and a value sits in one of those words: `Bash(grep -n $…)` would authorise `grep -n <anything>`
+// with any operand at all.
+
+/** The four characters bash reads as something other than data inside double quotes. */
+function spellQuotedText(text: string): string | null {
+	let spelled = ""
+	for (const ch of text) {
+		if (LINE_BREAK_CHARS.includes(ch)) return null
+		spelled += ch === '"' || ch === "\\" || ch === "$" || ch === "`" ? "\\" + ch : ch
+	}
+	return spelled
+}
+
+/**
+ * One word holding run-time values, spelled as a specifier: the literal text escaped exactly as an argument
+ * is, and each value as {@link SLOT_MARKER} where it sits.
+ *
+ * When every slot in the word is quoted the literal and the value are written inside double quotes —
+ * `"exit $…"` — because that is what keeps them ONE argument, and it reads the way the command did. A word
+ * that is nothing but a value is spelled bare (`$…`). Null when the word cannot be written at all: a line
+ * break in an argument, or a placeholder no slot accounts for.
+ */
+function spellSlotWord(word: string, slots: readonly Slot[]): string | null {
+	const pieces = wordPieces(word, slots)
+	if (pieces === null) return null
+	const onlySlot = pieces.length === 1 && !("text" in pieces[0]!)
+	if (onlySlot) return SLOT_MARKER
+
+	if (slots.every((slot) => slot.quoted)) {
+		let quoted = '"'
+		for (const piece of pieces) {
+			if ("text" in piece) {
+				const literal = spellQuotedText(piece.text)
+				if (literal === null) return null
+				quoted += literal
+			} else {
+				quoted += SLOT_MARKER
+			}
+		}
+		return quoted + '"'
+	}
+
+	let spelled = ""
+	for (const piece of pieces) {
+		if ("text" in piece) {
+			const literal = spellArgument(piece.text)
+			if (literal === null) return null
+			spelled += literal
+		} else {
+			spelled += SLOT_MARKER
+		}
+	}
+	return spelled
+}
+
+/** The words of a leg grouped by the argv word they sit in, in the order the walker emitted them. */
+function slotsByWord(leg: TemplateCommand): Map<number, Slot[]> {
+	const byWord = new Map<number, Slot[]>()
+	for (const slot of leg.slots) {
+		const list = byWord.get(slot.argIndex) ?? []
+		list.push(slot)
+		byWord.set(slot.argIndex, list)
+	}
+	return byWord
+}
+
+/** A value only known at run time that no slot accounts for: a redirect target, an env prefix's value. */
+function hasPlaceholder(value: string): boolean {
+	return value.includes(CMDSUB_PLACEHOLDER) || value.includes(TRACKED_VAR_PLACEHOLDER)
+}
+
+function unaccountedRuntimeValue(leg: TemplateCommand): boolean {
+	if (leg.redirects.some((redirect) => hasPlaceholder(redirect.target))) return true
+	return leg.envVars.some((assignment) => hasPlaceholder(assignment.value))
+}
+
+/**
+ * One rule for a leg whose words hold run-time values: every word spelled in order, then every file the leg
+ * redirects into or out of. Never a prefix, for the reason in the section comment above.
+ */
+function ruleForSlotLeg(leg: TemplateCommand): Spelling {
+	const byWord = slotsByWord(leg)
+	const parts: string[] = []
+	for (let at = 0; at < leg.argv.length; at++) {
+		const slots = byWord.get(at) ?? []
+		if (slots.length === 0) {
+			const spelled = spellArgument(leg.argv[at]!)
+			if (spelled === null) {
+				return { refusal: `${NOT_HONOURABLE}: one step has an argument that spans lines, and a rule is one line` }
+			}
+			parts.push(spelled)
+			continue
+		}
+		const spelled = spellSlotWord(leg.argv[at]!, slots)
+		if (spelled === null) {
+			return { refusal: `${NOT_HONOURABLE}: a run-time value in one of its words could not be located, so a rule cannot say where it goes` }
+		}
+		parts.push(spelled)
+	}
+	if (parts.length === 0) return { refusal: `${NOT_HONOURABLE}: the step has no words to name` }
+	for (const redirect of fileRedirects(leg.redirects)) {
+		const spelled = spellTarget(redirect)
+		if (spelled === null) {
+			return { refusal: `${NOT_HONOURABLE}: one step has an argument that spans lines, and a rule is one line` }
+		}
+		parts.push(spelled)
+	}
+	return ruleFromParts(parts, false)
+}
+
+/** The slot's own value as the user wrote it, for a sentence they are shown (`$F`, `$(git rev-parse HEAD)`). */
+function writtenSlot(slot: Slot): string {
+	if (slot.source === "cmdsub") return "$(" + (slot.inner ?? "…") + ")"
+	return "$" + (slot.name ?? "…")
+}
+
+/**
+ * The one thing the probe deliberately does not refuse and a rule still cannot say: an UNQUOTED value may
+ * become several words when bash splits it, and a specifier describes one word in one place.
+ *
+ * {@link probeSlots} accepts an unquoted slot in the arguments of `echo`/`printf` — nothing there opens
+ * anything, so no value changes the verdict. That makes the value harmless to allow; it does not make the
+ * invocation describable, because `echo $HOME/x` passes one word or two depending on a value the rule has no
+ * way to write. So the offer is withheld here, where the sentence can say why.
+ */
+function unquotedSlotRefusal(leg: TemplateCommand): string | null {
+	const open = leg.slots.find((slot) => !slot.quoted)
+	if (open === undefined) return null
+	return `${writtenSlot(open)} is unquoted, so the shell may split it into several words: a rule describes one word in one place`
+}
+
+/**
+ * The plain producer's refusals asked about a leg that HAS run-time values: everything except "it is
+ * opaque" — a slot is not opaque in any way a rule cares about, because the rule says where the value goes —
+ * plus the places a value can hide where no slot accounts for it.
+ */
+function refusalForSlotLeg(leg: TemplateCommand): string | null {
+	if (leg.argv.length === 0) {
+		return "this step runs no command, so there is nothing for a rule to authorise"
+	}
+	if (leg.text.includes(HERE_STRING)) {
+		return `${NOT_HONOURABLE}: the step reads a here-string, which is data on the step and never part of a rule`
+	}
+	if (unaccountedRuntimeValue(leg)) {
+		return "one of its arguments is only known at run time; a rule could name the placeholder, never the value"
+	}
+	if (leg.envVars.some((e) => envChangesExecution(e.name, e.value))) {
+		return "its environment decides what runs (PATH, LD_PRELOAD, …), and argv carries none of that"
+	}
+	return null
+}
+
+/**
+ * The refusal the plain parse already implies, so "this is not a template" keeps today's message instead of
+ * falling silent: a leg the walker read and no rule can describe, `Bash(...)` where the value is.
+ */
+function refusalFromPlain(parsed: AstParse | null): BashRuleSet | null {
+	if (parsed === null || parsed.kind !== "simple") return null
+	for (const leg of parsed.commands) {
+		const refusal = refusalForLeg(leg)
+		if (refusal !== null) return { rules: [], persistable: false, reason: refusal }
+	}
+	return null
+}
+
+/**
+ * The probe, with the one failure it cannot have an opinion about: an evaluation that throws. Nothing is
+ * written then, because the offer is a description of a verdict nobody produced.
+ */
+function safeProbe(leg: TemplateCommand, space: SlotSpace): SlotVerdict | null {
+	try {
+		return probeSlots(leg, space)
+	} catch {
+		return null
+	}
+}
+
+/**
+ * The template producer: for a command with run-time values, ask where each one sits and whether it matters.
+ *
+ * `null` means "the template parse has nothing to say about this command", and is returned only when the
+ * refusal was about a construct rather than an argument-position value — a loop, an execution-changing env
+ * prefix, a redirect into a run-time path. Those keep exactly the answer they had before: the text producer
+ * (which refuses a run-time value) or nothing.
+ *
+ * A compound is all-or-nothing, as it always was: one leg the probe will not vouch for and the whole set
+ * goes, because coverage is AND across legs and a partial set would sit in the file never firing.
+ */
+function rulesFromTemplate(command: string, cwd: string, plain: AstParse | null): BashRuleSet | null {
+	let parsed: TemplateParse
+	try {
+		parsed = parseBashTemplate(command)
+	} catch {
+		return null
+	}
+	if (parsed.kind !== "simple" || parsed.commands.length === 0) return refusalFromPlain(plain)
+	if (!parsed.commands.some((leg) => leg.slots.length > 0)) return refusalFromPlain(plain)
+
+	// The same three roots layer 0 judges the command in, so a probe decides the verdict the gate would.
+	const space: SlotSpace = { cwd, project: cwd, home: homedir() }
+	const rules: string[] = []
+	for (const leg of parsed.commands) {
+		if (leg.slots.length === 0) {
+			const refusal = refusalForLeg(leg)
+			if (refusal !== null) return { rules: [], persistable: false, reason: refusal }
+			const made = ruleForLeg(leg, cwd)
+			if ("refusal" in made) return { rules: [], persistable: false, reason: made.refusal }
+			if (!rules.includes(made.rule)) rules.push(made.rule)
+			continue
+		}
+		const refusal = refusalForSlotLeg(leg)
+		if (refusal !== null) return { rules: [], persistable: false, reason: refusal }
+		// The value's own answer: inert means every plausible value is judged the way a plain one is.
+		const verdict = safeProbe(leg, space)
+		if (verdict === null) {
+			return {
+				rules: [],
+				persistable: false,
+				reason: `the value in this step (${leg.slots.map(writtenSlot).join(", ")}) could not be judged now, so nothing was written`,
+			}
+		}
+		if (!verdict.inert) return { rules: [], persistable: false, reason: verdict.reason }
+		const splits = unquotedSlotRefusal(leg)
+		if (splits !== null) return { rules: [], persistable: false, reason: splits }
+		const made = ruleForSlotLeg(leg)
+		if ("refusal" in made) return { rules: [], persistable: false, reason: made.refusal }
+		if (!rules.includes(made.rule)) rules.push(made.rule)
+	}
+	if (rules.length === 0) {
+		return { rules: [], persistable: false, reason: "no rule could be derived" }
 	}
 	return { rules, persistable: true }
 }

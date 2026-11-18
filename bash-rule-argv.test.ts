@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest"
 import { bashRuleCoversArgv, ruleArgv, ruleSpecifier } from "./bash-rule-argv.ts"
 import { permissionRuleValueFromString } from "./permission-rule-parser.ts"
 import type { PermissionBehavior, PermissionRule } from "./permissions.ts"
+import type { Slot } from "./bash-ast.ts"
 
 /**
  * The matcher `permissions.ts` scores every bash allow rule with: one already-parsed argv, one rule, yes or no.
@@ -556,5 +557,117 @@ describe("ruleSpecifier: what a rule names, targets included", () => {
 		// specifier the file is the half that decides the harm.
 		expect(ruleArgv(ruleFor("Bash(echo hi > /tmp/out.txt)"))).toEqual(["echo", "hi"])
 		expect(ruleArgv(ruleFor("Bash(echo hi > /tmp/out.txt)"))).not.toContain("/tmp/out.txt")
+	})
+})
+
+// ── A specifier with a slot (`$…`) ───────────────────────────────────────────
+// The matcher half of "Allow always" for a command with a run-time value. The leg arrives as argv plus the
+// slots the template parse found (`bash-ast.ts`), and a specifier that spells `$…` may cover it — under four
+// conditions, all pinned below. The re-probe is the caller's (`coverage.slotAllowed`) because only it holds
+// the command text a probe needs; this module sees argv, and without that answer it covers nothing.
+
+describe("a slot specifier covers one run-time value in one place", () => {
+	/** A slot as the template parse reports it: which word holds it, how it was written, where in the source. */
+	const slot = (argIndex: number, quoted: boolean, whole = true): Slot => ({
+		argIndex,
+		quoted,
+		whole,
+		source: "var",
+		name: "P",
+		span: [0, 2],
+	})
+
+	const slotCovers = (
+		spec: string,
+		argv: string[],
+		slots: Slot[],
+		extra: { slotAllowed?: () => boolean; targets?: Array<{ op: string; target: string; fd?: number }> } = {},
+	): boolean =>
+		bashRuleCoversArgv(ruleFor(`Bash(${spec})`), argv, {
+			slots,
+			slotAllowed: extra.slotAllowed ?? (() => true),
+			targets: extra.targets,
+		})
+
+	it("covers the words around the value, with the value in its own place", () => {
+		const argv = ["grep", "-n", "__TRACKED_VAR__", "src/"]
+		expect(slotCovers("grep -n $… src/", argv, [slot(2, true)])).toBe(true)
+	})
+
+	it("covers a value inside a word, keeping the literal text on both sides", () => {
+		// `echo "exit ${PIPESTATUS[0]}"` — the word is `exit __TRACKED_VAR__`, and `$…` has to sit where the
+		// value sits, not where the quotes were.
+		const argv = ["echo", "exit __TRACKED_VAR__"]
+		expect(slotCovers('echo "exit $…"', argv, [slot(1, true, false)])).toBe(true)
+		expect(slotCovers('echo "exit $…"', ["echo", "exit code 1"], [])).toBe(false)
+	})
+
+	it("never matches a literal word, and a literal never matches the marker", () => {
+		const argv = ["echo", "exit __TRACKED_VAR__"]
+		expect(slotCovers("echo $…", argv, [slot(1, true, false)])).toBe(false)
+		expect(slotCovers("echo exit", ["echo", "exit"], [])).toBe(true)
+		// A specifier with no marker cannot cover a leg that has one — today's answer for an opaque leg.
+		expect(slotCovers("echo exit", argv, [slot(1, true, false)])).toBe(false)
+	})
+
+	it("refuses a leg with a value no slot accounts for", () => {
+		// Condition 3: `cat "$A-$B"` with one slot recorded would leave the second value unwritten by the
+		// rule, so the answer is no rather than a rule that claims half the word.
+		const argv = ["echo", "__TRACKED_VAR__-__TRACKED_VAR__"]
+		expect(slotCovers("echo $…", argv, [slot(1, true)])).toBe(false)
+		expect(slotCovers("echo $…-$…", argv, [slot(1, true), slot(1, true)])).toBe(true)
+	})
+
+	it("needs the caller's probe before it covers anything", () => {
+		// Condition 4, and the fail-closed default: a caller that passes slots but no answer has not checked
+		// whether the value still does not matter.
+		const argv = ["grep", "-n", "__TRACKED_VAR__", "src/"]
+		const coverage = { slots: [slot(2, true)] }
+		expect(bashRuleCoversArgv(ruleFor("Bash(grep -n $… src/)"), argv, coverage)).toBe(false)
+		expect(slotCovers("grep -n $… src/", argv, [slot(2, true)], { slotAllowed: () => false })).toBe(false)
+	})
+
+	it("is an exact specifier only: a prefix or a glob names a set of argvs, not one place", () => {
+		const argv = ["grep", "-n", "__TRACKED_VAR__", "src/"]
+		expect(slotCovers("grep -n $… src/:*", argv, [slot(2, true)])).toBe(false)
+		expect(slotCovers("grep -n $… *", argv, [slot(2, true)])).toBe(false)
+	})
+
+	it("reads the marker in single quotes as literal text", () => {
+		// The one spelling that carries a `$…` as data, which is what a user needs if they ever mean it.
+		expect(slotCovers("echo '$…'", ["echo", "__TRACKED_VAR__"], [slot(1, true)])).toBe(false)
+	})
+
+	it("keeps the quoting a quoted marker claims", () => {
+		const unquoted = [slot(1, false)]
+		const quoted = [slot(1, true)]
+		// A bare marker is what an "Allow always" writes (the walker resolved the quoting away) and stands for
+		// either; a marker written inside quotes says the value is used as one word, so it only covers a
+		// quoted slot.
+		expect(slotCovers("echo $…", ["echo", "__TRACKED_VAR__"], unquoted)).toBe(true)
+		expect(slotCovers('echo "$…"', ["echo", "__TRACKED_VAR__"], quoted)).toBe(true)
+		expect(slotCovers('echo "$…"', ["echo", "__TRACKED_VAR__"], unquoted)).toBe(false)
+	})
+
+	it("keeps the redirect truth table", () => {
+		const argv = ["echo", "hi", "__TRACKED_VAR__"]
+		const slots = [slot(2, true)]
+		// A specifier that names the file is an invocation written down whole: words equal AND the same file.
+		expect(
+			slotCovers("echo hi $… > /tmp/out.txt", argv, slots, { targets: [{ op: ">", target: "/tmp/out.txt" }] }),
+		).toBe(true)
+		expect(
+			slotCovers("echo hi $… > /tmp/out.txt", argv, slots, { targets: [{ op: ">", target: "/tmp/other" }] }),
+		).toBe(false)
+		// A specifier that names no file may ride on the caller's answer for the target — and none was given.
+		expect(slotCovers("echo hi $…", argv, slots, { targets: [{ op: ">", target: "/tmp/out.txt" }] })).toBe(false)
+	})
+
+	it("keeps the tool-wide rule away from a leg that has values", () => {
+		// `Bash` names no value, so it is a rule without a marker — and a rule without a marker covers no slot,
+		// which is today's answer for an opaque leg (there the caller's spelling list is what refused to ask).
+		// `Bash` still covers every leg without one: this branch is about the marker, not about the tool.
+		expect(bashRuleCoversArgv(ruleFor("Bash"), ["grep", "__TRACKED_VAR__"], { slots: [slot(1, true)] })).toBe(false)
+		expect(bashRuleCoversArgv(ruleFor("Bash"), ["grep", "x"])).toBe(true)
 	})
 })

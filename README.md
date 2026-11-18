@@ -329,6 +329,15 @@ Three things differ from a plain text matcher, deliberately:
 - **"Allow always" writes exactly what was approved.** One rule per command leg; a leg no rule can
   describe contributes nothing and the click is honoured once. Folder scope is offered only where a
   `**` rule would actually match, and never on a secret-bearing path.
+- **Commands with run-time values.** For `wc -l "$F"` or `git show "$(git rev-parse HEAD)"` the gate
+  first fills in what it can know: environment variables, earlier `X=$(…)` assignments, and read-only
+  substitutions it runs itself (an explicit verb list, 2 s, 4 KB). It then judges the real command and
+  shows the values in the prompt. "Allow always" stores a `$…` slot, `Bash(echo "exit $…")`, only when no
+  value could change what the command does: the slot is tested with a secret path, a path outside the
+  project, `..`, an output flag and the other classes the policy tells apart. Where the value decides —
+  `rm "$X"`, `cat "$F"`, anything sent over the network — the click is honoured once and the message names
+  the value and what it could become. Credentials are never filled in, and nothing is resolved when pi's
+  `shellCommandPrefix` or a non-bash `shellPath` is set.
 
 `/permissions` prints the merged set, each rule tagged `global`, `project` or `local`.
 

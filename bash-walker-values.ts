@@ -35,16 +35,40 @@
  * ends in a refusal naming the §12 class. In particular a value is never guessed: a name with no
  * remembered value, a `${…}` spelling, a substitution the walker may not stand in for, and any
  * assignment that changes how the shell reads later text (§5.7) all refuse.
+ *
+ * ## Template mode
+ *
+ * The *same* answers, with one addition: in an ARGUMENT position a run-time value is recorded as a
+ * slot (see {@link RecordedSlot}) instead of refusing, and the placeholder stays in argv. A scope is
+ * in template mode only when `parseBashTemplate` made it ({@link newValueScope}); with no mode set
+ * every path here answers exactly what it answered before template mode existed. Nothing else
+ * changes: a value that is not an argument — the command word, a redirect target, a test operand, a
+ * `NAME=value` prefix, a here-string's data — records nothing and refuses as it always did, and the
+ * refusal each replaced slot would have produced is kept with it, because a command that runs its
+ * arguments as code may not hold a slot at all (bash-walker.ts).
  */
 
-import type { AstCommand } from "./bash-ast.ts"
+import type { AstCommand, Slot } from "./bash-ast.ts"
 import type { Node } from "web-tree-sitter"
 import { CMDSUB_PLACEHOLDER, refuse, TRACKED_VAR_PLACEHOLDER, type Reason, type Refusal } from "./bash-walker.ts"
 
 // --------------------------------------------------------------------------- contract
 
-/** Where a value is being produced — the answer differs per position (§5, §6.5). */
-export type ValuePosition = "argument" | "redirect-target" | "test-operand" | "env-prefix"
+/**
+ * Where a value is being produced — the answer differs per position (§5, §6.5).
+ *
+ * `"command-name"` and `"herestring"` are arguments the caller must not mistake for an argument:
+ * which program runs (§11) and the data of a here-string (§7) are never one of the argv words that
+ * carry a slot. In the plain walk they behave like `"argument"`; only the template parse tells them
+ * apart, so no value rule has a second form here.
+ */
+export type ValuePosition =
+	| "argument"
+	| "command-name"
+	| "redirect-target"
+	| "test-operand"
+	| "env-prefix"
+	| "herestring"
 
 /** One request for the value of one node. */
 export type ValueSite = {
@@ -83,6 +107,21 @@ export type ResolveWord = (nodes: readonly Node[], position: ValuePosition) => R
 export type Remembered = { literal: string } | { unknown: true }
 
 /**
+ * A run-time value found in an argument position by a template walk: the slot it becomes, and the
+ * refusal the plain walk answers in its place.
+ *
+ * `plain` is what lets the walker undo the decision: a command whose arguments the program runs as
+ * code (`sh -c`, `xargs`, `find -exec`, an interpreter) may not hold a slot at all, and it must then
+ * refuse with the id it refuses with today rather than a new one. `null` means the plain walk already
+ * accepts a placeholder here, so there is nothing to undo.
+ */
+export type RecordedSlot = {
+	/** The slot, without its argv index: only the walker knows which word it was resolved for. */
+	slot: Omit<Slot, "argIndex">
+	plain: Refusal | null
+}
+
+/**
  * Per-walk value store, created once per `walkBash` call and threaded through every entry point.
  * §14.4: it holds only what the input itself said — never the environment.
  */
@@ -91,11 +130,31 @@ export type ValueScope = {
 	variables: Map<string, Remembered>
 	/** §5.2 says emit nothing for an assignment; §14.1 says say *something* — see {@link reportRemembered}. */
 	assignments: Array<{ name: string; value: string; node: Node }>
+	/** Slots recorded for the word being resolved; `null` in the plain walk. */
+	template: RecordedSlot[] | null
 }
 
-/** Fresh scope for one walk. */
-export function newValueScope(): ValueScope {
-	return { variables: new Map(), assignments: [] }
+/** Fresh scope for one walk. `template` is set by `parseBashTemplate` and by nothing else. */
+export function newValueScope(template = false): ValueScope {
+	return { variables: new Map(), assignments: [], template: template ? [] : null }
+}
+
+/**
+ * Template mode only: keep the placeholder in argv and hand the walker the slot it stands for, plus
+ * the refusal this position produces in the plain walk.
+ *
+ * A command word and an argument are the only positions that record anything, and the command word
+ * only for a substitution: which program a bare `$NAME` names is unknowable from the text (§11), while
+ * a substitution in command position had its own command walked and emitted (§6.2), so the slot names
+ * the program that will run rather than a guess at one. A redirect target, a test operand, a
+ * `NAME=value` prefix and a here-string's data answer the plain refusal, so a caller never resolves a
+ * value the walker could not say where to put.
+ */
+function recordSlot(scope: ValueScope, site: ValueSite, slot: Omit<Slot, "argIndex">, plain: Refusal | null): ResolvedValue | null {
+	const placed = site.position === "argument" || (site.position === "command-name" && slot.source === "cmdsub")
+	if (scope.template === null || !placed) return null
+	scope.template.push({ slot, plain })
+	return { ok: true, text: slot.source === "cmdsub" ? CMDSUB_PLACEHOLDER : TRACKED_VAR_PLACEHOLDER }
 }
 
 // --------------------------------------------------------------------------- §5.10 / §5.11 names
@@ -186,9 +245,10 @@ export function resolveValue(scope: ValueScope, site: ValueSite, walkInto: WalkI
 			return reference(scope, site, nameOf(site.node))
 		case "expansion":
 			// §4.2 — every `${…}` spelling, with or without a transformation, a length or an indirect.
-			return { ok: false, refusal: refuse("variable-expansion", site.node.type) }
+			// Template mode reads the one spelling that names a value and nothing else, and slots it.
+			return braced(scope, site)
 		case "command_substitution":
-			return substitution(site, walkInto)
+			return substitution(scope, site, walkInto)
 		case "process_substitution":
 			// §3.2 — the file name does not exist until something has run.
 			return { ok: false, refusal: refuse("process-substitution", site.node.type) }
@@ -217,11 +277,24 @@ function reference(scope: ValueScope, site: ValueSite, name: string): ResolvedVa
 	if (remembered && "literal" in remembered) {
 		// §5.3: the caller sees the real path — but never where the shell could split it (§5.4).
 		if (site.quoted || site.position === "env-prefix" || !splittable(remembered.literal)) return { ok: true, text: remembered.literal }
+		// A remembered literal is a value, not a run-time one: the template parse has nothing to slot.
 		return { ok: false, refusal: refuse("variable-expansion", site.node.type) }
 	}
-	if (remembered || INERT_NAMES.has(name) || SPECIAL_NAMES.has(name)) return tracked(site)
-	// §4.2: any name the walker has no value for.
-	return { ok: false, refusal: refuse("variable-expansion", site.node.type) }
+	if (remembered || INERT_NAMES.has(name) || SPECIAL_NAMES.has(name)) return tracked(scope, site, name)
+	// §4.2: any name the walker has no value for. Its value is a run-time one all the same, which is
+	// what a template parse is for: the slot names the variable, the caller resolves it.
+	return namedSlot(scope, site, name, refuse("variable-expansion", site.node.type))
+}
+
+/**
+ * A `$NAME` reference the plain walk refuses: the slot that replaces it (template mode) or the
+ * refusal itself. One shape for both spellings, so `$X` and `${X}` can never disagree about what a
+ * slot means.
+ */
+function namedSlot(scope: ValueScope, site: ValueSite, name: string, plain: Refusal): ResolvedValue {
+	const whole = site.whole || contentWhole(site.node)
+	const slot = recordSlot(scope, site, { quoted: site.quoted, whole, source: "var", name, span: [site.node.startIndex, site.node.endIndex] }, plain)
+	return slot ?? { ok: false, refusal: plain }
 }
 
 /**
@@ -230,11 +303,53 @@ function reference(scope: ValueScope, site: ValueSite, name: string): ResolvedVa
  * nothing but this value, §6.5 refuses before a value-shaped hole reaches the caller. An assignment
  * value is never re-split, so it keeps the placeholder in any spelling.
  */
-function tracked(site: ValueSite): ResolvedValue {
+function tracked(scope: ValueScope, site: ValueSite, name: string): ResolvedValue {
 	if (site.position === "env-prefix") return { ok: true, text: TRACKED_VAR_PLACEHOLDER }
-	if (!site.quoted) return { ok: false, refusal: refuse("variable-expansion", site.node.type) }
-	if (site.whole || contentWhole(site.node)) return { ok: false, refusal: refuse("runtime-only-argument", site.node.type) }
+	const whole = site.whole || contentWhole(site.node)
+	// The plain answers, in the order they are asked: a bare value is re-split by the shell, and a
+	// quoted one that is the whole word leaves nothing of the argument but a value (§5.10, §6.5).
+	const plain = !site.quoted
+		? refuse("variable-expansion", site.node.type)
+		: whole
+			? refuse("runtime-only-argument", site.node.type)
+			: null
+	const slot = recordSlot(scope, site, { quoted: site.quoted, whole, source: "var", name, span: [site.node.startIndex, site.node.endIndex] }, plain)
+	if (slot) return slot
+	if (plain) return { ok: false, refusal: plain }
 	return { ok: true, text: TRACKED_VAR_PLACEHOLDER }
+}
+
+/**
+ * `${NAME}` and `${NAME[0]}` (§4.2, template mode). Every other braced spelling — a length, an
+ * indirect, a default, a transformation, a computed subscript — stays the refusal it is today: the
+ * braces may carry anything, and a slot may only stand for a value, not for a computation.
+ */
+function braced(scope: ValueScope, site: ValueSite): ResolvedValue {
+	// §4.2 — the braced spelling is refused in every position, so it is the plain answer here as well.
+	const plain = refuse("variable-expansion", site.node.type)
+	const name = bracedName(site.node)
+	if (name) return namedSlot(scope, site, name, plain)
+	return { ok: false, refusal: plain }
+}
+
+/**
+ * The name a `${…}` spelling holds, or `null` when the braces do anything with it. `namedChildren`
+ * alone would accept `${#X}` and `${!X}` — the `#` and `!` are anonymous tokens — so the whole child
+ * list is read, and only `${`, the name, `}` is a name reference.
+ */
+function bracedName(node: Node): string | null {
+	if (node.children.length !== 3) return null
+	const [open, content, close] = node.children
+	if (open.type !== "${" || close.type !== "}") return null
+	// `${NAME[0]}`: a literal index is a position inside the value, not a computation of its own.
+	if (content.type === "subscript") {
+		const [base, index] = content.namedChildren
+		if (content.namedChildren.length !== 2 || base.type !== "variable_name") return null
+		if (index.type !== "number" || !/^[0-9]+$/.test(index.text)) return null
+		return base.text.length > 0 ? base.text : null
+	}
+	if (content.type !== "variable_name") return null
+	return content.text.length > 0 ? content.text : null
 }
 
 // --------------------------------------------------------------------------- §6 substitutions
@@ -245,7 +360,7 @@ function tracked(site: ValueSite): ResolvedValue {
  * Two positions may not have one at all — a bare substitution, which the shell splits into arguments
  * of its own (§4.4), and a substitution that is the whole argument (§6.5).
  */
-function substitution(site: ValueSite, walkInto: WalkInto): ResolvedValue {
+function substitution(scope: ValueScope, site: ValueSite, walkInto: WalkInto): ResolvedValue {
 	// §4.2 — `10#$(…)`: the grammar puts the substitution inside a numeric literal, and what is
 	// wrong here is the arithmetic base, not the substitution that fell into it.
 	if (site.node.parent?.type === "number") return { ok: false, refusal: refuse("arithmetic-non-literal", "number") }
@@ -258,13 +373,31 @@ function substitution(site: ValueSite, walkInto: WalkInto): ResolvedValue {
 		return { ok: true, text: known.literal }
 	}
 
-	if (site.position !== "env-prefix") {
-		if (!site.quoted) return { ok: false, refusal: refuse("command-substitution", site.node.type) }
-		if (site.whole || contentWhole(site.node)) return { ok: false, refusal: refuse("command-substitution", site.node.type) }
-	}
+	const prefix = site.position === "env-prefix"
+	// Two positions may not have one at all — a bare substitution, which the shell splits into
+	// arguments of its own (§4.4), and a substitution that is the whole argument (§6.5).
+	const plain = !prefix && (!site.quoted || site.whole || contentWhole(site.node)) ? refuse("command-substitution", site.node.type) : null
+	// The plain walk refuses before looking inside, because its answer is already no; that ordering is
+	// part of its contract, so it is kept. A template walk emits the substitution's own commands (§6.2)
+	// whatever the outer position holds, so it walks the inside first and a refusal inside is the
+	// template's refusal.
+	if (plain && scope.template === null) return { ok: false, refusal: plain }
 	const inside = walkInto(site.node)
 	if (inside) return { ok: false, refusal: inside }
+	if (!prefix) {
+		const slot = recordSlot(scope, site, { quoted: site.quoted, whole: site.whole || contentWhole(site.node), source: "cmdsub", inner: innerText(site.node), span: [site.node.startIndex, site.node.endIndex] }, plain)
+		if (slot) return slot
+		if (plain) return { ok: false, refusal: plain }
+	}
 	return { ok: true, text: CMDSUB_PLACEHOLDER }
+}
+
+/** The substitution's own source text, for a slot's `inner`: `$(…)` and backticks without delimiters. */
+function innerText(node: Node): string {
+	const text = node.text
+	if (text.startsWith("$(")) return text.slice(2, -1)
+	if (text.startsWith("`")) return text.slice(1, -1)
+	return text
 }
 
 /** §6.6 — the one substitution with a known, fixed answer, or `null` when it is an ordinary one. */

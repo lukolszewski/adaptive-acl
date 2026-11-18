@@ -21,7 +21,7 @@ undo, per-mode model profiles, subagent approval forwarding, and an adaptive foo
 
 ## Module map
 
-Every file matching `git ls-files '*.ts' | grep -v '\.test\.ts$'` (62 entries; the last two are test
+Every file matching `git ls-files '*.ts' | grep -v '\.test\.ts$'` (64 entries; the last two are test
 harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ### Entry point and pi surface
@@ -77,7 +77,12 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
   and returns a tree, or a reason there is none (`bash-parser.ts:13-33` records why the grammar is not a
   dependency; `bash-parser.ts:337-349` is the search order).
 - `bash-ast.ts` — the public shape of a parse (`AstParse`, `AstCommand`) and `parseBashCommand`
-  (`bash-ast.ts:87`), the entry every caller uses.
+  (`bash-ast.ts:87`), the entry every caller uses; plus `parseBashTemplate`, the same walk with run-time
+  argument values as `Slot`s (`docs/LAYER0-WALKER-SPEC.md` §6.8), used only by the three modules below.
+- `slot-probe.ts` — does a run-time value change the verdict? Positional refusals, then one layer-0 run per
+  probe class; decides whether "Allow always" may store a `$…` slot rule, and is asked again at match time.
+- `value-resolve.ts` — fills in knowable run-time values per call (environment, clean assignments, read-only
+  substitutions run through an injected runner) so the gate can judge the concrete command.
 - `bash-walker.ts` — the walker proper: the spec's §2 pipeline in order, first refusal wins; the flag-write
   report that catches `sort -o /etc/x`. Holds no policy and no value rules of its own.
 - `bash-walker-scan.ts` — the character scans (§10): unbalanced delimiters, control and unicode whitespace,
@@ -190,10 +195,10 @@ harness, not shipped — `package.json:29-38` excludes them from the tarball).
 
 ```bash
 npm install --ignore-scripts --no-audit --no-fund   # what CI does; nothing here has a build step
-npx vitest run        # 103 files, all green. The test count moves with the suite, so quote CI's
+npx vitest run        # 108 files, all green. The test count moves with the suite, so quote CI's
                       # log rather than a figure copied out of a doc.
 npm run typecheck     # tsc --noEmit -p tsconfig.json — zero errors
-npm run pack:dry      # 67 files, ~713 kB tarball, 3.0 MB unpacked
+npm run pack:dry      # 69 files, ~754 kB tarball, 3.1 MB unpacked
 ```
 
 Run all four before you call a change done, and paste the real output into your result. Notes that cost an
@@ -206,7 +211,7 @@ hour each if you learn them by hand:
   that reads them (`bash-walker-golden.ts:31`, `bash-allow-layer0.test.ts:689-690`).
 - **`tsconfig.json:15` includes `*.ts` and `tools/*.ts`, root level only**, with `eval` and `spike` excluded
   (neither directory exists here). A new file in a subdirectory is not typechecked by `npm run typecheck`.
-- **`npm run pack:dry` counts 67** because `package.json:29-38` ships `*.ts` minus `*.test.ts`. That glob is
+- **`npm run pack:dry` counts 69** because `package.json:29-38` ships `*.ts` minus `*.test.ts`. That glob is
   why `bash-walker-golden.ts` ships and `docs/`, the `.jsonl` corpora and `testcases/` do not. If a runtime
   path starts reading a non-`.ts` file, this list has to change with it.
 - The publish contract adds a **leak scan**: grep every tracked file for a fixed list of private tokens —

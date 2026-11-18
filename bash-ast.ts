@@ -92,6 +92,50 @@ export function parseBashCommand(command: string): AstParse {
 	return walkBash(command)
 }
 
+/**
+ * A run-time value in an ARGUMENT position, kept as a slot instead of refused (template parse only).
+ *
+ * `parseBashCommand` keeps refusing these; the template parse exists for the three callers that judge a
+ * command with its values filled in or tested: the resolver, the allow matcher and the "Allow always" writer.
+ */
+export type Slot = {
+	/** Index into `argv` of the word that holds the slot. */
+	argIndex: number
+	/** `"$X"` (true) vs `$X` (false): an unquoted value is split on whitespace and glob-expanded by bash. */
+	quoted: boolean
+	/** The slot is the entire word, not part of it (`"$X"` vs `"exit $X"`). */
+	whole: boolean
+	source: "var" | "cmdsub"
+	/** Variable name, for `var` (`PIPESTATUS` for `${PIPESTATUS[0]}`). */
+	name?: string
+	/** The substitution's own source text, for `cmdsub` (`git rev-parse HEAD` for `$(git rev-parse HEAD)`). */
+	inner?: string
+	/** Source offsets of the whole expansion, `command.slice(span[0], span[1])` (e.g. `"$X"` → `$X`). */
+	span: [number, number]
+}
+
+/** A walked command whose argv may hold slots; each slot's word carries the walker's placeholder text. */
+export type TemplateCommand = AstCommand & { slots: Slot[] }
+
+export type TemplateParse = { kind: "simple"; commands: TemplateCommand[] } | Extract<AstParse, { kind: "unproven" }>
+
+/**
+ * The same walk as {@link parseBashCommand}, except a variable or an accepted substitution in an argument
+ * position becomes a {@link Slot} instead of a refusal. Command position, redirect targets, execution-changing
+ * env prefixes and the arguments of anything that runs its arguments as code stay refused.
+ *
+ * The placeholders of §5.10/§6.1 stay in `argv` where the slot is, exactly as in a plain parse, so
+ * `opaque` means the same thing in both — a slot says *which* word holds the run-time value and where it
+ * was written, and nothing else. Each command's `slots` are in the order their words were emitted.
+ *
+ * A refusal here is the same refusal the plain walk gives, with one addition: a substitution's own
+ * commands are walked (and emitted first, §6.2) even where the outer value became a slot, so a refusal
+ * inside the substitution refuses the template as a whole.
+ */
+export function parseBashTemplate(command: string): TemplateParse {
+	return walkBash(command, "template")
+}
+
 /** Word wrapper for the argv values (quoting has already been resolved by the walker). */
 function word(value: string): Word {
 	return { value, raw: value, quoted: false, hasExpansion: value.includes("$") || value.includes("`") }

@@ -28,7 +28,7 @@
  */
 
 import type { Node } from "web-tree-sitter"
-import type { AstCommand, AstParse, AstRedirect } from "./bash-ast.ts"
+import type { AstCommand, AstParse, AstRedirect, Slot, TemplateParse } from "./bash-ast.ts"
 import { MAX_COMMAND_CHARS, parseBash } from "./bash-parser.ts"
 import {
 	assignmentIsCommandWord,
@@ -38,6 +38,7 @@ import {
 	reportRemembered,
 	resolveDeclaration,
 	resolveValue,
+	type RecordedSlot,
 	type ResolveWord,
 	type ValuePosition,
 	type ValueScope,
@@ -94,15 +95,37 @@ export function refuse(reason: Reason, nodeType?: string): Refusal {
 
 // --------------------------------------------------------------------------- walk state
 
-/** One walk of one input: the source, the commands emitted so far, the value scope. */
-type Walk = { input: string; commands: AstCommand[]; scope: ValueScope }
+/**
+ * A command the template walk may give slots to. The plain walk never sets `slots`, so its output
+ * is byte-identical to what it was before template mode existed.
+ */
+type WalkCommand = AstCommand & { slots?: Slot[] }
+
+/** A slot the walk has placed: the argument it became, and the refusal the plain walk answers here. */
+type PlacedSlot = RecordedSlot & { argIndex: number }
+
+/** One walk of one input: the source, the commands emitted so far, the value scope, the slots. */
+type Walk = {
+	input: string
+	commands: WalkCommand[]
+	/** Per-walk value store. In template mode its `template` list is also the slot buffer below. */
+	scope: ValueScope
+	/** Slots per emitted command, in the order their words appeared (template mode only). */
+	slots: Map<WalkCommand, PlacedSlot[]>
+}
 
 /** A stretch of source that resolves to exactly one argument (§4: adjacency joins, never splits). */
-type Piece = { start: number; end: number; nodes: Node[] }
+type Piece = {
+	start: number
+	end: number
+	nodes: Node[]
+	/** The word is the command word itself: a value there is never a slot, whatever the mode (§11). */
+	commandWord?: boolean
+}
 
 /** A command under construction. */
 type Draft = {
-	command: AstCommand
+	command: WalkCommand
 	/** Source of every word the command reports — argv and environment values — for §13.6. */
 	sources: Piece[]
 	/** Descriptor glued to a redirect by `0< file`; not an argument (§7.1). */
@@ -117,8 +140,15 @@ type RedirectAnswer = { ok: true; redirect: AstRedirect; trailing: Piece[] } | {
 /**
  * Walk one bash command string. The caller has awaited `initBashParser()`; if it has not, the
  * result is `parser-unavailable` (§12).
+ *
+ * `mode` decides one thing only: what an argument-position run-time value means. The plain walk
+ * (`parseBashCommand`) refuses it with the §12 id for the shape; the template walk keeps the
+ * placeholder in argv and reports a slot beside it (`parseBashTemplate`). Every other rule — the
+ * scans, the structures, the redirects, the here-documents, the meaning checks — is the same walk.
  */
-export function walkBash(command: string): AstParse {
+export function walkBash(command: string, mode?: "plain"): AstParse
+export function walkBash(command: string, mode: "template"): TemplateParse
+export function walkBash(command: string, mode: "plain" | "template" = "plain"): AstParse {
 	// §2 step 1: nothing to do is not a refusal.
 	if (command.trim() === "") return { kind: "simple", commands: [] }
 	// §2 step 2 (§10.9): over the cap the input is never partially analysed.
@@ -130,7 +160,7 @@ export function walkBash(command: string): AstParse {
 	if ("error" in parsed) return parseOutcome(parsed.error)
 	const tree = parsed.tree
 	try {
-		const walk: Walk = { input: command, commands: [], scope: newValueScope() }
+		const walk: Walk = { input: command, commands: [], scope: newValueScope(mode === "template"), slots: new Map() }
 		const walked = walkSequence(walk, tree.rootNode) // §2 step 7
 		if (walked) return walked
 		// §10.7: a tree the parser could not complete is not a command, whatever the walk made of it.
@@ -140,7 +170,10 @@ export function walkBash(command: string): AstParse {
 		reportRemembered(walk.scope, walk.commands)
 		const settled = settle(walk) // §2 step 8 (§13.6) and §6.3
 		if (settled) return settled
-		const meaning = checkMeaning(walk.commands) // §2 step 9
+		// Template mode only: a slot the command cannot hold turns back into its plain refusal.
+		const slots = collectSlots(walk)
+		if (slots) return slots
+		const meaning = mode === "template" ? templateMeaning(walk.commands) : checkMeaning(walk.commands) // §2 step 9
 		if (meaning) return meaning
 		reportFlagWrites(walk.commands) // reporting: a write named by a flag, not by a redirect
 		return { kind: "simple", commands: walk.commands }
@@ -231,7 +264,7 @@ function walkStatement(walk: Walk, node: Node, connector: string): Refusal | nul
 			// §3.1 + §5.2: inert on its own — the value is remembered, no command is emitted. §5.8: a
 			// name bash would not accept is not an assignment, so the text is one ordinary command word.
 			if (assignmentIsCommandWord(node)) {
-				const word = resolvePiece(walk, { start: node.startIndex, end: node.endIndex, nodes: expansionNodes(node) }, "argument")
+				const word = resolvePiece(walk, { start: node.startIndex, end: node.endIndex, nodes: expansionNodes(node) }, "command-name")
 				if (!word.ok) return word.refusal
 				const draft = newDraft(node, connector)
 				draft.command.argv.push(word.value)
@@ -253,6 +286,7 @@ function walkStatement(walk: Walk, node: Node, connector: string): Refusal | nul
 				if (!resolved.ok) return resolved.refusal
 				draft.command.argv.push(resolved.value)
 				draft.sources.push({ start: item.startIndex, end: item.endIndex, nodes: [] })
+				takeSlots(walk, draft.command, draft.command.argv.length - 1)
 			}
 			if (node.type === "unset_command") forgetUnsetNames(walk.scope, draft.command.argv)
 			return emit(walk, draft)
@@ -450,10 +484,12 @@ function walkCommand(walk: Walk, node: Node, connector: string, extra: AstRedire
 	/** One argument, from the source gathered since the last one: adjacent segments join (§4). */
 	const flush = (): Refusal | null => {
 		for (const piece of pieces) {
-			const resolved = resolvePiece(walk, piece, "argument")
+			// §11: which program runs is not a value the walker may hold a slot for, in any mode.
+			const resolved = resolvePiece(walk, piece, piece.commandWord ? "command-name" : "argument")
 			if (!resolved.ok) return resolved.refusal
 			draft.command.argv.push(resolved.value)
 			draft.sources.push(piece)
+			takeSlots(walk, draft.command, draft.command.argv.length - 1)
 		}
 		pieces = []
 		return null
@@ -463,9 +499,10 @@ function walkCommand(walk: Walk, node: Node, connector: string, extra: AstRedire
 		if (last && child.startIndex === last.end) {
 			last.end = child.endIndex
 			last.nodes.push(...expansionNodes(child))
+			if (child.type === "command_name") last.commandWord = true
 			return
 		}
-		pieces.push({ start: child.startIndex, end: child.endIndex, nodes: expansionNodes(child) })
+		pieces.push({ start: child.startIndex, end: child.endIndex, nodes: expansionNodes(child), commandWord: child.type === "command_name" })
 	}
 
 	for (const child of node.children) {
@@ -538,12 +575,13 @@ function walkCommand(walk: Walk, node: Node, connector: string, extra: AstRedire
  * would be a classified `rm` with no visible target. The span grows over them (§13.3 covers a
  * command's own arguments), which is what keeps `text === input.slice(start, end)` (§13.2).
  */
-function appendWords(walk: Walk, command: AstCommand, words: Piece[]): Refusal | null {
+function appendWords(walk: Walk, command: WalkCommand, words: Piece[]): Refusal | null {
 	if (words.length === 0) return null
 	for (const word of words) {
 		const resolved = resolvePiece(walk, word, "argument")
 		if (!resolved.ok) return resolved.refusal
 		command.argv.push(resolved.value)
+		takeSlots(walk, command, command.argv.length - 1)
 	}
 	command.end = words[words.length - 1].end
 	command.text = walk.input.slice(command.start, command.end)
@@ -617,7 +655,8 @@ function redirectOperator(text: string): string | null {
 function hereString(walk: Walk, node: Node): Refusal | null {
 	for (const child of node.children) {
 		if (!child.isNamed) continue
-		const resolved = resolvePiece(walk, { start: child.startIndex, end: child.endIndex, nodes: expansionNodes(child) }, "argument")
+		// `herestring`, not `argument`: the data is never one of the command's argv words (§7).
+		const resolved = resolvePiece(walk, { start: child.startIndex, end: child.endIndex, nodes: expansionNodes(child) }, "herestring")
 		if (!resolved.ok) return resolved.refusal
 	}
 	return null
@@ -828,6 +867,113 @@ function settle(walk: Walk): Refusal | null {
 			command.argv.some(sees) ||
 			command.envVars.some((entry) => sees(entry.value)) ||
 			command.redirects.some((redirect) => !redirect.fdDup && sees(redirect.target))
+	}
+	return null
+}
+
+// --------------------------------------------------------------------------- template slots
+
+/**
+ * Template mode: the slots the word just resolved belong to the argument it became.
+ *
+ * The values module answers per expansion and cannot know which argv word holds it, so the walk
+ * places it here, at the moment the word is pushed. Nothing is recorded for a position that is not
+ * an argument, so `pending` is empty for every other word and a slot can never land on the wrong
+ * index.
+ */
+function takeSlots(walk: Walk, command: WalkCommand, argIndex: number): void {
+	// The values module records into the scope it was given, so that list is the buffer this drains;
+	// `null` is the plain walk, where nothing is ever recorded.
+	const pending = walk.scope.template
+	if (pending === null || pending.length === 0) return
+	const placed = walk.slots.get(command) ?? []
+	for (const one of pending.splice(0)) placed.push({ ...one, argIndex })
+	walk.slots.set(command, placed)
+}
+
+/**
+ * Programs whose ARGUMENTS are a program, a command line, or a script — so a slot there would name
+ * code this walk never saw (§11). A name anywhere on the command line is enough: the alternative,
+ * modelling each tool's own grammar, is a second copy of `bash-walker-meaning.ts` free to disagree
+ * with it. Losing a slot only costs the caller today's refusal, so the trade is one-sided on purpose.
+ *
+ * The wrappers that exec their arguments (`env`, `nice`, `timeout`, `stdbuf`, `time`) are absent:
+ * `bash-walker-meaning.ts` peels those, and a shell or an interpreter behind one is caught anyway.
+ */
+const ARGUMENT_CODE_PROGRAMS = new Set([
+	// shells: an argument is a script, a `-c` string, or the command line of an interactive one
+	"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "csh", "tcsh", "yash", "pwsh", "powershell",
+	// executors: what runs is named in the arguments
+	"xargs", "exec", "eval", "source", ".", "nohup", "watch", "parallel",
+	// privilege and remote: the machine decides what the arguments mean
+	"sudo", "doas", "pkexec", "su", "runuser", "ssh", "sshpass",
+	// interpreters: an argument is inline code, or the script to run
+	"python", "python2", "python3", "pypy", "node", "nodejs", "deno", "bun", "ruby", "irb", "perl",
+	"php", "lua", "luajit", "Rscript", "julia", "tclsh", "osascript", "expect",
+])
+
+/** Options that turn the words after them into a command, as `find` reads them (§11). */
+const ARGUMENT_CODE_OPTIONS = new Set(["-exec", "-execdir", "-ok", "-okdir"])
+
+/**
+ * Does this command run its arguments as code? Asked of the finished argv, because the answer is a
+ * property of the whole command word — `sh -c`, `find . -exec rm`, `xargs rm` — and not of one
+ * argument. `bash-walker-meaning.ts` answers for the shell builtins it can judge (`eval`, `trap`,
+ * `command -v`, `mapfile -C`, …); its id is asked rather than copied, so a table it gains later is
+ * honoured here without an edit.
+ */
+function argumentsAreCode(command: AstCommand): boolean {
+	if (command.argv.length === 0) return false
+	const named = command.argv.some((word) => ARGUMENT_CODE_PROGRAMS.has(programName(word)) || ARGUMENT_CODE_OPTIONS.has(word))
+	if (named) return true
+	return checkMeaning([command])?.reason === "evaluates-arguments-as-code"
+}
+
+/** The last path segment of a command word: what every table in layer 0 is keyed by. */
+function programName(word: string): string {
+	return word.slice(word.lastIndexOf("/") + 1)
+}
+
+/**
+ * Template mode, once every command is complete: give each command its slots, or refuse.
+ *
+ * A command that runs its arguments as code keeps the refusal `parseBashCommand` answers with — the
+ * same id, not a new one — because a slot there would be authority over a program nobody walked.
+ * A command whose slots were all accepted placeholders already (nothing was refused for them) is
+ * left alone: the template changed nothing about it. Slots are attached only after the guard, so a
+ * refusal never leaves a half-answered parse behind (§1.1).
+ */
+function collectSlots(walk: Walk): Refusal | null {
+	if (walk.scope.template === null) return null
+	for (const [command, placed] of walk.slots) {
+		if (!argumentsAreCode(command)) continue
+		const blocked = placed.find((one) => one.plain !== null)
+		if (blocked?.plain) return blocked.plain
+	}
+	for (const [command, placed] of walk.slots) {
+		command.slots = placed.map((one) => ({ argIndex: one.argIndex, ...one.slot }))
+	}
+	// A command with no slots still says so: `TemplateCommand.slots` is an array, never a missing property.
+	for (const command of walk.commands) command.slots ??= []
+	return null
+}
+
+/** The literal a substituted command word is checked as: not a program any table knows. */
+const SUBSTITUTED_COMMAND_WORD = "runtime-command"
+
+/**
+ * §11, per command, in template mode. One rule differs from {@link checkMeaning}: when the command
+ * word is a substitution slot, the walker has already walked and emitted the command that runs
+ * (§6.2), so "the program is not a literal" is exactly what the slot says and the caller resolves
+ * it. The command is therefore checked again with a literal in that position, so every other
+ * question about it — its other values, its verb, its operands — is still asked.
+ */
+function templateMeaning(commands: readonly WalkCommand[]): Refusal | null {
+	for (const command of commands) {
+		const substituted = command.slots?.some((one) => one.argIndex === 0 && one.source === "cmdsub") === true
+		const asked: AstCommand = substituted ? { ...command, argv: [SUBSTITUTED_COMMAND_WORD, ...command.argv.slice(1)] } : command
+		const refusal = checkMeaning([asked])
+		if (refusal) return refusal
 	}
 	return null
 }

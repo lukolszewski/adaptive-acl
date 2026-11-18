@@ -11,6 +11,7 @@ import {
 	stripAllLeadingEnvVars,
 	stripSafeLeadingEnvVars,
 	suggestBashAllowRule,
+	suggestBashAllowRuleSet,
 } from "./bash-permission-match.ts"
 
 describe("bash-permission-match", () => {
@@ -267,5 +268,48 @@ describe("stripSafeLeadingEnvVars: only a known-safe name opens the chain", () =
 	it("never strips an unknown name even if a safe one follows a value", () => {
 		expect(stripSafeLeadingEnvVars("NODE_ENV=xNODE_ENV=y cmd")).toBe("cmd")
 		expect(stripSafeLeadingEnvVars("LANG=FOO=bar cmd")).toBe("cmd")
+	})
+})
+
+// ── Rules with slots ────────────────────────────────────────────────
+// The producer half of "Allow always" for a command with a run-time value. `parseBashTemplate` says where the
+// value sits, `probeSlots` says whether it matters, and where it does not the value is written `$…` in the
+// place it occupied. That spelling is the contract `bash-rule-argv.ts` reads back, so it is pinned here to
+// the character — including the quoting, which is what keeps a partial value one argument.
+
+describe("a run-time value the probe vouches for is spelled `$…`", () => {
+	const project = "/home/user/project"
+	const set = (command: string) => suggestBashAllowRuleSet(command, project)
+
+	it("keeps the literal text beside a partial value, inside the quotes it needs", () => {
+		expect(set('echo "exit ${PIPESTATUS[0]}"').rules).toEqual(['Bash(echo "exit $…")'])
+	})
+
+	it("writes a bare marker where the value is the whole word", () => {
+		// The walker resolved the quoting of `"$P"` into the slot, so the spelling does not repeat it: the
+		// marker already says one value goes here.
+		expect(set('grep -n "$P" src/').rules).toEqual(["Bash(grep -n $… src/)"])
+	})
+
+	it("writes one marker per value, in the order they appear", () => {
+		expect(set('echo "a $A-$B"').rules).toEqual(['Bash(echo "a $…-$…")'])
+		expect(set('echo "$X" "$Y"').rules).toEqual(["Bash(echo $… $…)"])
+	})
+
+	it("refuses an unquoted value even where the probe would allow it", () => {
+		// `echo` opens nothing, so no value can change its verdict; the rule still cannot describe the word,
+		// because bash splits an unquoted value — one argument or two, decided at run time.
+		const refused = set("echo $HOME/x")
+		expect(refused.persistable).toBe(false)
+		expect(refused.rules).toEqual([])
+		expect(refused.reason).toContain("$HOME")
+		expect(refused.reason).toContain("unquoted")
+	})
+
+	it("refuses a value in a spot no rule can name, with the sentence that says which", () => {
+		const refused = set('wc -l "$F"')
+		expect(refused.persistable).toBe(false)
+		expect(refused.reason).toContain("$F")
+		expect(refused.reason).toContain("read_secret")
 	})
 })

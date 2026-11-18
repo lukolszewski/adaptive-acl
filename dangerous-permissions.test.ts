@@ -351,3 +351,44 @@ describe("formatDangerousRuleDisplay", () => {
 		)
 	})
 })
+
+describe("a slot rule is not a blanket grant", () => {
+	// `$…` is one word decided at run time, written into the specifier by an "Allow always" that the probe
+	// vouched for (`bash-permission-match.ts`). It has a specifier, so it is never tool-wide, and a marker is
+	// not a star, so it is not a blind tail of its own. Auto mode must leave such a rule exactly as it is —
+	// otherwise the offer the user just accepted would be stashed the moment auto mode starts.
+	const SURVIVES: string[] = [
+		'echo "exit $…"',
+		"grep -n $… src/",
+		"git show $…",
+		"cat $…/notes.md",
+		"echo $…-$…",
+		"npm run test $…",
+	]
+
+	for (const content of SURVIVES) {
+		it(`keeps Bash(${content}) in force`, () => {
+			expect(isDangerousBashPermission("Bash", content)).toBe(false)
+			const { active, stashed } = stripDangerousPermissionRules([allowRule(`Bash(${content})`)])
+			expect(labelled(active)).toEqual([`allow:Bash(${content})`])
+			expect(stashed).toEqual([])
+		})
+	}
+
+	it("still strips a rule that is blind without its slot", () => {
+		// The question this module asks is "does it cover every invocation of a listed program", and the
+		// answer does not change because one word is unknown: `Bash(git $…)` covers every one-word `git`,
+		// `Bash(npm run $…)` every `npm run <script>`. Removing the markers to ask again only ever strips
+		// more, never less.
+		for (const content of ["git $…", "python3 $…", "npm run $…", "git * $…", "$…", "$… $…"]) {
+			expect(isDangerousBashPermission("Bash", content), content).toBe(true)
+		}
+	})
+
+	it("leaves the unmarked rules exactly where they were", () => {
+		// The change is additive: nothing without a marker may move, in either direction.
+		expect(isDangerousBashPermission("Bash", "git")).toBe(true)
+		expect(isDangerousBashPermission("Bash", "git show")).toBe(false)
+		expect(isDangerousBashPermission("Bash", "grep -n src/")).toBe(false)
+	})
+})

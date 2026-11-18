@@ -588,6 +588,39 @@ Prompt-once memory is keyed by `{category, entity}`; a `delete_recursive` grant 
 `./build` does not cover `./dist`, and a `write_outside` grant for `~/dev/other/` covers
 files under it only if the user chose the scope option.
 
+### 3.9 Run-time values: resolution and slot rules (2026-11-18)
+
+A command whose run-time values layer 0 cannot vouch for (`wc -l "$F"`, `git show "$(git rev-parse HEAD)"`)
+keeps its layer-0 verdict on the text. Two mechanisms work from the template parse (walker spec §6.8):
+
+**Resolution, per call** (`value-resolve.ts`, wired through the gate's `resolve` option). Before the gate
+decides a bash command that layer 0 neither allows nor rates `never`, the resolver fills in what can be known:
+- a variable from the environment pi's bash tool gives the shell (PATH and pi's session variables excluded), or
+  from a clean statement-level assignment earlier in the same command (`X=…;` or a newline — never an env
+  prefix, a pipeline, `&`, a conditional, or a name set by `export` / `read` / `for`; any such mention makes it
+  unknown);
+- a substitution, by running it, only when its command is one read-only verb on an explicit list, layer 0 rates
+  it allow on its own, it has no redirect, pipe or nested value, within 2 s and 4 KB.
+A value that is empty, contains a line break, would be split or globbed (unquoted with whitespace or `*?[`), is
+held by a variable named like a credential, or would be masked by the redaction rules is not resolved. The
+concrete command (each value single-quoted) is judged by the whole pipeline; the prompt shows the values used.
+Permission rules are asked about both spellings and the stricter answer wins. Nothing is resolved when pi's
+`shellCommandPrefix` or a non-bash `shellPath` is set. Known gap: the shell runs a substitution again, so its
+output can differ from what was judged; the read-only list keeps that small, and pi's input is not rewritten.
+
+**Slot rules, durable** (`slot-probe.ts`, `bash-permission-match.ts`, `bash-rule-argv.ts`). "Allow always" on
+such a command writes `$…` where the value sits (`Bash(grep -n $… src/)`) only when the value cannot change the
+verdict. Positional refusals first: command position, a family's command words, an unquoted value outside
+`echo`/`printf`, and any argument of a program that sends it off the machine (curl, wget, ssh, scp, rsync, gh, …)
+or of a leg whose category is network_send / remote_exec. Then probes: the leg is judged with one value per class
+the policy distinguishes (secret, outside-project, system-config, history and protected paths, `..` traversal,
+inside-project data, a remote path, a protected branch, the empty value, and the program's file-writing and force
+flags; flags are skipped after `--` or behind literal text in the same word, objects never), and every probe must
+give the same tier and category. `$…` matches exactly one run-time value — never a literal — in the same position
+and quoting; a rule covers a leg only if the probe passes again at match time (memoised), so a hand-written or
+stale slot rule on `rm` covers nothing. The never floor outranks every slot rule; deny/ask rules read `$…` as
+text; auto mode strips a slot rule only when it would be blind without its slot.
+
 ## 4. Model tasks (layer 1)
 
 All tasks use `temperature 0` — **except a GitHub Copilot endpoint, where `temperature` is measured to be

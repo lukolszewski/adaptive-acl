@@ -31,9 +31,11 @@ import {
 	suggestBashAllowRule,
 	suggestBashAllowRuleSet,
 } from "./bash-permission-match.ts"
-import { bashRuleView, envChangesExecution, type BashLeg, type BashRuleView } from "./bash-audit.ts"
-import { bashRuleCoversArgv, type RedirectTarget } from "./bash-rule-argv.ts"
+import { bashRuleView, envChangesExecution, fileTargetsOf, seeThroughWrappers, type BashLeg, type BashRuleView } from "./bash-audit.ts"
+import { bashRuleCoversArgv, SLOT_MARKER, type RedirectTarget } from "./bash-rule-argv.ts"
 import { evaluateToolCall } from "./risk-policy.ts"
+import { parseBashTemplate, type Slot, type TemplateCommand, type TemplateParse } from "./bash-ast.ts"
+import { probeSlots, type SlotSpace } from "./slot-probe.ts"
 import { grantsCover, type GrantStore } from "./session-grants.ts"
 import {
 	ledgerCovers,
@@ -223,6 +225,211 @@ function ruleMatchesToolCall(
 
 
 
+// ------------------------------------------------- the command that spells run-time values
+
+/** A leg of a command that spells run-time values: the plain leg, plus the slots the template parse found. */
+type SlotLeg = BashLeg & {
+	slots: Slot[]
+	/** The probe's answer for this leg, taken in this call — coverage condition 4. */
+	valuesInert: boolean
+}
+
+/** `probeSlots` answers per leg text and path space; the matcher asks on every call, so keep a few. */
+const PROBE_CACHE_LIMIT = 64
+const probeCache = new Map<string, boolean>()
+
+/**
+ * Would every plausible value in this leg be judged the way a plain one is? Memoised by the leg's text and
+ * the path space, because a matcher run asks once per candidate rule for the same leg.
+ */
+function valuesAreInert(leg: TemplateCommand, space: SlotSpace): boolean {
+	const key = `${leg.text}\u0000${space.cwd}\u0000${space.project}\u0000${space.home}`
+	const known = probeCache.get(key)
+	if (known !== undefined) return known
+	let verdict = false
+	try {
+		verdict = probeSlots(leg, space).inert
+	} catch {
+		// A probe that throws has not vouched for anything, which is the answer that covers nothing.
+		verdict = false
+	}
+	if (probeCache.size >= PROBE_CACHE_LIMIT) {
+		const oldest = probeCache.keys().next()
+		if (!oldest.done) probeCache.delete(oldest.value)
+	}
+	probeCache.set(key, verdict)
+	return verdict
+}
+
+/** One template leg in the shape the coverage walk reads — the fields `bash-audit.ts` `toLeg` fills. */
+function slotLegOf(leg: TemplateCommand, valuesInert: boolean): SlotLeg {
+	const prefix = leg.envVars.map((e) => `${e.name}=${e.value}`)
+	const peeled = seeThroughWrappers(leg.argv)
+	const env = [...leg.envVars, ...(peeled ? peeled.env : [])]
+	return {
+		text: leg.text,
+		argv: leg.argv,
+		withAssignments: prefix.length > 0 ? [...prefix, ...leg.argv] : leg.argv,
+		inner: peeled ? peeled.argv : null,
+		envNames: env.map((e) => e.name),
+		env,
+		opaque: leg.opaque,
+		targets: fileTargetsOf(leg.redirects),
+		slots: leg.slots,
+		valuesInert,
+	}
+}
+
+/**
+ * The command text with a plain word in every slot: what the probe judged as its baseline, and therefore the
+ * right text for the two questions that are about the whole command rather than about one value.
+ *
+ * `x` needs no quoting in any position (quoted, unquoted, inside a word), which is why it is the value every
+ * slot gets. Spans are into the whole command and are replaced back to front, so earlier offsets stay valid.
+ */
+function fillSlotsWithPlainValue(command: string, legs: readonly TemplateCommand[]): string | null {
+	const slots = legs.flatMap((leg) => leg.slots).sort((a, b) => b.span[0] - a.span[0])
+	let text = command
+	for (const slot of slots) {
+		const [from, to] = slot.span
+		if (!(to > from) || !text.slice(from, from + 1).startsWith("$")) return null
+		text = text.slice(0, from) + "x" + text.slice(to)
+	}
+	return text
+}
+
+/**
+ * The verdict the walker cannot give for a command whose words spell values: the same command with a plain
+ * word in each slot, which is the text the probe judged as its baseline. Null when that command is not
+ * provable either, which is the fail-closed reading.
+ */
+function filledRuleView(
+	command: string,
+	legs: readonly TemplateCommand[],
+	cwd: string,
+): BashRuleView | null {
+	const filled = fillSlotsWithPlainValue(command, legs)
+	if (filled === null) return null
+	try {
+		const view = bashRuleView(filled, cwd)
+		return view.proven ? view : null
+	} catch {
+		return null
+	}
+}
+
+/**
+ * May a rule speak for this leg at all? False for a leg at the never floor — the floor outranks every rule,
+ * so covering it would only hide why the gate denies the command.
+ */
+function legIsCoverable(text: string, cwd: string): boolean {
+	try {
+		const view = bashRuleView(text, cwd)
+		return view.proven && !view.floored
+	} catch {
+		return false
+	}
+}
+
+/**
+ * The legs of a command whose arguments hold run-time values — or null when the template reading cannot be
+ * trusted for it.
+ *
+ * Null is the fail-closed answer and means "answer as before", which for a command the walker refuses is: no
+ * allow rule covers it. It is returned for a command that is not a template at all, for a leg carrying a value
+ * the probe will not vouch for, and for a command at the never floor. The floor is why the whole command is
+ * asked about, separately from the probe: a value can hide it, because `rm -rf / "$X"` is judged the same
+ * whatever `$X` turns out to be, so the probe has nothing to complain about.
+ */
+function templateLegsOf(
+	command: string,
+	cwd: string,
+	view: BashRuleView,
+): { legs: SlotLeg[]; strictOperands: boolean } | null {
+	let parsed: TemplateParse
+	try {
+		parsed = parseBashTemplate(command)
+	} catch {
+		return null
+	}
+	if (parsed.kind !== "simple" || parsed.commands.length === 0) return null
+	if (!parsed.commands.some((leg) => leg.slots.length > 0)) return null
+
+	// The same three roots layer 0 judges the command in, so a probe decides the verdict the gate would.
+	const space: SlotSpace = { cwd, project: cwd, home: homedir() }
+	const legs: SlotLeg[] = []
+	for (const leg of parsed.commands) {
+		if (leg.envVars.some((e) => envChangesExecution(e.name, e.value))) return null
+		if (leg.slots.length === 0) {
+			// A leg with no value of its own: a `cd x` in front, or the command a substitution runs. The
+			// filled command's verdict cannot speak for that one (it is not in that text), so ask about it
+			// here — and a leg at the never floor is never coverable, whatever the rule says.
+			if (leg.argv.length === 0 || leg.opaque) return null
+			if (!legIsCoverable(leg.text, cwd)) return null
+			legs.push(slotLegOf(leg, true))
+			continue
+		}
+		const inert = valuesAreInert(leg, space)
+		if (!inert) return null
+		legs.push(slotLegOf(leg, inert))
+	}
+
+	// When the walker did vouch for the command, its verdict is the one to trust. When it refused only
+	// because of a value, the same questions are asked of the command with a plain value in place of each
+	// slot — the text the probe judged, with `cd` tracking, wrappers and privilege escalation all in one
+	// verdict. Either way the floor is the floor.
+	let floor: BashRuleView
+	if (view.proven) {
+		floor = view
+	} else {
+		const filled = filledRuleView(command, parsed.commands, cwd)
+		if (filled === null) return null
+		floor = filled
+	}
+	if (!floor.proven || floor.floored) return null
+	return { legs, strictOperands: floor.strictOperands }
+}
+
+/**
+ * AND across legs: every leg covered by some allow rule, over the spellings that leg may be matched in.
+ *
+ * The spellings are the walker's argv, that argv with the `NAME=value` prefix spelled back in, and the argv
+ * seen through a wrapper (`legSpellings`). A leg with run-time values has exactly one spelling instead: its
+ * argv, with `Leg.slots` in the coverage so only a specifier that spells those values can cover it — and
+ * `slotAllowed` carrying the probe's answer for this very call.
+ */
+function coverLegs(
+	legs: readonly SlotLeg[],
+	strictOperands: boolean,
+	cwd: string,
+	rules: PermissionRule[],
+	allowRules: PermissionRule[],
+	authority?: RedirectAuthority,
+): { rules: string[]; source: PermissionRuleSource } | null {
+	const targetAllowed = redirectAuthority(cwd, rules, authority)
+	const covered: string[] = []
+	let source: PermissionRuleSource | undefined
+	for (const leg of legs) {
+		const spellings = leg.slots.length > 0 ? [leg.argv] : legSpellings(leg)
+		if (spellings.length === 0) return null
+		// One coverage question per leg: the strictness flag is the command's (the verdict is not labelled
+		// per leg) and the targets are the leg's (a compound's second clause writes a different file).
+		const coverage = {
+			strictOperands,
+			targets: leg.targets,
+			targetAllowed,
+			slots: leg.slots,
+			slotAllowed: () => leg.valuesInert,
+		}
+		const hit = allowRules.find((r) => spellings.some((argv) => bashRuleCoversArgv(r, argv, coverage)))
+		if (!hit) return null
+		covered.push(`${leg.text} \u2190 ${permissionRuleValueToString(hit.ruleValue)}`)
+		if (source === undefined) source = hit.source
+	}
+	if (source === undefined) return null
+	return { rules: covered, source }
+}
+
 /**
  * Per-leg AND for allow rules, over the walker's legs instead of over a re-split of the text.
  *
@@ -237,6 +444,12 @@ function ruleMatchesToolCall(
  *     argv exists to have been authorised), an `opaque` leg (a run-time value in a literal's costume), a
  *     leg whose environment changes execution, and the never floor — a wrapper, a `&&` or a rule
  *     may not launder severity, so `sudo rm -rf /` stays `never`;
+ *   - one exception, and it is not a loosening of the above: a command whose arguments hold run-time values
+ *     becomes coverable when a stored rule SPELLS those values (`$…`) and the probe still says they are
+ *     inert ({@link templateLegsOf}). The values are then described rather than guessed at, which is the
+ *     whole difference between an `opaque` leg with nothing to say about it and a slot rule that says where
+ *     the value goes. Everything else about the command — its words, its targets, the floor, the probe — is
+ *     checked exactly as it is for any other leg;
  *   - strict operands where the verdict says the command's risk is the targets it names: there a rule
  *     has to name every word the call passes, so an approval written for one target cannot be spent on
  *     another (`bash-audit.ts` owns the category table; `bash-rule-argv.ts` owns the matching);
@@ -281,25 +494,18 @@ function bashAllowRulesCoverCommand(
 	} catch {
 		return null
 	}
+
+	// A `$…` specifier is the only thing that can cover a leg carrying a run-time value, so the template
+	// reading — a second parse plus one policy evaluation per slot — is only paid for when one is present.
+	const slotRule = allowRules.some((r) => (r.ruleValue.ruleContent ?? "").includes(SLOT_MARKER))
+	const needsTemplate = slotRule && (!view.proven || view.legs.some((leg) => leg.opaque))
+	const template = needsTemplate ? templateLegsOf(command, cwd, view) : null
+	if (template !== null) return coverLegs(template.legs, template.strictOperands, cwd, rules, allowRules, authority)
+
 	if (!view.proven) return null
 	if (view.floored) return null
-
-	const targetAllowed = redirectAuthority(cwd, rules, authority)
-	const covered: string[] = []
-	let source: PermissionRuleSource | undefined
-	for (const leg of view.legs) {
-		const spellings = legSpellings(leg)
-		if (spellings.length === 0) return null
-		// One coverage question per leg: the strictness flag is the command's (the verdict is not labelled
-		// per leg) and the targets are the leg's (a compound's second clause writes a different file).
-		const coverage = { strictOperands: view.strictOperands, targets: leg.targets, targetAllowed }
-		const hit = allowRules.find((r) => spellings.some((argv) => bashRuleCoversArgv(r, argv, coverage)))
-		if (!hit) return null
-		covered.push(`${leg.text} \u2190 ${permissionRuleValueToString(hit.ruleValue)}`)
-		if (source === undefined) source = hit.source
-	}
-	if (source === undefined) return null
-	return { rules: covered, source }
+	const plainLegs: SlotLeg[] = view.legs.map((leg) => ({ ...leg, slots: [], valuesInert: true }))
+	return coverLegs(plainLegs, view.strictOperands, cwd, rules, allowRules, authority)
 }
 
 /**
